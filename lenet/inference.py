@@ -15,23 +15,51 @@ from lenet5 import BrainMRILeNet
 
 # Import the helper functions
 from utils import (
-    compute_integer_multiplier,
-    get_quantization_params,
-    get_bias_quantization_params,
-    compute_multiplier,
-    quantize_tensor,
-    integer_conv2d,
-    integer_linear,
+    get_fractional_bits,
+    quantize_fixed_point,
+    dequantize_fixed_point,
+    downscale_fixed_point,
+    fixed_point_relu,
+    fixed_point_conv2d,
+    fixed_point_linear,
     add_bias,
-    downscale_and_cast,
-    quantized_relu,
 )
 
 
 # -----------------------------
-# Debug trace storage
+# Debug / logging storage
 # -----------------------------
 debug_trace = {"input": {}, "layers": [], "pooling": []}
+
+# Detailed fixed-point log written when --log is enabled
+fixed_point_log = {"input": {}, "layers": []}
+
+
+def _decompose_fixed_point_tensor(q_tensor: torch.Tensor, f_bits: int):
+    """Return sign, integer, and fractional parts for a Q-format tensor.
+
+    For each element q in the integer tensor, we interpret it as:
+        q = sign * (integer_part * 2^f_bits + fractional_part)
+
+    and record sign bit (0/1), integer_part, and fractional_part.
+    """
+
+    q_int32 = q_tensor.to(torch.int32)
+    sign = (q_int32 < 0).int()
+    abs_q = q_int32.abs()
+
+    if f_bits > 0:
+        integer_part = abs_q >> f_bits
+        fractional_part = abs_q & ((1 << f_bits) - 1)
+    else:
+        integer_part = abs_q
+        fractional_part = torch.zeros_like(integer_part)
+
+    return {
+        "sign": sign.cpu().tolist(),
+        "integer": integer_part.cpu().tolist(),
+        "fractional": fractional_part.cpu().tolist(),
+    }
 
 
 # -----------------------------
@@ -109,20 +137,18 @@ activation_ranges = {}
 
 
 def calibration_hook(module, input, output, name):
-    """Hook to capture the min and max of activations during the forward pass."""
+    """Hook to capture the absolute max of activations during the forward pass."""
     in_tensor = input[0].detach()
     out_tensor = output.detach()
 
     activation_ranges[name] = {
-        "in_min": in_tensor.min().item(),
-        "in_max": in_tensor.max().item(),
-        "out_min": out_tensor.min().item(),
-        "out_max": out_tensor.max().item(),
+        "in_abs_max": in_tensor.abs().max().item(),
+        "out_abs_max": out_tensor.abs().max().item(),
     }
 
 
 def _get_layer_config(model):
-    """Return the conv/fc modules for calibration and integer inference.
+    """Return the conv/fc modules for calibration and Fixed-Point inference.
 
     LeNet5 and BrainMRILeNet have different Sequential layouts, so we
     centralize the index mapping here.
@@ -181,134 +207,107 @@ def register_hooks(model):
     return handles
 
 
-# -----------------------------
-# 4. Core Integer Inference Engine
-# -----------------------------
-def run_integer_layer(
-    q_input, layer, layer_name, scale_in, zp_in, apply_relu=True, is_conv=False
+def run_fixed_point_layer(
+    q_input, layer, layer_name, f_in, apply_relu=True, is_conv=False, log_details=False
 ):
     """
-    Executes a single layer entirely in integer arithmetic.
+    Executes a single layer entirely in Dynamic Fixed-Point arithmetic.
     """
-    # 1. Get float weights and calculate their quantization params
+    # 1. Weights
     weight_float = layer.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
-    # 2. Calculate output activation params from calibration data
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]])
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    f_w = get_fractional_bits(weight_float, num_bits=8)
+    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
 
-    # 3. Quantize Bias to int32
-    bias_float = layer.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
+    # 2. Output ranges
+    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
+    pseudo_out = torch.tensor([out_abs_max])
+    f_out = get_fractional_bits(pseudo_out, num_bits=8)
 
-    # 4. Calculate Downscale Multiplier (Offline Simulation)
-    # This now returns the int32 M0 and the bit-shift n
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    # --- Execute Integer Math (Online Simulation) ---
-    if is_conv:
-        int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w)
+    # 3. Bias (Must match the accumulator's fractional bits exactly)
+    f_accum = f_w + f_in
+    if layer.bias is not None:
+        bias_float = layer.bias.detach()
+        q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
     else:
-        int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
+        q_bias = torch.zeros(layer.out_channels, dtype=torch.int32)
+
+    # --- Execute Integer Math ---
+    if is_conv:
+        int32_accum = fixed_point_conv2d(q_input, q_w, stride=layer.stride[0], padding=layer.padding[0])
+    else:
+        int32_accum = fixed_point_linear(q_input, q_w)
+        
     int32_accum = add_bias(int32_accum, q_bias)
 
-    # Pass the integer multiplier and shift instead of the float M
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
+    # 4. Downscale and shift
+    shift_amount = f_accum - f_out
+    q_out = downscale_fixed_point(int32_accum, shift_amount)
 
     if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
+        q_out = fixed_point_relu(q_out)
 
-    # Log layer details for debugging/analysis
-    layer_log = {
+    debug_trace["layers"].append({
         "layer_name": layer_name,
         "type": "conv" if is_conv else "linear",
-        "input": {
-            "scale": float(scale_in),
-            "zero_point": int(zp_in),
-            "tensor": q_input.cpu().numpy().tolist(),
-        },
-        "weights": {
-            "scale": float(scale_w),
-            "zero_point": int(zp_w),
-            "float": weight_float.cpu().numpy().tolist(),
-            "quantized": q_w.cpu().numpy().tolist(),
-        },
-        "bias": {
-            "scale": float(scale_bias),
-            "zero_point": int(zp_bias),
-            "float": bias_float.cpu().numpy().tolist(),
-            "quantized": q_bias.cpu().numpy().tolist(),
-        },
-        "multiplier": {
-            "M0": int(q_M0),
-            "shift": int(shift),
-        },
-        "accumulator": int32_accum.cpu().numpy().tolist(),
-        "output": {
-            "scale": float(scale_out),
-            "zero_point": int(zp_out),
-            "tensor": q_out.cpu().numpy().tolist(),
-        },
-    }
+        "f_in": f_in, "f_w": f_w, "f_out": f_out, "shift": shift_amount,
+    })
 
-    debug_trace["layers"].append(layer_log)
+    # Optional detailed per-layer fixed-point logging
+    if log_details:
+        global fixed_point_log
+        fixed_point_log.setdefault("layers", [])
+        fixed_point_log["layers"].append(
+            {
+                "layer_name": layer_name,
+                "type": "conv" if is_conv else "linear",
+                "f_in": f_in,
+                "f_w": f_w,
+                "f_out": f_out,
+                "shift": shift_amount,
+                "weights": {
+                    "f": f_w,
+                    "decomposition": _decompose_fixed_point_tensor(q_w, f_w),
+                },
+                "bias": {
+                    "f": f_accum,
+                    "decomposition": _decompose_fixed_point_tensor(q_bias, f_accum),
+                },
+                "input": {
+                    "f": f_in,
+                    "decomposition": _decompose_fixed_point_tensor(q_input, f_in),
+                },
+                "output": {
+                    "f": f_out,
+                    "decomposition": _decompose_fixed_point_tensor(q_out, f_out),
+                },
+            }
+        )
 
-    return (
-        q_out,
-        scale_out,
-        zp_out,
-        (scale_w, zp_w),
-        (scale_bias, zp_bias),
-        (q_M0, shift),
-    )
+    return q_out, f_out, f_w, shift_amount
 
 
-def avg_pool_uint8(q_tensor, name=None):
-    """Pure integer 2x2 average pooling with stride 2.
-
-    Also logs input and output activations for debugging.
-    """
-    # 1. Cast to int32 to prevent overflow when summing the 4 pixels
-    # (Max sum of four uint8s is 1020, so int16 would also work, but int32 is safe)
+def avg_pool_fixed_point(q_tensor, name=None):
+    """Pure integer 2x2 average pooling with stride 2 for fixed-point int8."""
     q_int32 = q_tensor.to(torch.int32)
-
     B, C, H, W = q_int32.shape
 
-    # 2. Reshape the tensor to isolate the 2x2 spatial windows
-    # Shape becomes: [Batch, Channels, Height/2, 2, Width/2, 2]
     windows = q_int32.view(B, C, H // 2, 2, W // 2, 2)
-
-    # 3. Sum over the 2x2 window dimensions (dim 3 and 5)
-    # Shape becomes: [Batch, Channels, Height/2, Width/2]
     window_sums = windows.sum(dim=(3, 5))
 
-    # 4. Divide by 4 using a right bit-shift by 2.
-    # We add 2 before shifting to achieve "round-to-nearest" behavior.
+    # Divide by 4 (shift by 2) with round-to-nearest
     rounded_avg = (window_sums + 2) >> 2
 
-    # 5. Cast securely back to uint8
-    pooled = rounded_avg.to(torch.uint8)
+    # Cast securely back to int8
+    pooled = torch.clamp(rounded_avg, -128, 127).to(torch.int8)
 
-    # Log pooling activations
-    pool_log = {
-        "name": name or "pool",
-        "kernel_size": [2, 2],
-        "stride": [2, 2],
-        "input_tensor": q_tensor.cpu().numpy().tolist(),
-        "output_tensor": pooled.cpu().numpy().tolist(),
-    }
-    debug_trace["pooling"].append(pool_log)
-
+    debug_trace["pooling"].append({"name": name or "pool"})
     return pooled
 
 
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
-def main(infer_data):
+def main(infer_data, log=False):
     print("--- Starting Quantized Inference Pipeline ---")
 
     name = infer_data.upper()
@@ -352,121 +351,105 @@ def main(infer_data):
     print(f"[2] Calibration complete. Float Model Prediction: {float_pred}")
 
     # Quantize Input Image
-    in_range = activation_ranges["conv1"]
-    pseudo_in_tensor = torch.tensor([in_range["in_min"], in_range["in_max"]])
-    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=8)
+    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
+    pseudo_in_tensor = torch.tensor([in_abs_max])
+    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
 
-    q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
-    # save the image from q_x for visualization (do not dequantize) save it as quantized_sample.png
-    # q_x has shape [1, 1, 28, 28] and dtype uint8; save directly as an 8-bit grayscale image.
-    q_x_img = q_x[0, 0].cpu().numpy().astype("uint8")
-    Image.fromarray(q_x_img, mode="L").save(
-        f"{infer_data.lower()}_quantized_sample.png"
-    )
+    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
+    
+    q_x_img = torch.clamp(q_x[0, 0].to(torch.int16) + 128, 0, 255).to(torch.uint8).cpu().numpy()
+    Image.fromarray(q_x_img, mode="L").save(f"{infer_data.lower()}_quantized_sample.png")
 
-    # Log quantized input tensor
+    # Log the fixed-point input state for basic debug trace
     debug_trace["input"] = {
-        "scale": float(scale_in),
-        "zero_point": int(zp_in),
+        "f_in": f_in,
         "float_tensor": image_tensor.cpu().numpy().tolist(),
         "quantized_tensor": q_x.cpu().numpy().tolist(),
     }
 
-    print("\n[3] Executing Integer-Only Inference...")
+    # Optional detailed fixed-point decomposition for the input tensor
+    if log:
+        global fixed_point_log
+        fixed_point_log = {"input": {}, "layers": []}
+        fixed_point_log["input"] = {
+            "f": f_in,
+            "decomposition": _decompose_fixed_point_tensor(q_x, f_in),
+        }
 
-    # Network Forward Pass (Indexing according to architecture config)
+    print("\n[3] Executing Dynamic Fixed-Point Inference...")
+
     layer_cfg = _get_layer_config(model)
 
-    q_x, s_out, z_out, p_w, p_b, M = run_integer_layer(
-        q_x,
-        layer_cfg["conv1"],
-        "conv1",
-        scale_in,
-        zp_in,
-        apply_relu=True,
-        is_conv=True,
+    q_x, f_out, f_w, shift = run_fixed_point_layer(
+        q_x, layer_cfg["conv1"], "conv1", f_in, apply_relu=True, is_conv=True, log_details=log
     )
-    print("M: ", M)
-    q_x = avg_pool_uint8(q_x, name="pool_after_conv1")
+    q_x = avg_pool_fixed_point(q_x, name="pool_after_conv1")
 
-    q_x, s_out, z_out, p_w, p_b, M = run_integer_layer(
-        q_x,
-        layer_cfg["conv2"],
-        "conv2",
-        s_out,
-        z_out,
-        apply_relu=True,
-        is_conv=True,
+    q_x, f_out, f_w, shift = run_fixed_point_layer(
+        q_x, layer_cfg["conv2"], "conv2", f_out, apply_relu=True, is_conv=True, log_details=log
     )
-    q_x = avg_pool_uint8(q_x, name="pool_after_conv2")
+    q_x = avg_pool_fixed_point(q_x, name="pool_after_conv2")
 
     q_x = q_x.view(q_x.size(0), -1)  # Flatten
 
-    q_x, s_out, z_out, p_w, p_b, M = run_integer_layer(
-        q_x,
-        layer_cfg["fc1"],
-        "fc1",
-        s_out,
-        z_out,
-        apply_relu=True,
-        is_conv=False,
+    q_x, f_out, f_w, shift = run_fixed_point_layer(
+        q_x, layer_cfg["fc1"], "fc1", f_out, apply_relu=True, is_conv=False, log_details=log
     )
-    q_x, s_out, z_out, p_w, p_b, M = run_integer_layer(
-        q_x,
-        layer_cfg["fc2"],
-        "fc2",
-        s_out,
-        z_out,
-        apply_relu=True,
-        is_conv=False,
+    q_x, f_out, f_w, shift = run_fixed_point_layer(
+        q_x, layer_cfg["fc2"], "fc2", f_out, apply_relu=True, is_conv=False, log_details=log
     )
+    fc3_f_in = f_out
 
     # Final Layer (No ReLU)
-    q_out, final_s, final_z, final_w, final_b, final_M = run_integer_layer(
-        q_x,
-        layer_cfg["fc3"],
-        "fc3",
-        s_out,
-        z_out,
-        apply_relu=False,
-        is_conv=False,
+    # Use 'final_' prefixes so we don't overwrite the previous variables
+    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_layer(
+        q_x, layer_cfg["fc3"], "fc3", fc3_f_in, apply_relu=False, is_conv=False, log_details=log
     )
 
-    # Dequantize final output to get logits (for comparison/analysis)
-    int_logits = q_out.to(torch.float32)
-    dequantized_logits = final_s * (int_logits - final_z)
+    # Dequantize final output using fixed-point math
+    dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
     int_pred = dequantized_logits.argmax(dim=1).item()
+
     # -----------------------------
     # 6. Summary Logging
     # -----------------------------
     print("\n" + "=" * 40)
     print(" INFERENCE SUMMARY ")
     print("=" * 40)
-    print(f"True Label:               {true_label}")
-    print(f"Float Model Prediction:   {float_pred}")
-    print(f"Integer Model Prediction: {int_pred}")
+    print(f"True Label:                   {true_label}")
+    print(f"Float Model Prediction:       {float_pred}")
+    print(f"Fixed Point Model Prediction: {int_pred}")
 
     if float_pred == int_pred:
         print(
-            "\nSuccess! The integer-quantized model matches the floating-point prediction."
+            "\nSuccess! The Fixed-Point-quantized model matches the floating-point prediction."
         )
     else:
         print(
             "\nNote: The predictions differ. This can happen with 8-bit quantization on border cases, but usually, they match."
         )
 
-    print("\n--- Final Layer Quantization Stats ---")
-    print(f"Weight Scale:      {final_w[0]:.6f}  | Zero-Point: {final_w[1]}")
-    print(f"Bias Scale:        {final_b[0]:.6f}  | Zero-Point: {final_b[1]}")
-    print(f"Multiplier (M):    {final_M}")
-    print(f"Output Scale:      {final_s:.6f}  | Zero-Point: {final_z}")
+    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
+    print(f"Input Fractional Bits (f_in):         {fc3_f_in}") 
+    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
+    print(f"Accumulator Fractional Bits:          {fc3_f_in + final_f_w}")
+    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
+    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
     print("=" * 40)
 
-    # Save debug trace to JSON for offline inspection
-    # trace_path = "integer_inference_trace.json"
-    # with open(trace_path, "w") as f:
-    #     json.dump(debug_trace, f, indent=2)
-    # print(f"\nSaved integer inference trace to {trace_path}")
+    # Optionally write detailed fixed-point log to inference.json
+    if log:
+        fixed_point_log.setdefault("meta", {})
+        fixed_point_log["meta"] = {
+            "dataset": infer_data,
+            "true_label": int(true_label),
+            "float_prediction": int(float_pred),
+            "fixed_point_prediction": int(int_pred),
+        }
+        log_path = "inference.json"
+        with open(log_path, "w") as f:
+            json.dump(fixed_point_log, f, indent=2)
+        print(f"\nSaved detailed fixed-point log to {log_path}")
 
 
 if __name__ == "__main__":
@@ -477,5 +460,10 @@ if __name__ == "__main__":
         default="MNIST",
         help="Inference data to use",
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Log per-layer fixed-point sign, integer, and fractional parts to inference.json",
+    )
     args = parser.parse_args()
-    main(args.infer)
+    main(args.infer, log=args.log)

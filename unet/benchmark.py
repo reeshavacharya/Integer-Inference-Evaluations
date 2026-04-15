@@ -1,8 +1,8 @@
-"""Benchmark float vs integer inference on Skin-Lesion and Flood.
+"""Benchmark float vs fixed-point inference on Skin-Lesion and Flood.
 
-Runs the same models and integer pipeline as inference.py over the
-corresponding 10% test splits (from u_net.setup_data) and saves
-accuracies to benchmark_results.json in the form:
+Runs the same models and Dynamic Fixed-Point pipeline as inference.py over the
+corresponding 10% test splits (from u_net.setup_data) and saves accuracies to
+benchmark_results.json in the form:
 
 {
     "Skin-Lesion": {
@@ -23,13 +23,14 @@ import torch
 
 import inference
 import u_net
+from utils import get_fractional_bits, quantize_fixed_point, dequantize_fixed_point
 
 
 def _disable_inference_debug_trace() -> None:
     """Turn off heavy debug logging in inference when benchmarking.
 
-    This prevents run_integer_layer/pool_uint8 from storing full tensors
-    in inference.debug_trace while we iterate over the test set.
+    This prevents run_fixed_point_layer/pool_fixed_point from storing full
+    tensors in inference.debug_trace while we iterate over the test set.
     """
 
     class _NoOpList(list):
@@ -104,7 +105,12 @@ def _compute_metrics_from_logits(logits: torch.Tensor, masks: torch.Tensor):
     return dice, iou, acc, f1
 
 
-def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = None) -> dict:
+def _float_metrics(
+    model: torch.nn.Module,
+    loader,
+    dataset_name: str,
+    num_data: Optional[int] = None,
+) -> dict:
     """Compute average float Dice, IoU, accuracy, F1 over the test loader.
 
     If num_data is provided, only the first num_data samples from the loader
@@ -114,6 +120,19 @@ def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = Non
     # Accumulate confusion counts across all batches
     tp = tn = fp = fn = 0.0
     seen = 0
+
+    # Determine how many samples we expect to process
+    total_samples: Optional[int]
+    if hasattr(loader, "dataset"):
+        total_samples = len(loader.dataset)
+    else:
+        total_samples = None
+    if num_data is not None and total_samples is not None:
+        total_samples = min(total_samples, num_data)
+    elif num_data is not None:
+        total_samples = num_data
+
+    print(f"[float][{dataset_name}] starting benchmark; total samples: {total_samples or 'unknown'}")
 
     with torch.no_grad():
         for images, masks in loader:
@@ -140,6 +159,12 @@ def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = Non
 
             seen += images.size(0)
 
+            if total_samples is not None:
+                remaining = max(total_samples - seen, 0)
+                print(
+                    f"[float][{dataset_name}] processed {seen}/{total_samples} samples (remaining {remaining})"
+                )
+
     eps = 1e-7
     dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
     iou = (tp + eps) / (tp + fp + fn + eps)
@@ -152,14 +177,32 @@ def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = Non
     return {"dice": dice, "iou": iou, "acc": acc, "f1": f1}
 
 
-def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = None) -> dict:
-    """Compute average integer Dice, IoU, accuracy, F1 using integer UNet path.
+def _integer_metrics(
+    model: torch.nn.Module,
+    loader,
+    dataset_name: str,
+    num_data: Optional[int] = None,
+) -> dict:
+    """Compute average fixed-point Dice, IoU, accuracy, F1 using UNet path.
 
-    This mirrors the integer-only path in inference.main, but runs over
+    This mirrors the Dynamic Fixed-Point path in inference.main, but runs over
     all batches from the 10% test DataLoader.
     """
     tp = tn = fp = fn = 0.0
     seen = 0
+
+    # Determine how many samples we expect to process
+    total_samples: Optional[int]
+    if hasattr(loader, "dataset"):
+        total_samples = len(loader.dataset)
+    else:
+        total_samples = None
+    if num_data is not None and total_samples is not None:
+        total_samples = min(total_samples, num_data)
+    elif num_data is not None:
+        total_samples = num_data
+
+    print(f"[fixed-point][{dataset_name}] starting benchmark; total samples: {total_samples or 'unknown'}")
 
     for images, masks in loader:
         if num_data is not None and seen >= num_data:
@@ -169,6 +212,7 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
             keep = num_data - seen
             images = images[:keep]
             masks = masks[:keep]
+
         # 1) Calibration for this batch (float forward pass with hooks)
         inference.activation_ranges.clear()
         handles = inference.register_hooks(model)
@@ -177,180 +221,88 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
         for h in handles:
             h.remove()
 
-        # 2) Quantize input using conv1 input range
-        in_range = inference.activation_ranges["conv1"]
-        pseudo_in_tensor = torch.tensor(
-            [in_range["in_min"], in_range["in_max"]]
-        )
-        scale_in, zp_in = inference.get_quantization_params(
-            pseudo_in_tensor, num_bits=8
-        )
-        q_x = inference.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
+        # 2) Quantize input using conv1 input range (Dynamic Fixed-Point)
+        in_abs_max = inference.activation_ranges["conv1"]["in_abs_max"]
+        pseudo_in_tensor = torch.tensor([in_abs_max])
+        f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
+        q_x = quantize_fixed_point(images, f_in, dtype=torch.int8)
 
-        # 3) Integer forward pass (mirrors inference.main integer path)
+        # 3) Fixed-Point forward pass (mirrors inference.main UNet path)
         cfg = inference._get_layer_config(model)
 
         # Encoder block 1
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv1"], "conv1", scale_in, zp_in, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv2"], "conv2", s, z, apply_relu=True
-        )
-        q_e12, s_e12, z_e12 = q_x, s, z
-        q_x = inference.pool_uint8(q_x, name="pool1")
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv1"], "conv1", f_in, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv2"], "conv2", f_out, apply_relu=True)
+        q_e12, f_e12 = q_x, f_out
+        q_x = inference.pool_fixed_point(q_x, name="pool1")
 
         # Encoder block 2
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv3"], "conv3", s, z, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv4"], "conv4", s, z, apply_relu=True
-        )
-        q_e22, s_e22, z_e22 = q_x, s, z
-        q_x = inference.pool_uint8(q_x, name="pool2")
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv3"], "conv3", f_out, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv4"], "conv4", f_out, apply_relu=True)
+        q_e22, f_e22 = q_x, f_out
+        q_x = inference.pool_fixed_point(q_x, name="pool2")
 
         # Encoder block 3
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv5"], "conv5", s, z, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv6"], "conv6", s, z, apply_relu=True
-        )
-        q_e32, s_e32, z_e32 = q_x, s, z
-        q_x = inference.pool_uint8(q_x, name="pool3")
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv5"], "conv5", f_out, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv6"], "conv6", f_out, apply_relu=True)
+        q_e32, f_e32 = q_x, f_out
+        q_x = inference.pool_fixed_point(q_x, name="pool3")
 
         # Encoder block 4
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv7"], "conv7", s, z, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv8"], "conv8", s, z, apply_relu=True
-        )
-        q_e42, s_e42, z_e42 = q_x, s, z
-        q_x = inference.pool_uint8(q_x, name="pool4")
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv7"], "conv7", f_out, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv8"], "conv8", f_out, apply_relu=True)
+        q_e42, f_e42 = q_x, f_out
+        q_x = inference.pool_fixed_point(q_x, name="pool4")
 
-        # Bottom
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv9"], "conv9", s, z, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv10"], "conv10", s, z, apply_relu=True
-        )
+        # Bottleneck
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv9"], "conv9", f_out, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv10"], "conv10", f_out, apply_relu=True)
 
         # Decoder block 1 (skip from conv8)
-        q_x, s_up1, z_up1, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["upconv1"], "upconv1", s, z, apply_relu=False
-        )
-
-        s_cat1, z_cat1 = inference.get_concat_quantization_params(
-            inference.activation_ranges, "upconv1", "conv8"
-        )
-        M0_up1, shift_up1 = inference.compute_requantize_multiplier(s_up1, s_cat1)
-        M0_e42, shift_e42 = inference.compute_requantize_multiplier(s_e42, s_cat1)
-
-        q_x_aligned = inference.requantize_tensor(
-            q_x, z_up1, z_cat1, M0_up1, shift_up1
-        )
-        q_skip_aligned = inference.requantize_tensor(
-            q_e42, z_e42, z_cat1, M0_e42, shift_e42
-        )
-
+        q_x, f_up1, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv1"], "upconv1", f_out, apply_relu=False)
+        f_cat1 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv1", "conv8")
+        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up1, f_cat1)
+        q_skip_aligned = inference.align_tensor_for_concat(q_e42, f_e42, f_cat1)
         q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_cat, cfg["conv11"], "conv11", s_cat1, z_cat1, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv12"], "conv12", s, z, apply_relu=True
-        )
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv11"], "conv11", f_cat1, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv12"], "conv12", f_out, apply_relu=True)
 
         # Decoder block 2 (skip from conv6)
-        q_x, s_up2, z_up2, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["upconv2"], "upconv2", s, z, apply_relu=False
-        )
-
-        s_cat2, z_cat2 = inference.get_concat_quantization_params(
-            inference.activation_ranges, "upconv2", "conv6"
-        )
-        M0_up2, shift_up2 = inference.compute_requantize_multiplier(s_up2, s_cat2)
-        M0_e32, shift_e32 = inference.compute_requantize_multiplier(s_e32, s_cat2)
-
-        q_x_aligned = inference.requantize_tensor(
-            q_x, z_up2, z_cat2, M0_up2, shift_up2
-        )
-        q_skip_aligned = inference.requantize_tensor(
-            q_e32, z_e32, z_cat2, M0_e32, shift_e32
-        )
-
+        q_x, f_up2, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv2"], "upconv2", f_out, apply_relu=False)
+        f_cat2 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv2", "conv6")
+        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up2, f_cat2)
+        q_skip_aligned = inference.align_tensor_for_concat(q_e32, f_e32, f_cat2)
         q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_cat, cfg["conv13"], "conv13", s_cat2, z_cat2, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv14"], "conv14", s, z, apply_relu=True
-        )
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv13"], "conv13", f_cat2, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv14"], "conv14", f_out, apply_relu=True)
 
         # Decoder block 3 (skip from conv4)
-        q_x, s_up3, z_up3, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["upconv3"], "upconv3", s, z, apply_relu=False
-        )
-
-        s_cat3, z_cat3 = inference.get_concat_quantization_params(
-            inference.activation_ranges, "upconv3", "conv4"
-        )
-        M0_up3, shift_up3 = inference.compute_requantize_multiplier(s_up3, s_cat3)
-        M0_e22, shift_e22 = inference.compute_requantize_multiplier(s_e22, s_cat3)
-
-        q_x_aligned = inference.requantize_tensor(
-            q_x, z_up3, z_cat3, M0_up3, shift_up3
-        )
-        q_skip_aligned = inference.requantize_tensor(
-            q_e22, z_e22, z_cat3, M0_e22, shift_e22
-        )
-
+        q_x, f_up3, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv3"], "upconv3", f_out, apply_relu=False)
+        f_cat3 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv3", "conv4")
+        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up3, f_cat3)
+        q_skip_aligned = inference.align_tensor_for_concat(q_e22, f_e22, f_cat3)
         q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_cat, cfg["conv15"], "conv15", s_cat3, z_cat3, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv16"], "conv16", s, z, apply_relu=True
-        )
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv15"], "conv15", f_cat3, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv16"], "conv16", f_out, apply_relu=True)
 
         # Decoder block 4 (skip from conv2)
-        q_x, s_up4, z_up4, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["upconv4"], "upconv4", s, z, apply_relu=False
-        )
-
-        s_cat4, z_cat4 = inference.get_concat_quantization_params(
-            inference.activation_ranges, "upconv4", "conv2"
-        )
-        M0_up4, shift_up4 = inference.compute_requantize_multiplier(s_up4, s_cat4)
-        M0_e12, shift_e12 = inference.compute_requantize_multiplier(s_e12, s_cat4)
-
-        q_x_aligned = inference.requantize_tensor(
-            q_x, z_up4, z_cat4, M0_up4, shift_up4
-        )
-        q_skip_aligned = inference.requantize_tensor(
-            q_e12, z_e12, z_cat4, M0_e12, shift_e12
-        )
-
+        q_x, f_up4, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv4"], "upconv4", f_out, apply_relu=False)
+        f_cat4 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv4", "conv2")
+        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up4, f_cat4)
+        q_skip_aligned = inference.align_tensor_for_concat(q_e12, f_e12, f_cat4)
         q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_cat, cfg["conv17"], "conv17", s_cat4, z_cat4, apply_relu=True
-        )
-        q_x, s, z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["conv18"], "conv18", s, z, apply_relu=True
-        )
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv17"], "conv17", f_cat4, apply_relu=True)
+        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv18"], "conv18", f_out, apply_relu=True)
 
         # Final output conv (no ReLU)
-        q_out, final_s, final_z, _, _, _ = inference.run_integer_layer(
-            q_x, cfg["outconv"], "outconv", s, z, apply_relu=False
+        outconv_f_in = f_out
+        q_out, final_f_out, _, _ = inference.run_fixed_point_layer(
+            q_x, cfg["outconv"], "outconv", outconv_f_in, apply_relu=False
         )
 
         # Dequantize final logits and update confusion counts
         with torch.no_grad():
-            q_out_float = q_out.to(torch.float32)
-            dequantized_logits = final_s * (q_out_float - final_z)
+            dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
 
             int_probs = torch.sigmoid(dequantized_logits)
             int_preds = (int_probs > 0.5).float()
@@ -364,6 +316,12 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
             fn += ((1 - preds_flat) * masks_flat).sum().item()
 
         seen += images.size(0)
+
+        if total_samples is not None:
+            remaining = max(total_samples - seen, 0)
+            print(
+                f"[fixed-point][{dataset_name}] processed {seen}/{total_samples} samples (remaining {remaining})"
+            )
 
     eps = 1e-7
     dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
@@ -392,8 +350,8 @@ def benchmark(num_data: Optional[int] = None) -> dict:
         
         model = _build_model(dataset_name)
 
-        float_metrics = _float_metrics(model, loader, num_data=num_data)
-        int_metrics = _integer_metrics(model, loader, num_data=num_data)
+        float_metrics = _float_metrics(model, loader, dataset_name, num_data=num_data)
+        int_metrics = _integer_metrics(model, loader, dataset_name, num_data=num_data)
 
         results[dataset_name] = {
             "float": float_metrics,
@@ -404,7 +362,7 @@ def benchmark(num_data: Optional[int] = None) -> dict:
 
 
 if __name__ == "__main__":
-    metrics = benchmark(num_data=20)
+    metrics = benchmark()
     with open("benchmark_results.json", "w") as f:
         json.dump(metrics, f, indent=2)
 

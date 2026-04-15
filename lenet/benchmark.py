@@ -1,13 +1,13 @@
-"""Benchmark float vs integer inference on MNIST, CIFAR10, and Brain-MRI.
+"""Benchmark float vs fixed-point inference on MNIST, CIFAR10, and Brain-MRI.
 
-Runs the same models and integer pipeline as inference.py over the
-corresponding 10% test partitions defined in lenet5.py and saves
-accuracies to benchmark_results.json in the form:
+Runs the same models and Dynamic Fixed-Point pipeline as inference.py over the
+corresponding 10% test partitions defined in lenet5.py and saves accuracies to
+benchmark_results.json in the form:
 
 {
-	"MNIST": {"float": acc_float, "integer": acc_int},
-	"CIFAR10": {"float": acc_float, "integer": acc_int},
-	"Brain-MRI": {"float": acc_float, "integer": acc_int}
+	"MNIST": {"float": acc_float, "fixed_point": acc_int},
+	"CIFAR10": {"float": acc_float, "fixed_point": acc_int},
+	"Brain-MRI": {"float": acc_float, "fixed_point": acc_int}
 }
 """
 
@@ -18,13 +18,14 @@ from torch.utils.data import DataLoader
 
 import inference
 import lenet5 as train_mod
+from utils import get_fractional_bits, quantize_fixed_point, dequantize_fixed_point
 
 
 def _disable_inference_debug_trace():
 	"""Turn off heavy debug logging in inference when benchmarking.
 
-	This prevents run_integer_layer/pool_uint8 from storing full tensors
-	in inference.debug_trace while we iterate over entire datasets.
+	This prevents run_fixed_point_layer/avg_pool_fixed_point from storing full
+	tensors in inference.debug_trace while we iterate over entire datasets.
 	"""
 
 	class _NoOpList(list):
@@ -92,8 +93,8 @@ def _float_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 	return 100.0 * correct / max(total, 1)
 
 
-def _integer_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
-	"""Compute accuracy using the integer pipeline from inference.py."""
+def _fixed_point_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
+	"""Compute accuracy using the fixed-point pipeline from inference.py."""
 	correct = 0
 	total = 0
 
@@ -106,75 +107,66 @@ def _integer_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 		for h in handles:
 			h.remove()
 
-		# 2) Quantize input using conv1 input range
-		in_range = inference.activation_ranges["conv1"]
-		pseudo_in_tensor = torch.tensor(
-			[in_range["in_min"], in_range["in_max"]], dtype=torch.float32
-		)
-		scale_in, zp_in = inference.get_quantization_params(
-			pseudo_in_tensor, num_bits=8
-		)
-		q_x = inference.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
+		# 2) Quantize input using conv1 input range (Dynamic Fixed-Point)
+		in_abs_max = inference.activation_ranges["conv1"]["in_abs_max"]
+		pseudo_in_tensor = torch.tensor([in_abs_max], dtype=torch.float32)
+		f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
+		q_x = quantize_fixed_point(images, f_in, dtype=torch.int8)
 
-		# 3) Integer forward pass (mirrors inference.main)
+		# 3) Fixed-point forward pass (mirrors inference.main)
 		cfg = inference._get_layer_config(model)
 
-		q_x, s_out, z_out, _, _, _ = inference.run_integer_layer(
+		q_x, f_out, _, _ = inference.run_fixed_point_layer(
 			q_x,
 			cfg["conv1"],
 			"conv1",
-			scale_in,
-			zp_in,
+			f_in,
 			apply_relu=True,
 			is_conv=True,
 		)
-		q_x = inference.pool_uint8(q_x)
+		q_x = inference.avg_pool_fixed_point(q_x, name="pool_after_conv1")
 
-		q_x, s_out, z_out, _, _, _ = inference.run_integer_layer(
+		q_x, f_out, _, _ = inference.run_fixed_point_layer(
 			q_x,
 			cfg["conv2"],
 			"conv2",
-			s_out,
-			z_out,
+			f_out,
 			apply_relu=True,
 			is_conv=True,
 		)
-		q_x = inference.pool_uint8(q_x)
+		q_x = inference.avg_pool_fixed_point(q_x, name="pool_after_conv2")
 
 		q_x = q_x.view(q_x.size(0), -1)
 
-		q_x, s_out, z_out, _, _, _ = inference.run_integer_layer(
+		q_x, f_out, _, _ = inference.run_fixed_point_layer(
 			q_x,
 			cfg["fc1"],
 			"fc1",
-			s_out,
-			z_out,
+			f_out,
 			apply_relu=True,
 			is_conv=False,
 		)
-		q_x, s_out, z_out, _, _, _ = inference.run_integer_layer(
+		q_x, f_out, _, _ = inference.run_fixed_point_layer(
 			q_x,
 			cfg["fc2"],
 			"fc2",
-			s_out,
-			z_out,
+			f_out,
 			apply_relu=True,
 			is_conv=False,
 		)
 
-		q_out, final_s, final_z, _, _, _ = inference.run_integer_layer(
+		fc3_f_in = f_out
+		q_out, final_f_out, _, _ = inference.run_fixed_point_layer(
 			q_x,
 			cfg["fc3"],
 			"fc3",
-			s_out,
-			z_out,
+			fc3_f_in,
 			apply_relu=False,
 			is_conv=False,
 		)
 
 		# 4) Dequantize logits and compute predictions
-		int_logits = q_out.to(torch.float32)
-		dequantized_logits = final_s * (int_logits - final_z)
+		dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
 		int_preds = dequantized_logits.argmax(dim=1)
 
 		correct += (int_preds == labels).sum().item()
@@ -184,7 +176,7 @@ def _integer_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 
 
 def benchmark() -> dict:
-	"""Run float and integer evaluation for all datasets."""
+	"""Run float and fixed-point evaluation for all datasets."""
 	_disable_inference_debug_trace()
 
 	results = {}
@@ -192,8 +184,8 @@ def benchmark() -> dict:
 		loader = _get_test_loader(name)
 		model = _build_model(name)
 		float_acc = _float_accuracy(model, loader)
-		int_acc = _integer_accuracy(model, loader)
-		results[name] = {"float": float_acc, "integer": int_acc}
+		int_acc = _fixed_point_accuracy(model, loader)
+		results[name] = {"float": float_acc, "fixed_point": int_acc}
 	return results
 
 
@@ -203,4 +195,4 @@ if __name__ == "__main__":
 		json.dump(metrics, f, indent=2)
 	print("Saved benchmark_results.json with:")
 	for ds, vals in metrics.items():
-		print(f"  {ds}: float={vals['float']:.2f}%, integer={vals['integer']:.2f}%")
+		print(f"  {ds}: float={vals['float']:.2f}%, fixed_point={vals['fixed_point']:.2f}%")

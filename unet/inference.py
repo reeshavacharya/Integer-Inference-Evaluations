@@ -12,18 +12,16 @@ import json
 
 # Import the helper functions
 from utils import (
-    compute_integer_multiplier,
-    compute_requantize_multiplier,
-    get_quantization_params,
-    get_bias_quantization_params,
-    quantize_tensor,
-    integer_conv2d,
-    integer_conv_transpose2d,
-    integer_linear,
+    get_fractional_bits,
+    quantize_fixed_point,
+    dequantize_fixed_point,
+    downscale_fixed_point,
+    align_tensor_for_concat,
+    fixed_point_relu,
+    fixed_point_conv2d,
+    fixed_point_conv_transpose2d,
+    fixed_point_linear,
     add_bias,
-    downscale_and_cast,
-    quantized_relu,
-    requantize_tensor,
 )
 
 
@@ -242,16 +240,17 @@ activation_ranges = {}
 
 
 def calibration_hook(module, input, output, name):
-    """Hook to capture the min and max of activations during the forward pass."""
-    in_tensor = input[0].detach()
-    out_tensor = output.detach()
-
     activation_ranges[name] = {
-        "in_min": in_tensor.min().item(),
-        "in_max": in_tensor.max().item(),
-        "out_min": out_tensor.min().item(),
-        "out_max": out_tensor.max().item(),
+        "in_abs_max": input[0].detach().abs().max().item(),
+        "out_abs_max": output.detach().abs().max().item(),
     }
+
+def get_concat_fractional_bits(range_dict, layer1_name, layer2_name):
+    """Finds the optimal shared fractional bits for concatenation."""
+    max1 = range_dict[layer1_name]["out_abs_max"]
+    max2 = range_dict[layer2_name]["out_abs_max"]
+    shared_max = max(max1, max2)
+    return get_fractional_bits(torch.tensor([shared_max]), num_bits=8)
 
 def get_concat_quantization_params(range_dict, layer1_name, layer2_name):
     """
@@ -332,143 +331,53 @@ def register_hooks(model):
     return handles
 
 
-# -----------------------------
-# 4. Core Integer Inference Engine
-# -----------------------------
-def run_integer_layer(
-    q_input, layer, layer_name, scale_in, zp_in, apply_relu=True
-):
-    """
-    Executes a single layer entirely in integer arithmetic.
-    Dynamically routes nn.Conv2d, nn.ConvTranspose2d, and nn.Linear.
-    """
-    # 1. Get float weights and calculate their quantization params
+def run_fixed_point_layer(q_input, layer, layer_name, f_in, apply_relu=True):
     weight_float = layer.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
-    
-    # 2. Calculate output activation params from calibration data
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]])
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    f_w = get_fractional_bits(weight_float, num_bits=8)
+    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
 
-    # 3. Quantize Bias to int32
-    bias_float = layer.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
+    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
+    pseudo_out = torch.tensor([out_abs_max])
+    f_out = get_fractional_bits(pseudo_out, num_bits=8)
 
-    # 4. Calculate Downscale Multiplier (Offline Simulation)
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
+    f_accum = f_in + f_w
+    if layer.bias is not None:
+        bias_float = layer.bias.detach()
+        q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
+    else:
+        q_bias = torch.zeros(layer.out_channels, dtype=torch.int32)
 
-    # --- Execute Integer Math (Online Simulation) ---
-    
-    # ROUTE 1: Standard Convolution (Encoder)
+    # Route math based on layer type
     if isinstance(layer, nn.Conv2d):
         stride = getattr(layer, "stride", (1, 1))
         padding = getattr(layer, "padding", (0, 0))
-        int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=stride, padding=padding)
-        layer_type_str = "conv2d"
-
-    # ROUTE 2: Transposed Convolution (Decoder)
+        int32_accum = fixed_point_conv2d(q_input, q_w, stride=stride, padding=padding)
     elif isinstance(layer, nn.ConvTranspose2d):
         stride = getattr(layer, "stride", (1, 1))
         padding = getattr(layer, "padding", (0, 0))
         output_padding = getattr(layer, "output_padding", (0, 0))
-        int32_accum = integer_conv_transpose2d(
-            q_input, q_w, zp_in, zp_w, 
-            stride=stride, padding=padding, output_padding=output_padding
+        int32_accum = fixed_point_conv_transpose2d(
+            q_input, q_w, stride=stride, padding=padding, output_padding=output_padding
         )
-        layer_type_str = "conv_transpose2d"
-
-    # ROUTE 3: Linear / Dense Layer (Not used in standard UNet, but kept for compatibility)
     elif isinstance(layer, nn.Linear):
-        int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
-        layer_type_str = "linear"
-        
-    else:
-        raise ValueError(f"Unsupported layer type: {type(layer)}")
+        int32_accum = fixed_point_linear(q_input, q_w)
 
-    # Finish the integer pipeline
     int32_accum = add_bias(int32_accum, q_bias)
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
+    
+    shift = f_accum - f_out
+    q_out = downscale_fixed_point(int32_accum, shift)
 
     if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
+        q_out = fixed_point_relu(q_out)
 
-    # Log layer details for debugging/analysis
-    layer_log = {
-        "layer_name": layer_name,
-        "type": layer_type_str,
-        "input": {
-            "scale": float(scale_in),
-            "zero_point": int(zp_in),
-            "tensor": q_input.cpu().numpy().tolist(),
-        },
-        "weights": {
-            "scale": float(scale_w),
-            "zero_point": int(zp_w),
-            "float": weight_float.cpu().numpy().tolist(),
-            "quantized": q_w.cpu().numpy().tolist(),
-        },
-        "bias": {
-            "scale": float(scale_bias),
-            "zero_point": int(zp_bias),
-            "float": bias_float.cpu().numpy().tolist(),
-            "quantized": q_bias.cpu().numpy().tolist(),
-        },
-        "multiplier": {
-            "M0": int(q_M0),
-            "shift": int(shift),
-        },
-        "accumulator": int32_accum.cpu().numpy().tolist(),
-        "output": {
-            "scale": float(scale_out),
-            "zero_point": int(zp_out),
-            "tensor": q_out.cpu().numpy().tolist(),
-        },
-    }
-
-    debug_trace["layers"].append(layer_log)
-
-    return (
-        q_out,
-        scale_out,
-        zp_out,
-        (scale_w, zp_w),
-        (scale_bias, zp_bias),
-        (q_M0, shift),
-    )
+    return q_out, f_out, f_w, shift
 
 
-def pool_uint8(q_tensor, name=None):
-    """Pure integer 2x2 max pooling with stride 2.
-
-    Also logs input and output activations for debugging.
-    """
-    # 1. No int32 casting needed! 
-    # Max pooling cannot cause overflow, so we can stay in uint8.
+def pool_fixed_point(q_tensor, name=None):
+    """Pure integer 2x2 max pooling."""
     B, C, H, W = q_tensor.shape
-
-    # 2. Reshape the tensor to isolate the 2x2 spatial windows
-    # Shape becomes: [Batch, Channels, Height/2, 2, Width/2, 2]
     windows = q_tensor.view(B, C, H // 2, 2, W // 2, 2)
-
-    # 3. Extract the maximum value over the 2x2 window dimensions (dim 3 and 5)
-    # Shape becomes: [Batch, Channels, Height/2, Width/2]
     pooled = windows.amax(dim=(3, 5))
-
-    # Log pooling activations
-    pool_log = {
-        "name": name or "maxpool",
-        "kernel_size": [2, 2],
-        "stride": [2, 2],
-        "input_tensor": q_tensor.cpu().numpy().tolist(),
-        "output_tensor": pooled.cpu().numpy().tolist(),
-    }
-    
-    # Assuming debug_trace is a global dict as in your original function
-    debug_trace["pooling"].append(pool_log)
-
     return pooled
 
 
@@ -478,7 +387,7 @@ def pool_uint8(q_tensor, name=None):
 def main(infer_data):
     image_tensor, mask_tensor = get_random_sample(infer_data)
 
-    print("--- Starting Quantized Segmentation Inference Pipeline ---")
+    print("--- Starting Dynamic Fixed-Point Segmentation Inference ---")
 
     # Load the trained UNet model for the requested dataset
     if infer_data == "Skin-Lesion":
@@ -528,159 +437,132 @@ def main(infer_data):
         recall = (tp + eps) / (tp + fn + eps)
         float_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
 
-    print("[1] Float inference complete.")
+    print("[1] Float inference and calibration complete.")
 
     # -----------------------------
     # [2] Quantize Input
     # -----------------------------
-    in_range = activation_ranges["conv1"]
-    pseudo_in_tensor = torch.tensor([in_range["in_min"], in_range["in_max"]])
-    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=8)
+    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
+    pseudo_in_tensor = torch.tensor([in_abs_max])
+    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
 
-    q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
+    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
 
-    # Save quantized input (first channel) as an 8-bit grayscale image
-    q_x_img = q_x[0, 0].cpu().numpy().astype("uint8")
-    Image.fromarray(q_x_img, mode="L").save(
-        f"{infer_data.lower()}_quantized_sample.png"
-    )
+    # Save quantized input as an 8-bit grayscale image
+    q_x_img = torch.clamp(q_x[0, 0].to(torch.int16) + 128, 0, 255).to(torch.uint8).cpu().numpy()
+    Image.fromarray(q_x_img, mode="L").save(f"{infer_data.lower()}_quantized_sample.png")
 
     debug_trace["input"] = {
-        "scale": float(scale_in),
-        "zero_point": int(zp_in),
+        "f_in": f_in,
         "float_tensor": image_tensor.cpu().numpy().tolist(),
         "quantized_tensor": q_x.cpu().numpy().tolist(),
     }
 
+    print("[3] Executing Dynamic Fixed-Point Forward Pass...")
+
     # -----------------------------
-    # [3] Integer-Only Forward Through UNet
+    # [3] Fixed-Point Forward Through UNet
     # -----------------------------
     layer_cfg = _get_layer_config(model)
 
     # Encoder block 1
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv1"], "conv1", scale_in, zp_in, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv2"], "conv2", s, z, apply_relu=True)
-    q_e12, s_e12, z_e12 = q_x, s, z  # skip connection 1 (before pool)
-    q_x = pool_uint8(q_x, name="pool1")
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv1"], "conv1", f_in, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv2"], "conv2", f_out, apply_relu=True)
+    q_e12, f_e12 = q_x, f_out  # Skip connection 1 (before pool)
+    q_x = pool_fixed_point(q_x, name="pool1")
 
     # Encoder block 2
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv3"], "conv3", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv4"], "conv4", s, z, apply_relu=True)
-    q_e22, s_e22, z_e22 = q_x, s, z  # skip connection 2
-    q_x = pool_uint8(q_x, name="pool2")
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv3"], "conv3", f_out, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv4"], "conv4", f_out, apply_relu=True)
+    q_e22, f_e22 = q_x, f_out  # Skip connection 2
+    q_x = pool_fixed_point(q_x, name="pool2")
 
     # Encoder block 3
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv5"], "conv5", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv6"], "conv6", s, z, apply_relu=True)
-    q_e32, s_e32, z_e32 = q_x, s, z  # skip connection 3
-    q_x = pool_uint8(q_x, name="pool3")
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv5"], "conv5", f_out, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv6"], "conv6", f_out, apply_relu=True)
+    q_e32, f_e32 = q_x, f_out  # Skip connection 3
+    q_x = pool_fixed_point(q_x, name="pool3")
 
     # Encoder block 4
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv7"], "conv7", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv8"], "conv8", s, z, apply_relu=True)
-    q_e42, s_e42, z_e42 = q_x, s, z  # skip connection 4
-    q_x = pool_uint8(q_x, name="pool4")
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv7"], "conv7", f_out, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv8"], "conv8", f_out, apply_relu=True)
+    q_e42, f_e42 = q_x, f_out  # Skip connection 4
+    q_x = pool_fixed_point(q_x, name="pool4")
 
     # ==========================================
-    # Bottom (no pooling)
+    # Bottleneck (no pooling)
     # ==========================================
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv9"], "conv9", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv10"], "conv10", s, z, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv9"], "conv9", f_out, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv10"], "conv10", f_out, apply_relu=True)
 
     # ==========================================
     # Decoder block 1 (Skip connection from e42 -> "conv8")
     # ==========================================
-    # 1. Run Upconv
-    q_x, s_up1, z_up1, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv1"], "upconv1", s, z, apply_relu=False)
+    q_x, f_up1, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv1"], "upconv1", f_out, apply_relu=False)
+    f_cat1 = get_concat_fractional_bits(activation_ranges, "upconv1", "conv8")
     
-    # 2. Get shared concatenation scale using "conv8"
-    s_cat1, z_cat1 = get_concat_quantization_params(activation_ranges, "upconv1", "conv8")
-    
-    # 3. Calculate multipliers
-    M0_up1, shift_up1 = compute_requantize_multiplier(s_up1, s_cat1)
-    M0_e42, shift_e42 = compute_requantize_multiplier(s_e42, s_cat1)
-    
-    # 4. Requantize both tensors
-    q_x_aligned = requantize_tensor(q_x, z_up1, z_cat1, M0_up1, shift_up1)
-    q_skip_aligned = requantize_tensor(q_e42, z_e42, z_cat1, M0_e42, shift_e42)
-    
-    # 5. Concatenate and run next convolutions
+    q_x_aligned = align_tensor_for_concat(q_x, f_up1, f_cat1)
+    q_skip_aligned = align_tensor_for_concat(q_e42, f_e42, f_cat1)
     q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv11"], "conv11", s_cat1, z_cat1, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv12"], "conv12", s, z, apply_relu=True)
+    
+    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv11"], "conv11", f_cat1, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv12"], "conv12", f_out, apply_relu=True)
 
     # ==========================================
     # Decoder block 2 (Skip connection from e32 -> "conv6")
     # ==========================================
-    q_x, s_up2, z_up2, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv2"], "upconv2", s, z, apply_relu=False)
+    q_x, f_up2, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv2"], "upconv2", f_out, apply_relu=False)
+    f_cat2 = get_concat_fractional_bits(activation_ranges, "upconv2", "conv6")
     
-    s_cat2, z_cat2 = get_concat_quantization_params(activation_ranges, "upconv2", "conv6")
-    
-    M0_up2, shift_up2 = compute_requantize_multiplier(s_up2, s_cat2)
-    M0_e32, shift_e32 = compute_requantize_multiplier(s_e32, s_cat2)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up2, z_cat2, M0_up2, shift_up2)
-    q_skip_aligned = requantize_tensor(q_e32, z_e32, z_cat2, M0_e32, shift_e32)
-    
+    q_x_aligned = align_tensor_for_concat(q_x, f_up2, f_cat2)
+    q_skip_aligned = align_tensor_for_concat(q_e32, f_e32, f_cat2)
     q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv13"], "conv13", s_cat2, z_cat2, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv14"], "conv14", s, z, apply_relu=True)
+    
+    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv13"], "conv13", f_cat2, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv14"], "conv14", f_out, apply_relu=True)
 
     # ==========================================
     # Decoder block 3 (Skip connection from e22 -> "conv4")
     # ==========================================
-    q_x, s_up3, z_up3, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv3"], "upconv3", s, z, apply_relu=False)
+    q_x, f_up3, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv3"], "upconv3", f_out, apply_relu=False)
+    f_cat3 = get_concat_fractional_bits(activation_ranges, "upconv3", "conv4")
     
-    s_cat3, z_cat3 = get_concat_quantization_params(activation_ranges, "upconv3", "conv4")
-    
-    M0_up3, shift_up3 = compute_requantize_multiplier(s_up3, s_cat3)
-    M0_e22, shift_e22 = compute_requantize_multiplier(s_e22, s_cat3)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up3, z_cat3, M0_up3, shift_up3)
-    q_skip_aligned = requantize_tensor(q_e22, z_e22, z_cat3, M0_e22, shift_e22)
-    
+    q_x_aligned = align_tensor_for_concat(q_x, f_up3, f_cat3)
+    q_skip_aligned = align_tensor_for_concat(q_e22, f_e22, f_cat3)
     q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv15"], "conv15", s_cat3, z_cat3, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv16"], "conv16", s, z, apply_relu=True)
+    
+    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv15"], "conv15", f_cat3, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv16"], "conv16", f_out, apply_relu=True)
 
     # ==========================================
     # Decoder block 4 (Skip connection from e12 -> "conv2")
     # ==========================================
-    q_x, s_up4, z_up4, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv4"], "upconv4", s, z, apply_relu=False)
+    q_x, f_up4, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv4"], "upconv4", f_out, apply_relu=False)
+    f_cat4 = get_concat_fractional_bits(activation_ranges, "upconv4", "conv2")
     
-    s_cat4, z_cat4 = get_concat_quantization_params(activation_ranges, "upconv4", "conv2")
-    
-    M0_up4, shift_up4 = compute_requantize_multiplier(s_up4, s_cat4)
-    M0_e12, shift_e12 = compute_requantize_multiplier(s_e12, s_cat4)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up4, z_cat4, M0_up4, shift_up4)
-    q_skip_aligned = requantize_tensor(q_e12, z_e12, z_cat4, M0_e12, shift_e12)
-    
+    q_x_aligned = align_tensor_for_concat(q_x, f_up4, f_cat4)
+    q_skip_aligned = align_tensor_for_concat(q_e12, f_e12, f_cat4)
     q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv17"], "conv17", s_cat4, z_cat4, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv18"], "conv18", s, z, apply_relu=True)
+    
+    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv17"], "conv17", f_cat4, apply_relu=True)
+    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv18"], "conv18", f_out, apply_relu=True)
 
     # Final output conv (no ReLU)
-    q_out, final_s, final_z, final_w, final_b, final_M = run_integer_layer(
-        q_x,
-        layer_cfg["outconv"],
-        "outconv",
-        s,
-        z,
-        apply_relu=False,
+    outconv_f_in = f_out
+    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_layer(
+        q_x, layer_cfg["outconv"], "outconv", outconv_f_in, apply_relu=False
     )
 
     # -----------------------------
-    # [4] Integer Metrics
+    # [4] Fixed-Point Metrics
     # -----------------------------
     with torch.no_grad():
-        q_out_float = q_out.to(torch.float32)
-        dequantized_logits = final_s * (q_out_float - final_z)
+        dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
 
-        int_probs = torch.sigmoid(dequantized_logits)
-        int_preds = (int_probs > 0.5).float()
+        fp_probs = torch.sigmoid(dequantized_logits)
+        fp_preds = (fp_probs > 0.5).float()
 
-        preds_flat = int_preds.view(-1)
+        preds_flat = fp_preds.view(-1)
         masks_flat = mask_tensor.view(-1)
 
         tp = (preds_flat * masks_flat).sum().item()
@@ -688,33 +570,41 @@ def main(infer_data):
         fp = (preds_flat * (1 - masks_flat)).sum().item()
         fn = ((1 - preds_flat) * masks_flat).sum().item()
 
-        int_dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
-        int_iou = (tp + eps) / (tp + fp + fn + eps)
-        int_acc = (tp + tn + eps) / (tp + tn + fp + fn + eps)
+        fp_dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
+        fp_iou = (tp + eps) / (tp + fp + fn + eps)
+        fp_acc = (tp + tn + eps) / (tp + tn + fp + fn + eps)
 
         precision = (tp + eps) / (tp + fp + eps)
         recall = (tp + eps) / (tp + fn + eps)
-        int_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
+        fp_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
 
-    print("[2] Integer-only UNet inference complete.")
+    print("[4] Fixed-Point U-Net inference complete.")
 
     # -----------------------------
     # [5] Summary Logging
     # -----------------------------
-    print("\n" + "=" * 40)
+    print("\n" + "=" * 50)
     print(" SEGMENTATION INFERENCE SUMMARY ")
-    print("=" * 40)
+    print("=" * 50)
     print(
-        f"Float   -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
+        f"Float Model       -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
     )
     print(
-        f"Integer -> Dice: {int_dice:.4f}, IoU: {int_iou:.4f}, Acc: {int_acc:.4f}, F1: {int_f1:.4f}"
+        f"Fixed-Point Model -> Dice: {fp_dice:.4f}, IoU: {fp_iou:.4f}, Acc: {fp_acc:.4f}, F1: {fp_f1:.4f}"
     )
 
-    # trace_path = "integer_inference_trace.json"
+    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
+    print(f"Input Fractional Bits (f_in):         {outconv_f_in}") 
+    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
+    print(f"Accumulator Fractional Bits:          {outconv_f_in + final_f_w}")
+    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
+    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
+    print("=" * 50)
+
+    # trace_path = "fixed_point_inference_trace.json"
     # with open(trace_path, "w") as f:
     #     json.dump(debug_trace, f, indent=2)
-    # print(f"\nSaved integer inference trace to {trace_path}")
+    # print(f"\nSaved fixed-point inference trace to {trace_path}")
 
 
 if __name__ == "__main__":
@@ -726,5 +616,4 @@ if __name__ == "__main__":
         help="Inference data to use",
     )
     args = parser.parse_args()
-    print(f"Using inference data: {args.infer}")
     main(args.infer)

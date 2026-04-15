@@ -10,18 +10,16 @@ import resnet18 as train_mod
 from resnet18 import ResNet18
 
 from utils import (
-    compute_integer_multiplier,
-    get_quantization_params,
-    get_bias_quantization_params,
-    compute_multiplier,
-    quantize_tensor,
-    integer_conv2d,
-    integer_linear,
+    get_fractional_bits,
+    quantize_fixed_point,
+    dequantize_fixed_point,
+    downscale_fixed_point,
+    fixed_point_relu,
+    fixed_point_conv2d,
+    fixed_point_linear,
     add_bias,
-    downscale_and_cast,
-    quantized_relu,
-    integer_add,
-    integer_global_avg_pool2d,
+    fixed_point_add,
+    fixed_point_global_avg_pool2d,
 )
 
 
@@ -43,42 +41,53 @@ class FloatAdd(nn.Module):
     """A dummy module to make addition visible to calibration hooks."""
     def __init__(self):
         super().__init__()
-        
+
     def forward(self, x, y):
         return x + y
 
 class BasicBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu1 = nn.ReLU(inplace=True) 
-        
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(
+            out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
+        )
         self.bn2 = nn.BatchNorm2d(out_channels)
-        
+
         self.add = FloatAdd()
-        self.relu2 = nn.ReLU(inplace=True) 
-        
+        self.relu2 = nn.ReLU(inplace=True)
+
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
+                nn.Conv2d(
+                    in_channels, out_channels, kernel_size=1, stride=stride, bias=False
+                ),
+                nn.BatchNorm2d(out_channels),
             )
         else:
-            self.shortcut = nn.Identity() 
+            self.shortcut = nn.Identity()
 
     def forward(self, x):
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu1(out)
-        
+
         out = self.conv2(out)
         out = self.bn2(out)
-        
+
         skip = self.shortcut(x)
         out = self.add(out, skip)
-        
+
         out = self.relu2(out)
         return out
 
@@ -86,20 +95,22 @@ class ResNet18Inference(nn.Module):
     def __init__(self, num_classes=10, in_channels=3):
         super(ResNet18Inference, self).__init__()
         self.in_channels = 64
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(
+            in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
+        )
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
-        
+
         self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1)
         self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2)
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
-        
+
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride):
-        strides = [stride] + [1]*(num_blocks-1)
+        strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
             layers.append(block(self.in_channels, out_channels, stride))
@@ -110,12 +121,12 @@ class ResNet18Inference(nn.Module):
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-        
+
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
         out = self.layer4(out)
-        
+
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
@@ -127,30 +138,30 @@ class ResNet18Inference(nn.Module):
 
 
 def get_random_sample(dataset_name: str):
-	"""Return a single preprocessed sample tensor and label.
+    """Return a single preprocessed sample tensor and label.
 
-	Uses the same 10% test partition as defined in resnet18.py for
-	MNIST, CIFAR10, and Brain-MRI by calling the corresponding
-	setup_* function and sampling from its test_loader.
-	"""
+    Uses the same 10% test partition as defined in resnet18.py for
+    MNIST, CIFAR10, and Brain-MRI by calling the corresponding
+    setup_* function and sampling from its test_loader.
+    """
 
-	name = dataset_name.upper()
+    name = dataset_name.upper()
 
-	if name == "MNIST":
-		train_mod.setup_MNIST(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	elif name in ("CIFR10", "CIFAR10"):
-		train_mod.setup_CIFAR10(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	elif name == "BRAIN-MRI":
-		train_mod.setup_Brain_MRI(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	else:
-		raise ValueError(f"Unknown dataset: {dataset_name}")
+    if name == "MNIST":
+        train_mod.setup_MNIST(batch_size=1)
+        test_dataset = train_mod.test_loader.dataset
+    elif name in ("CIFR10", "CIFAR10"):
+        train_mod.setup_CIFAR10(batch_size=1)
+        test_dataset = train_mod.test_loader.dataset
+    elif name == "BRAIN-MRI":
+        train_mod.setup_Brain_MRI(batch_size=1)
+        test_dataset = train_mod.test_loader.dataset
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
 
-	idx = random.randint(0, len(test_dataset) - 1)
-	image_tensor, label = test_dataset[idx]
-	return image_tensor.unsqueeze(0), label
+    idx = random.randint(0, len(test_dataset) - 1)
+    image_tensor, label = test_dataset[idx]
+    return image_tensor.unsqueeze(0), label
 
 
 # -----------------------------
@@ -160,72 +171,70 @@ activation_ranges = {}
 
 
 def calibration_hook(module, input, output, name):
-	in_tensor = input[0].detach()
-	out_tensor = output.detach()
-
-	activation_ranges[name] = {
-		"in_min": in_tensor.min().item(),
-		"in_max": in_tensor.max().item(),
-		"out_min": out_tensor.min().item(),
-		"out_max": out_tensor.max().item(),
-	}
-
-
-def _get_layer_config(model: ResNet18Inference):
-	"""Return conv/fc modules for calibration and integer inference.
-
-	We focus on top-level conv1 and the four residual stages plus the
-	final fully-connected layer.
-	"""
-
-	return {
-		"conv1": model.conv1,
-		"layer1": model.layer1,
-		"layer2": model.layer2,
-		"layer3": model.layer3,
-		"layer4": model.layer4,
-		"fc": model.fc,
-	}
+    activation_ranges[name] = {
+        "in_abs_max": input[0].detach().abs().max().item(),
+        "out_abs_max": output.detach().abs().max().item(),
+    }
 
 
 def register_hooks(model: ResNet18Inference):
     handles = []
-    
+
     # 1. Hook conv1 JUST to capture the raw input image bounds
-    handles.append(model.conv1.register_forward_hook(
-        lambda m, i, o: calibration_hook(m, i, o, "conv1")
-    ))
+    handles.append(
+        model.conv1.register_forward_hook(
+            lambda m, i, o: calibration_hook(m, i, o, "conv1")
+        )
+    )
 
     # 2. Hook initial conv block output (post-relu) for the first integer pass
-    handles.append(model.relu.register_forward_hook(
-        lambda m, i, o: calibration_hook(m, i, o, "conv1_relu")
-    ))
+    handles.append(
+        model.relu.register_forward_hook(
+            lambda m, i, o: calibration_hook(m, i, o, "conv1_relu")
+        )
+    )
 
     # Hook the distinct outputs of every block stage
-    for layer_idx, layer in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
+    for layer_idx, layer in enumerate(
+        [model.layer1, model.layer2, model.layer3, model.layer4], 1
+    ):
         for block_idx, block in enumerate(layer):
             prefix = f"layer{layer_idx}_block{block_idx}"
-            
-            # Post-conv1 block (after ReLU)
-            handles.append(block.relu1.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_conv1_relu")
-            ))
-            # Post-conv2 block (after BN, NO ReLU)
-            handles.append(block.bn2.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_conv2_out")
-            ))
-            # Post-shortcut
-            handles.append(block.shortcut.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_shortcut_out")
-            ))
-            # Final Block Output (after add -> relu2)
-            handles.append(block.relu2.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_out")
-            ))
 
-    handles.append(model.fc.register_forward_hook(
-        lambda m, i, o: calibration_hook(m, i, o, "fc")
-    ))
+            # Post-conv1 block (after ReLU)
+            handles.append(
+                block.relu1.register_forward_hook(
+                    lambda m, i, o, p=prefix: calibration_hook(
+                        m, i, o, f"{p}_conv1_relu"
+                    )
+                )
+            )
+            # Post-conv2 block (after BN, NO ReLU)
+            handles.append(
+                block.bn2.register_forward_hook(
+                    lambda m, i, o, p=prefix: calibration_hook(
+                        m, i, o, f"{p}_conv2_out"
+                    )
+                )
+            )
+            # Post-shortcut
+            handles.append(
+                block.shortcut.register_forward_hook(
+                    lambda m, i, o, p=prefix: calibration_hook(
+                        m, i, o, f"{p}_shortcut_out"
+                    )
+                )
+            )
+            # Final Block Output (after add -> relu2)
+            handles.append(
+                block.relu2.register_forward_hook(
+                    lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_out")
+                )
+            )
+
+    handles.append(
+        model.fc.register_forward_hook(lambda m, i, o: calibration_hook(m, i, o, "fc"))
+    )
 
     return handles
 
@@ -237,167 +246,127 @@ def fold_conv_bn_eval(conv, bn):
         b = conv.bias.detach()
     else:
         b = torch.zeros(conv.out_channels, device=w.device)
-        
+
     gamma = bn.weight.detach()
     beta = bn.bias.detach()
     mean = bn.running_mean.detach()
     var = bn.running_var.detach()
     eps = bn.eps
-    
+
     # Calculate multiplier: gamma / sqrt(var + eps)
     multiplier = gamma / torch.sqrt(var + eps)
-    
+
     # Fold into weights: W * multiplier
     w_folded = w * multiplier.view(-1, 1, 1, 1)
-    
+
     # Fold into bias: beta + (b - mean) * multiplier
     b_folded = beta + (b - mean) * multiplier
-    
+
     return w_folded, b_folded
 
 # -----------------------------
-# 4. Core Integer Inference Engine
+# 4. Core Fixed-Point Inference Engine
 # -----------------------------
-def run_integer_conv_block(q_input, conv, bn, layer_name, scale_in, zp_in, apply_relu=True):
-    # Mathematically fold BN into Conv before quantizing
+def run_fixed_point_conv_block(q_input, conv, bn, layer_name, f_in, apply_relu=True):
+    # Fold BN into Conv
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
     
-    scale_w, zp_w = get_quantization_params(w_folded, num_bits=8)
-    q_w = quantize_tensor(w_folded, scale_w, zp_w, dtype=torch.uint8)
+    # Quantize Weights
+    f_w = get_fractional_bits(w_folded, num_bits=8)
+    q_w = quantize_fixed_point(w_folded, f_w, dtype=torch.int8)
 
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor(
-        [out_range["out_min"], out_range["out_max"]], dtype=torch.float32
-    )
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    # Get target output format
+    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
+    pseudo_out = torch.tensor([out_abs_max])
+    f_out = get_fractional_bits(pseudo_out, num_bits=8)
 
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(b_folded, scale_bias, zp_bias, dtype=torch.int32)
+    # Accumulator bits = f_in + f_w. Bias must exactly match this!
+    f_accum = f_in + f_w
+    q_bias = quantize_fixed_point(b_folded, f_accum, dtype=torch.int32)
 
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    int32_accum = integer_conv2d(
-        q_input, q_w, zp_in, zp_w, stride=conv.stride[0], padding=conv.padding[0]
-    )
+    # Math
+    int32_accum = fixed_point_conv2d(q_input, q_w, stride=conv.stride[0], padding=conv.padding[0])
     int32_accum = add_bias(int32_accum, q_bias)
 
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
+    # Shift back to 8-bit and apply ReLU
+    shift_amount = f_accum - f_out
+    q_out_32 = downscale_fixed_point(int32_accum, shift=shift_amount)
+    q_out = torch.clamp(q_out_32, -128, 127).to(torch.int8)
     
     if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
+        q_out = fixed_point_relu(q_out)
 
-    debug_trace["layers"].append({
-        "layer_name": layer_name,
-        "type": "conv",
-        "input_scale": float(scale_in),
-        "input_zero_point": int(zp_in),
-        "weight_scale": float(scale_w),
-        "weight_zero_point": int(zp_w),
-        "output_scale": float(scale_out),
-        "output_zero_point": int(zp_out),
-    })
+    return q_out, f_out
 
-    # Optional MNIST integer-only trace: store quantized output tensor
-    if INT_TRACE_ENABLED:
-        int_trace["layers"].append(
-            {
-                "layer_name": layer_name,
-                "output_tensor": q_out.cpu().numpy().tolist(),
-            }
+def run_fixed_point_basic_block(q_x, block, prefix, f_in):
+    # 1. Main Branch
+    q_out1, f_out1 = run_fixed_point_conv_block(
+        q_x, block.conv1, block.bn1, f"{prefix}_conv1_relu", f_in, apply_relu=True
+    )
+    q_out2, f_out2 = run_fixed_point_conv_block(
+        q_out1, block.conv2, block.bn2, f"{prefix}_conv2_out", f_out1, apply_relu=False
+    )
+
+    # 2. Shortcut Branch
+    if isinstance(block.shortcut, nn.Identity):
+        q_short, f_short = q_x, f_in
+    else:
+        short_conv, short_bn = block.shortcut[0], block.shortcut[1]
+        q_short, f_short = run_fixed_point_conv_block(
+            q_x, short_conv, short_bn, f"{prefix}_shortcut_out", f_in, apply_relu=False
         )
 
-    return q_out, scale_out, zp_out
+    # 3. Get target f_out for the addition
+    out_abs_max = activation_ranges[f"{prefix}_out"]["out_abs_max"]
+    pseudo_out = torch.tensor([out_abs_max])
+    f_final = get_fractional_bits(pseudo_out, num_bits=8)
 
+    # 4. ALIGN AND ADD
+    q_added = fixed_point_add(q_out2, f_out2, q_short, f_short, f_final)
 
-def run_integer_fc(q_input, fc, layer_name, scale_in, zp_in):
+    # 5. Final ReLU
+    q_final = fixed_point_relu(q_added)
+
+    return q_final, f_final
+
+def _get_layer_config(model: ResNet18Inference):
+    """Return conv/fc modules for calibration and integer inference.
+
+    We focus on top-level conv1 and the four residual stages plus the
+    final fully-connected layer.
+    """
+
+    return {
+        "conv1": model.conv1,
+        "layer1": model.layer1,
+        "layer2": model.layer2,
+        "layer3": model.layer3,
+        "layer4": model.layer4,
+        "fc": model.fc,
+    }
+
+def run_fixed_point_fc(q_input, fc, layer_name, f_in):
     weight_float = fc.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
+    f_w = get_fractional_bits(weight_float, num_bits=8)
+    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
 
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor(
-        [out_range["out_min"], out_range["out_max"]], dtype=torch.float32
-    )
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
+    pseudo_out = torch.tensor([out_abs_max])
+    f_out = get_fractional_bits(pseudo_out, num_bits=8)
 
+    f_accum = f_in + f_w
     bias_float = fc.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
+    q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
 
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
+    int32_accum = fixed_point_linear(q_input, q_w)
     int32_accum = add_bias(int32_accum, q_bias)
 
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
-    # For final FC, activation (softmax) is applied in float domain, so no ReLU here
+    shift_amount = f_accum - f_out
+    q_out_32 = downscale_fixed_point(int32_accum, shift=shift_amount)
+    q_out = torch.clamp(q_out_32, -128, 127).to(torch.int8)
 
-    debug_trace["layers"].append(
-        {
-            "layer_name": layer_name,
-            "type": "linear",
-            "input_scale": float(scale_in),
-            "input_zero_point": int(zp_in),
-            "weight_scale": float(scale_w),
-            "weight_zero_point": int(zp_w),
-            "output_scale": float(scale_out),
-            "output_zero_point": int(zp_out),
-        }
-    )
-
-    # Optional MNIST integer-only trace: store final FC quantized output
-    if INT_TRACE_ENABLED:
-        int_trace["layers"].append(
-            {
-                "layer_name": layer_name,
-                "output_tensor": q_out.cpu().numpy().tolist(),
-            }
-        )
-
-    return q_out, scale_out, zp_out, (scale_w, zp_w), (scale_bias, zp_bias), (
-        q_M0,
-        shift,
-    )
-
-def run_integer_basic_block(q_x, block, prefix, scale_in, zp_in):
-    # 1. First convolution (Fold BN + ReLU)
-    q_out1, s_out1, z_out1 = run_integer_conv_block(
-        q_x, block.conv1, block.bn1, f"{prefix}_conv1_relu", scale_in, zp_in, apply_relu=True
-    )
-
-    # 2. Second convolution (Fold BN + NO ReLU yet)
-    q_out2, s_out2, z_out2 = run_integer_conv_block(
-        q_out1, block.conv2, block.bn2, f"{prefix}_conv2_out", s_out1, z_out1, apply_relu=False
-    )
-
-    # 3. Shortcut connection
-    if isinstance(block.shortcut, nn.Identity):
-        # Pass-through: Just pass the quantized inputs directly!
-        q_short, s_short, z_short = q_x, scale_in, zp_in
-    else:
-        # Downsample conv: Fold BN + NO ReLU
-        short_conv = block.shortcut[0]
-        short_bn = block.shortcut[1]
-        q_short, s_short, z_short = run_integer_conv_block(
-            q_x, short_conv, short_bn, f"{prefix}_shortcut_out", scale_in, zp_in, apply_relu=False
-        )
-
-    # 4. Pre-fetch target calibration ranges for the addition output
-    out_range = activation_ranges[f"{prefix}_out"]
-    pseudo_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]], dtype=torch.float32)
-    s_final, z_final = get_quantization_params(pseudo_tensor, num_bits=8)
-
-    # 5. STRICT INTEGER ADDITION
-    q_added = integer_add(
-        q_out2, z_out2, s_out2,
-        q_short, z_short, s_short,
-        z_final, s_final
-    )
-
-    # 6. Apply final ReLU in integer domain
-    q_final = quantized_relu(q_added, z_final)
-
-    return q_final, s_final, z_final
+    # Final Stats Return for Logging
+    return q_out, f_out, f_w, shift_amount
 
 # -----------------------------
 # 5. Main Execution
@@ -421,7 +390,7 @@ def main(infer_data: str):
         model_path = "best_resnet18_cifar10.pth"
     elif name == "BRAIN-MRI":
         # Note: Change in_channels=3 if your MRI training script used RGB images
-        model = ResNet18Inference(num_classes=4, in_channels=1) 
+        model = ResNet18Inference(num_classes=4, in_channels=1)
         model_path = "best_resnet18_brain_mri.pth"
     else:
         raise ValueError(f"Unknown dataset: {infer_data}")
@@ -432,9 +401,9 @@ def main(infer_data: str):
 
     # Safe State Loading (Strips 'module.' prefix if saved via DataParallel)
     state = torch.load(model_path, map_location="cpu")
-    if list(state.keys())[0].startswith('module.'):
+    if list(state.keys())[0].startswith("module."):
         state = {k[7:]: v for k, v in state.items()}
-        
+
     model.load_state_dict(state)
     model.eval()
 
@@ -451,82 +420,54 @@ def main(infer_data: str):
     float_pred = float_output.argmax(dim=1).item()
     print(f"[2] Calibration complete. Float Model Prediction: {float_pred}")
 
-    # Quantize Input
-    in_range = activation_ranges["conv1"]
-    pseudo_in_tensor = torch.tensor(
-        [in_range["in_min"], in_range["in_max"]], dtype=torch.float32
-    )
-    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=8)
-    q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
+    # Quantize Input Image
+    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
+    pseudo_in_tensor = torch.tensor([in_abs_max])
+    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
 
-    # Log quantized input for MNIST-only integer trace
-    if INT_TRACE_ENABLED:
-        int_trace["input"] = {
-            "tensor": q_x.cpu().numpy().tolist(),
-        }
+    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
 
-    print("\n[3] Executing Integer-Only Inference for ResNet18...")
+    print("\n[3] Executing Dynamic Fixed-Point Inference...")
 
     # Initial conv1
-    q_x, s_out, z_out = run_integer_conv_block(
-        q_x, model.conv1, model.bn1, "conv1_relu", scale_in, zp_in, apply_relu=True
+    q_x, f_out = run_fixed_point_conv_block(
+        q_x, model.conv1, model.bn1, "conv1_relu", f_in, apply_relu=True
     )
 
-    # Traverse all residual blocks properly
+    # Traverse all residual blocks
     for layer_idx, stage in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
         for block_idx, block in enumerate(stage):
             prefix = f"layer{layer_idx}_block{block_idx}"
-            q_x, s_out, z_out = run_integer_basic_block(
-                q_x, block, prefix, s_out, z_out
-            )
+            q_x, f_out = run_fixed_point_basic_block(q_x, block, prefix, f_out)
 
-    # -----------------------------
-    # Integer Global Average Pooling
-    # -----------------------------
-    
-    # 1. First, fetch the target ranges for the inputs to the FC layer 
-    # (Since pooling feeds directly into FC, they share the same range/scale)
-    fc_in_range = activation_ranges["fc"]
-    pseudo_fc_in = torch.tensor(
-        [fc_in_range["in_min"], fc_in_range["in_max"]], dtype=torch.float32
-    )
-    s_fc_in, z_fc_in = get_quantization_params(pseudo_fc_in, num_bits=8)
-
-    # 2. STRICT INTEGER POOLING
-    q_pooled = integer_global_avg_pool2d(
-        q_x, z_out, s_out, z_fc_in, s_fc_in
-    )
-    
-    # 3. Flatten for linear layer
+    # Global Average Pooling (Pooling doesn't change fractional bits!)
+    q_pooled = fixed_point_global_avg_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # Run Final FC Layer
-    q_out, final_s, final_z, final_w, final_b, final_M = run_integer_fc(
-        q_fc_in, model.fc, "fc", s_fc_in, z_fc_in
+    fc_f_in = f_out
+    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_fc(
+        q_fc_in, model.fc, "fc", fc_f_in
     )
 
-    # Dequantize final logits and get prediction
-    int_logits = q_out.to(torch.float32)
-    dequantized_logits = final_s * (int_logits - final_z)
+    # Dequantize final output using fixed-point math
+    dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
     int_pred = dequantized_logits.argmax(dim=1).item()
 
+    # Logging
     print("\n" + "=" * 40)
     print(" RESNET18 INFERENCE SUMMARY ")
     print("=" * 40)
-    print(f"True Label:               {true_label}")
-    print(f"Float Model Prediction:   {float_pred}")
-    print(f"Integer Model Prediction: {int_pred}")
+    print(f"True Label:                   {true_label}")
+    print(f"Float Model Prediction:       {float_pred}")
+    print(f"Fixed Point Model Prediction: {int_pred}")
 
-    if float_pred == int_pred:
-        print("\nSuccess! The integer-quantized model matches the floating-point prediction.")
-    else:
-        print("\nNote: Predictions differ slightly. Standard 8-bit precision loss observed.")
-
-    print("\n--- Final Layer Quantization Stats ---")
-    print(f"Weight Scale:      {final_w[0]:.6f}  | Zero-Point: {final_w[1]}")
-    print(f"Bias Scale:        {final_b[0]:.6f}  | Zero-Point: {final_b[1]}")
-    print(f"Multiplier (M):    {final_M}")
-    print(f"Output Scale:      {final_s:.6f}  | Zero-Point: {final_z}")
+    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
+    print(f"Input Fractional Bits (f_in):         {fc_f_in}") 
+    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
+    print(f"Accumulator Fractional Bits:          {fc_f_in + final_f_w}")
+    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
+    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
     print("=" * 40)
 
     # Save MNIST integer-only layer outputs (no floats) if enabled
@@ -538,13 +479,12 @@ def main(infer_data: str):
 
 
 if __name__ == "__main__":
-	parser = argparse.ArgumentParser()
-	parser.add_argument(
-		"--infer",
-		type=str,
-		default="CIFAR10",
-		help="Inference data to use (MNIST, CIFAR10, Brain-MRI)",
-	)
-	args = parser.parse_args()
-	main(args.infer)
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--infer",
+        type=str,
+        default="CIFAR10",
+        help="Inference data to use (MNIST, CIFAR10, Brain-MRI)",
+    )
+    args = parser.parse_args()
+    main(args.infer)
