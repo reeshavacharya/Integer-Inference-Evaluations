@@ -15,13 +15,11 @@ from lenet5 import BrainMRILeNet
 
 # Import the helper functions
 from utils import (
-    get_fractional_bits,
+    execute_and_shift_conv2d,
     quantize_fixed_point,
     dequantize_fixed_point,
-    downscale_fixed_point,
     fixed_point_relu,
-    fixed_point_conv2d,
-    fixed_point_linear,
+    execute_and_shift_linear,
     add_bias,
 )
 
@@ -59,6 +57,25 @@ def _decompose_fixed_point_tensor(q_tensor: torch.Tensor, f_bits: int):
         "sign": sign.cpu().tolist(),
         "integer": integer_part.cpu().tolist(),
         "fractional": fractional_part.cpu().tolist(),
+    }
+
+
+def _get_layer_config(model):
+    """Return the conv/fc modules for Static Fixed-Point inference."""
+    if isinstance(model, BrainMRILeNet):
+        return {
+            "conv1": model.features[0],
+            "conv2": model.features[4],
+            "fc1": model.classifier[1],
+            "fc2": model.classifier[4],
+            "fc3": model.classifier[7],
+        }
+    return {
+        "conv1": model.features[0],
+        "conv2": model.features[3],
+        "fc1": model.classifier[1],
+        "fc2": model.classifier[3],
+        "fc3": model.classifier[5],
     }
 
 
@@ -130,185 +147,55 @@ def get_random_sample(dataset_name: str):
     return image_tensor.unsqueeze(0), label
 
 
-# -----------------------------
-# 3. Calibration Hooks
-# -----------------------------
-activation_ranges = {}
-
-
-def calibration_hook(module, input, output, name):
-    """Hook to capture the absolute max of activations during the forward pass."""
-    in_tensor = input[0].detach()
-    out_tensor = output.detach()
-
-    activation_ranges[name] = {
-        "in_abs_max": in_tensor.abs().max().item(),
-        "out_abs_max": out_tensor.abs().max().item(),
-    }
-
-
-def _get_layer_config(model):
-    """Return the conv/fc modules for calibration and Fixed-Point inference.
-
-    LeNet5 and BrainMRILeNet have different Sequential layouts, so we
-    centralize the index mapping here.
-    """
-
-    if isinstance(model, BrainMRILeNet):
-        # BrainMRILeNet.features: [Conv, BN, ReLU, AvgPool, Conv, BN, ReLU, AvgPool]
-        # BrainMRILeNet.classifier: [Flatten, Linear, ReLU, Dropout, Linear, ReLU, Dropout, Linear]
-        return {
-            "conv1": model.features[0],
-            "conv2": model.features[4],
-            "fc1": model.classifier[1],
-            "fc2": model.classifier[4],
-            "fc3": model.classifier[7],
-        }
-
-    # Default LeNet5 mapping
-    return {
-        "conv1": model.features[0],
-        "conv2": model.features[3],
-        "fc1": model.classifier[1],
-        "fc2": model.classifier[3],
-        "fc3": model.classifier[5],
-    }
-
-
-def register_hooks(model):
-    handles = []
-    cfg = _get_layer_config(model)
-
-    handles.append(
-        cfg["conv1"].register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "conv1")
-        )
-    )
-    handles.append(
-        cfg["conv2"].register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "conv2")
-        )
-    )
-    handles.append(
-        cfg["fc1"].register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "fc1")
-        )
-    )
-    handles.append(
-        cfg["fc2"].register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "fc2")
-        )
-    )
-    handles.append(
-        cfg["fc3"].register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "fc3")
-        )
-    )
-    return handles
-
-
-def run_fixed_point_layer(
-    q_input, layer, layer_name, f_in, apply_relu=True, is_conv=False, log_details=False
+def run_static_fixed_point_layer(
+    q_input, layer, layer_name, apply_relu=True, is_conv=False
 ):
-    """
-    Executes a single layer entirely in Dynamic Fixed-Point arithmetic.
-    """
-    # 1. Weights
-    weight_float = layer.weight.detach()
-    f_w = get_fractional_bits(weight_float, num_bits=8)
-    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
+    q_w = quantize_fixed_point(layer.weight.detach())
 
-    # 2. Output ranges
-    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
-    pseudo_out = torch.tensor([out_abs_max])
-    f_out = get_fractional_bits(pseudo_out, num_bits=8)
-
-    # 3. Bias (Must match the accumulator's fractional bits exactly)
-    f_accum = f_w + f_in
     if layer.bias is not None:
-        bias_float = layer.bias.detach()
-        q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
+        q_bias = quantize_fixed_point(layer.bias.detach())
     else:
-        q_bias = torch.zeros(layer.out_channels, dtype=torch.int32)
+        q_bias = torch.zeros(layer.out_channels, dtype=torch.int64)
 
-    # --- Execute Integer Math ---
+    # Default stats (0) for conv layers if you didn't update execute_and_shift_conv2d
+    max_bits, max_rem = 0, 0
+
     if is_conv:
-        int32_accum = fixed_point_conv2d(q_input, q_w, stride=layer.stride[0], padding=layer.padding[0])
+        # Assuming you only updated the linear function, we just unpack the normal way here
+        q_accum = execute_and_shift_conv2d(
+            q_input, q_w, stride=layer.stride[0], padding=layer.padding[0]
+        )
     else:
-        int32_accum = fixed_point_linear(q_input, q_w)
-        
-    int32_accum = add_bias(int32_accum, q_bias)
+        # Unpack the new stats from the linear execution
+        q_accum, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
 
-    # 4. Downscale and shift
-    shift_amount = f_accum - f_out
-    q_out = downscale_fixed_point(int32_accum, shift_amount)
+    q_out = add_bias(q_accum, q_bias)
 
     if apply_relu:
         q_out = fixed_point_relu(q_out)
 
-    debug_trace["layers"].append({
-        "layer_name": layer_name,
-        "type": "conv" if is_conv else "linear",
-        "f_in": f_in, "f_w": f_w, "f_out": f_out, "shift": shift_amount,
-    })
-
-    # Optional detailed per-layer fixed-point logging
-    if log_details:
-        global fixed_point_log
-        fixed_point_log.setdefault("layers", [])
-        fixed_point_log["layers"].append(
-            {
-                "layer_name": layer_name,
-                "type": "conv" if is_conv else "linear",
-                "f_in": f_in,
-                "f_w": f_w,
-                "f_out": f_out,
-                "shift": shift_amount,
-                "weights": {
-                    "f": f_w,
-                    "decomposition": _decompose_fixed_point_tensor(q_w, f_w),
-                },
-                "bias": {
-                    "f": f_accum,
-                    "decomposition": _decompose_fixed_point_tensor(q_bias, f_accum),
-                },
-                "input": {
-                    "f": f_in,
-                    "decomposition": _decompose_fixed_point_tensor(q_input, f_in),
-                },
-                "output": {
-                    "f": f_out,
-                    "decomposition": _decompose_fixed_point_tensor(q_out, f_out),
-                },
-            }
-        )
-
-    return q_out, f_out, f_w, shift_amount
+    return q_out, max_bits, max_rem
 
 
 def avg_pool_fixed_point(q_tensor, name=None):
-    """Pure integer 2x2 average pooling with stride 2 for fixed-point int8."""
-    q_int32 = q_tensor.to(torch.int32)
-    B, C, H, W = q_int32.shape
+    """Pure integer 2x2 average pooling with stride 2 for 64-bit."""
+    q_int64 = q_tensor.to(torch.int64)
+    B, C, H, W = q_int64.shape
 
-    windows = q_int32.view(B, C, H // 2, 2, W // 2, 2)
+    windows = q_int64.view(B, C, H // 2, 2, W // 2, 2)
     window_sums = windows.sum(dim=(3, 5))
 
     # Divide by 4 (shift by 2) with round-to-nearest
     rounded_avg = (window_sums + 2) >> 2
 
-    # Cast securely back to int8
-    pooled = torch.clamp(rounded_avg, -128, 127).to(torch.int8)
-
-    debug_trace["pooling"].append({"name": name or "pool"})
-    return pooled
+    return rounded_avg.to(torch.int64)
 
 
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
 def main(infer_data, log=False):
-    print("--- Starting Quantized Inference Pipeline ---")
+    print("--- Starting Static 64-bit ZK Inference Pipeline ---")
 
     name = infer_data.upper()
 
@@ -317,7 +204,6 @@ def main(infer_data, log=False):
         model = LeNet5(num_classes=10, in_channels=1)
         model_path = "best_lenet5_mnist.pth"
     elif name == "BRAIN-MRI":
-        # Brain-MRI models are trained with the BrainMRILeNet architecture
         model = BrainMRILeNet(num_classes=4)
         model_path = "best_lenet5_brain_mri.pth"
     elif name in ("CIFR10", "CIFAR10"):
@@ -333,111 +219,81 @@ def main(infer_data, log=False):
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
 
-    # Draw one random sample from the correct 10% test partition
+    # Draw one random sample 
     image_tensor, true_label = get_random_sample(infer_data)
 
     print(
-        f"\n[1] Extracted random {infer_data} sample (True Label: {true_label}). Saved to '{infer_data.lower()}_sample.png'."
+        f"\n[1] Extracted random {infer_data} sample (True Label: {true_label})."
     )
 
-    # Run Calibration (Float)
-    handles = register_hooks(model)
+    # ---------------------------------------------------------
+    # [2] Float Inference (For accuracy comparison)
+    # ---------------------------------------------------------
     with torch.no_grad():
-        float_output = model(image_tensor)
-    for h in handles:
-        h.remove()
-
-    float_pred = float_output.argmax(dim=1).item()
-    print(f"[2] Calibration complete. Float Model Prediction: {float_pred}")
-
-    # Quantize Input Image
-    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
-    pseudo_in_tensor = torch.tensor([in_abs_max])
-    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
-
-    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
+        float_logits = model(image_tensor)
+        float_pred = float_logits.argmax(dim=1).item()
     
-    q_x_img = torch.clamp(q_x[0, 0].to(torch.int16) + 128, 0, 255).to(torch.uint8).cpu().numpy()
-    Image.fromarray(q_x_img, mode="L").save(f"{infer_data.lower()}_quantized_sample.png")
+    print(f"[2] Float Inference complete. Prediction: {float_pred}")
 
-    # Log the fixed-point input state for basic debug trace
-    debug_trace["input"] = {
-        "f_in": f_in,
-        "float_tensor": image_tensor.cpu().numpy().tolist(),
-        "quantized_tensor": q_x.cpu().numpy().tolist(),
-    }
+    # ---------------------------------------------------------
+    # [3] Static 64-bit Fixed-Point Inference (Q31.32)
+    # ---------------------------------------------------------
+    print("\n[3] Executing Static 64-bit Fixed-Point Inference...")
 
-    # Optional detailed fixed-point decomposition for the input tensor
-    if log:
-        global fixed_point_log
-        fixed_point_log = {"input": {}, "layers": []}
-        fixed_point_log["input"] = {
-            "f": f_in,
-            "decomposition": _decompose_fixed_point_tensor(q_x, f_in),
-        }
-
-    print("\n[3] Executing Dynamic Fixed-Point Inference...")
-
+    # Quantize Input Image directly to Q31.32
+    q_x = quantize_fixed_point(image_tensor)
+    
     layer_cfg = _get_layer_config(model)
 
-    q_x, f_out, f_w, shift = run_fixed_point_layer(
-        q_x, layer_cfg["conv1"], "conv1", f_in, apply_relu=True, is_conv=True, log_details=log
-    )
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv1"], "conv1", apply_relu=True, is_conv=True)
     q_x = avg_pool_fixed_point(q_x, name="pool_after_conv1")
 
-    q_x, f_out, f_w, shift = run_fixed_point_layer(
-        q_x, layer_cfg["conv2"], "conv2", f_out, apply_relu=True, is_conv=True, log_details=log
-    )
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv2"], "conv2", apply_relu=True, is_conv=True)
     q_x = avg_pool_fixed_point(q_x, name="pool_after_conv2")
 
     q_x = q_x.view(q_x.size(0), -1)  # Flatten
 
-    q_x, f_out, f_w, shift = run_fixed_point_layer(
-        q_x, layer_cfg["fc1"], "fc1", f_out, apply_relu=True, is_conv=False, log_details=log
-    )
-    q_x, f_out, f_w, shift = run_fixed_point_layer(
-        q_x, layer_cfg["fc2"], "fc2", f_out, apply_relu=True, is_conv=False, log_details=log
-    )
-    fc3_f_in = f_out
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["fc1"], "fc1", apply_relu=True, is_conv=False)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["fc2"], "fc2", apply_relu=True, is_conv=False)
 
-    # Final Layer (No ReLU)
-    # Use 'final_' prefixes so we don't overwrite the previous variables
-    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_layer(
-        q_x, layer_cfg["fc3"], "fc3", fc3_f_in, apply_relu=False, is_conv=False, log_details=log
+    # Final Layer Execution (Capturing ZK Stats)
+    q_out, max_bits_used, max_remainder = run_static_fixed_point_layer(
+        q_x, layer_cfg["fc3"], "fc3", apply_relu=False, is_conv=False
     )
 
-    # Dequantize final output using fixed-point math
-    dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
+    # Dequantize final output to check prediction
+    dequantized_logits = dequantize_fixed_point(q_out)
     int_pred = dequantized_logits.argmax(dim=1).item()
 
-    # -----------------------------
-    # 6. Summary Logging
-    # -----------------------------
+    # ---------------------------------------------------------
+    # [4] Summary Logging
+    # ---------------------------------------------------------
     print("\n" + "=" * 40)
     print(" INFERENCE SUMMARY ")
     print("=" * 40)
     print(f"True Label:                   {true_label}")
     print(f"Float Model Prediction:       {float_pred}")
-    print(f"Fixed Point Model Prediction: {int_pred}")
+    print(f"Static 64-bit Prediction:     {int_pred}")
 
     if float_pred == int_pred:
-        print(
-            "\nSuccess! The Fixed-Point-quantized model matches the floating-point prediction."
-        )
+        print("\nSuccess! The 64-bit static model exactly matches the floating-point prediction.")
     else:
-        print(
-            "\nNote: The predictions differ. This can happen with 8-bit quantization on border cases, but usually, they match."
-        )
+        print("\nNote: The predictions differ. This can occasionally happen due to 32-bit truncation loss.")
 
-    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
-    print(f"Input Fractional Bits (f_in):         {fc3_f_in}") 
-    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
-    print(f"Accumulator Fractional Bits:          {fc3_f_in + final_f_w}")
-    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
-    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
-    print("=" * 40)
+    # --- ZK LOGGING BLOCK ---
+    print("\n--- ZK Cryptographic Fixed-Point Stats (Final Layer) ---")
+    print(f"Architecture Format:         Q31.32 (64-bit Static Container)")
+    print(f"Accumulator Max Bit-Length:  {max_bits_used} bits (Threshold: 63 for PyTorch, ~254 for ZK Field)")
+    
+    headroom_used = (max_bits_used / 63.0) * 100 if max_bits_used else 0
+    print(f"PyTorch Container Headroom:  {headroom_used:.1f}% Capacity Reached")
+    print(f"Max Truncation Remainder:    {max_remainder:.0f} (Precision dropped during >> 32 shift)")
+    
+    print("\n--- Final Logit Sanity Check ---")
+    print(f"Raw 64-bit Integer Max:      {q_out.max().item()}")
+    print(f"Dequantized Float Max:       {dequantized_logits.max().item():.4f}")
+    print("=" * 56)
 
-    # Optionally write detailed fixed-point log to inference.json
     if log:
         fixed_point_log.setdefault("meta", {})
         fixed_point_log["meta"] = {

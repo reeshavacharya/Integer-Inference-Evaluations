@@ -1,14 +1,14 @@
 {
   "MNIST": {
     "float": 98.8,
-    "fixed_point": 98.74285714285715
+    "fixed_point": 98.8
   },
   "CIFAR10": {
     "float": 64.88333333333334,
-    "fixed_point": 64.8
+    "fixed_point": 64.9
   },
   "Brain-MRI": {
     "float": 94.16666666666667,
-    "fixed_point": 36.94444444444444
+    "fixed_point": 36.666666666666664
   }
 }

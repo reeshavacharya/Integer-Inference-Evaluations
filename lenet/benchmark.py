@@ -1,8 +1,8 @@
 """Benchmark float vs fixed-point inference on MNIST, CIFAR10, and Brain-MRI.
 
-Runs the same models and Dynamic Fixed-Point pipeline as inference.py over the
-corresponding 10% test partitions defined in lenet5.py and saves accuracies to
-benchmark_results.json in the form:
+Runs the same models and Static 64-bit Fixed-Point pipeline as inference.py
+over the corresponding 10% test partitions defined in lenet5.py and saves
+accuracies to benchmark_results.json in the form:
 
 {
 	"MNIST": {"float": acc_float, "fixed_point": acc_int},
@@ -18,13 +18,13 @@ from torch.utils.data import DataLoader
 
 import inference
 import lenet5 as train_mod
-from utils import get_fractional_bits, quantize_fixed_point, dequantize_fixed_point
+from utils import quantize_fixed_point, dequantize_fixed_point
 
 
 def _disable_inference_debug_trace():
 	"""Turn off heavy debug logging in inference when benchmarking.
 
-	This prevents run_fixed_point_layer/avg_pool_fixed_point from storing full
+	This prevents run_static_fixed_point_layer/avg_pool_fixed_point from storing full
 	tensors in inference.debug_trace while we iterate over entire datasets.
 	"""
 
@@ -94,43 +94,30 @@ def _float_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 
 
 def _fixed_point_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
-	"""Compute accuracy using the fixed-point pipeline from inference.py."""
+	"""Compute accuracy using the static 64-bit fixed-point pipeline from inference.py."""
 	correct = 0
 	total = 0
 
 	for images, labels in loader:
-		# 1) Calibration for this batch
-		inference.activation_ranges.clear()
-		handles = inference.register_hooks(model)
-		with torch.no_grad():
-			_ = model(images)
-		for h in handles:
-			h.remove()
+		# 1) Quantize input directly to Q31.32 int64
+		q_x = quantize_fixed_point(images)
 
-		# 2) Quantize input using conv1 input range (Dynamic Fixed-Point)
-		in_abs_max = inference.activation_ranges["conv1"]["in_abs_max"]
-		pseudo_in_tensor = torch.tensor([in_abs_max], dtype=torch.float32)
-		f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
-		q_x = quantize_fixed_point(images, f_in, dtype=torch.int8)
-
-		# 3) Fixed-point forward pass (mirrors inference.main)
+		# 2) Static fixed-point forward pass (mirrors inference.main)
 		cfg = inference._get_layer_config(model)
 
-		q_x, f_out, _, _ = inference.run_fixed_point_layer(
+		q_x, _, _ = inference.run_static_fixed_point_layer(
 			q_x,
 			cfg["conv1"],
 			"conv1",
-			f_in,
 			apply_relu=True,
 			is_conv=True,
 		)
 		q_x = inference.avg_pool_fixed_point(q_x, name="pool_after_conv1")
 
-		q_x, f_out, _, _ = inference.run_fixed_point_layer(
+		q_x, _, _ = inference.run_static_fixed_point_layer(
 			q_x,
 			cfg["conv2"],
 			"conv2",
-			f_out,
 			apply_relu=True,
 			is_conv=True,
 		)
@@ -138,35 +125,31 @@ def _fixed_point_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 
 		q_x = q_x.view(q_x.size(0), -1)
 
-		q_x, f_out, _, _ = inference.run_fixed_point_layer(
+		q_x, _, _ = inference.run_static_fixed_point_layer(
 			q_x,
 			cfg["fc1"],
 			"fc1",
-			f_out,
 			apply_relu=True,
 			is_conv=False,
 		)
-		q_x, f_out, _, _ = inference.run_fixed_point_layer(
+		q_x, _, _ = inference.run_static_fixed_point_layer(
 			q_x,
 			cfg["fc2"],
 			"fc2",
-			f_out,
 			apply_relu=True,
 			is_conv=False,
 		)
 
-		fc3_f_in = f_out
-		q_out, final_f_out, _, _ = inference.run_fixed_point_layer(
+		q_out, _, _ = inference.run_static_fixed_point_layer(
 			q_x,
 			cfg["fc3"],
 			"fc3",
-			fc3_f_in,
 			apply_relu=False,
 			is_conv=False,
 		)
 
-		# 4) Dequantize logits and compute predictions
-		dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
+		# 3) Dequantize logits and compute predictions
+		dequantized_logits = dequantize_fixed_point(q_out)
 		int_preds = dequantized_logits.argmax(dim=1)
 
 		correct += (int_preds == labels).sum().item()

@@ -1,7 +1,7 @@
 """Benchmark float vs fixed-point inference on Skin-Lesion and Flood.
 
-Runs the same models and Dynamic Fixed-Point pipeline as inference.py over the
-corresponding 10% test splits (from u_net.setup_data) and saves accuracies to
+Runs the same models and Static 64-bit Fixed-Point pipeline as inference.py
+over the corresponding 10% test splits (from u_net.setup_data) and saves accuracies to
 benchmark_results.json in the form:
 
 {
@@ -23,13 +23,13 @@ import torch
 
 import inference
 import u_net
-from utils import get_fractional_bits, quantize_fixed_point, dequantize_fixed_point
+from utils import quantize_fixed_point, dequantize_fixed_point
 
 
 def _disable_inference_debug_trace() -> None:
     """Turn off heavy debug logging in inference when benchmarking.
 
-    This prevents run_fixed_point_layer/pool_fixed_point from storing full
+    This prevents run_static_fixed_point_layer/pool_fixed_point from storing full
     tensors in inference.debug_trace while we iterate over the test set.
     """
 
@@ -183,10 +183,10 @@ def _integer_metrics(
     dataset_name: str,
     num_data: Optional[int] = None,
 ) -> dict:
-    """Compute average fixed-point Dice, IoU, accuracy, F1 using UNet path.
+    """Compute average fixed-point Dice, IoU, accuracy, F1 using static UNet path.
 
-    This mirrors the Dynamic Fixed-Point path in inference.main, but runs over
-    all batches from the 10% test DataLoader.
+    This mirrors the Static 64-bit Fixed-Point path in inference.main, but runs
+    over all batches from the 10% test DataLoader.
     """
     tp = tn = fp = fn = 0.0
     seen = 0
@@ -213,96 +213,72 @@ def _integer_metrics(
             images = images[:keep]
             masks = masks[:keep]
 
-        # 1) Calibration for this batch (float forward pass with hooks)
-        inference.activation_ranges.clear()
-        handles = inference.register_hooks(model)
-        with torch.no_grad():
-            _ = model(images)
-        for h in handles:
-            h.remove()
+        # 1) Quantize input directly to static Q31.32 int64
+        q_x = quantize_fixed_point(images)
 
-        # 2) Quantize input using conv1 input range (Dynamic Fixed-Point)
-        in_abs_max = inference.activation_ranges["conv1"]["in_abs_max"]
-        pseudo_in_tensor = torch.tensor([in_abs_max])
-        f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
-        q_x = quantize_fixed_point(images, f_in, dtype=torch.int8)
-
-        # 3) Fixed-Point forward pass (mirrors inference.main UNet path)
+        # 2) Fixed-point forward pass (mirrors inference.main UNet static path)
         cfg = inference._get_layer_config(model)
 
         # Encoder block 1
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv1"], "conv1", f_in, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv2"], "conv2", f_out, apply_relu=True)
-        q_e12, f_e12 = q_x, f_out
-        q_x = inference.pool_fixed_point(q_x, name="pool1")
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv1"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv2"], apply_relu=True)
+        q_e12 = q_x
+        q_x = inference.pool_fixed_point(q_x)
 
         # Encoder block 2
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv3"], "conv3", f_out, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv4"], "conv4", f_out, apply_relu=True)
-        q_e22, f_e22 = q_x, f_out
-        q_x = inference.pool_fixed_point(q_x, name="pool2")
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv3"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv4"], apply_relu=True)
+        q_e22 = q_x
+        q_x = inference.pool_fixed_point(q_x)
 
         # Encoder block 3
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv5"], "conv5", f_out, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv6"], "conv6", f_out, apply_relu=True)
-        q_e32, f_e32 = q_x, f_out
-        q_x = inference.pool_fixed_point(q_x, name="pool3")
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv5"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv6"], apply_relu=True)
+        q_e32 = q_x
+        q_x = inference.pool_fixed_point(q_x)
 
         # Encoder block 4
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv7"], "conv7", f_out, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv8"], "conv8", f_out, apply_relu=True)
-        q_e42, f_e42 = q_x, f_out
-        q_x = inference.pool_fixed_point(q_x, name="pool4")
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv7"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv8"], apply_relu=True)
+        q_e42 = q_x
+        q_x = inference.pool_fixed_point(q_x)
 
         # Bottleneck
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv9"], "conv9", f_out, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv10"], "conv10", f_out, apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv9"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv10"], apply_relu=True)
 
         # Decoder block 1 (skip from conv8)
-        q_x, f_up1, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv1"], "upconv1", f_out, apply_relu=False)
-        f_cat1 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv1", "conv8")
-        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up1, f_cat1)
-        q_skip_aligned = inference.align_tensor_for_concat(q_e42, f_e42, f_cat1)
-        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv11"], "conv11", f_cat1, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv12"], "conv12", f_out, apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["upconv1"], apply_relu=False)
+        q_cat = torch.cat([q_x, q_e42], dim=1)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_cat, cfg["conv11"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv12"], apply_relu=True)
 
         # Decoder block 2 (skip from conv6)
-        q_x, f_up2, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv2"], "upconv2", f_out, apply_relu=False)
-        f_cat2 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv2", "conv6")
-        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up2, f_cat2)
-        q_skip_aligned = inference.align_tensor_for_concat(q_e32, f_e32, f_cat2)
-        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv13"], "conv13", f_cat2, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv14"], "conv14", f_out, apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["upconv2"], apply_relu=False)
+        q_cat = torch.cat([q_x, q_e32], dim=1)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_cat, cfg["conv13"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv14"], apply_relu=True)
 
         # Decoder block 3 (skip from conv4)
-        q_x, f_up3, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv3"], "upconv3", f_out, apply_relu=False)
-        f_cat3 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv3", "conv4")
-        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up3, f_cat3)
-        q_skip_aligned = inference.align_tensor_for_concat(q_e22, f_e22, f_cat3)
-        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv15"], "conv15", f_cat3, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv16"], "conv16", f_out, apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["upconv3"], apply_relu=False)
+        q_cat = torch.cat([q_x, q_e22], dim=1)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_cat, cfg["conv15"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv16"], apply_relu=True)
 
         # Decoder block 4 (skip from conv2)
-        q_x, f_up4, _, _ = inference.run_fixed_point_layer(q_x, cfg["upconv4"], "upconv4", f_out, apply_relu=False)
-        f_cat4 = inference.get_concat_fractional_bits(inference.activation_ranges, "upconv4", "conv2")
-        q_x_aligned = inference.align_tensor_for_concat(q_x, f_up4, f_cat4)
-        q_skip_aligned = inference.align_tensor_for_concat(q_e12, f_e12, f_cat4)
-        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_cat, cfg["conv17"], "conv17", f_cat4, apply_relu=True)
-        q_x, f_out, _, _ = inference.run_fixed_point_layer(q_x, cfg["conv18"], "conv18", f_out, apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["upconv4"], apply_relu=False)
+        q_cat = torch.cat([q_x, q_e12], dim=1)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_cat, cfg["conv17"], apply_relu=True)
+        q_x, _, _ = inference.run_static_fixed_point_layer(q_x, cfg["conv18"], apply_relu=True)
 
         # Final output conv (no ReLU)
-        outconv_f_in = f_out
-        q_out, final_f_out, _, _ = inference.run_fixed_point_layer(
-            q_x, cfg["outconv"], "outconv", outconv_f_in, apply_relu=False
+        q_out, _, _ = inference.run_static_fixed_point_layer(
+            q_x, cfg["outconv"], apply_relu=False
         )
 
         # Dequantize final logits and update confusion counts
         with torch.no_grad():
-            dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
+            dequantized_logits = dequantize_fixed_point(q_out)
 
             int_probs = torch.sigmoid(dequantized_logits)
             int_preds = (int_probs > 0.5).float()
@@ -355,7 +331,7 @@ def benchmark(num_data: Optional[int] = None) -> dict:
 
         results[dataset_name] = {
             "float": float_metrics,
-            "integer": int_metrics,
+            "fixed-point": int_metrics,
         }
 
     return results
@@ -369,8 +345,8 @@ if __name__ == "__main__":
     print("Saved benchmark_results.json with:")
     for ds, vals in metrics.items():
         fl = vals["float"]
-        it = vals["integer"]
+        it = vals["fixed-point"]
         print(
             f"  {ds}: float(dice={fl['dice']:.4f}, iou={fl['iou']:.4f}, acc={fl['acc']:.4f}, f1={fl['f1']:.4f}), "
-            f"integer(dice={it['dice']:.4f}, iou={it['iou']:.4f}, acc={it['acc']:.4f}, f1={it['f1']:.4f})"
+            f"fixed-point(dice={it['dice']:.4f}, iou={it['iou']:.4f}, acc={it['acc']:.4f}, f1={it['f1']:.4f})"
         )

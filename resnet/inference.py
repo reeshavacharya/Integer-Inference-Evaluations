@@ -10,15 +10,12 @@ import resnet18 as train_mod
 from resnet18 import ResNet18
 
 from utils import (
-    get_fractional_bits,
     quantize_fixed_point,
     dequantize_fixed_point,
-    downscale_fixed_point,
     fixed_point_relu,
-    fixed_point_conv2d,
-    fixed_point_linear,
+    execute_and_shift_conv2d,
+    execute_and_shift_linear,
     add_bias,
-    fixed_point_add,
     fixed_point_global_avg_pool2d,
 )
 
@@ -37,13 +34,16 @@ int_trace = {"input": {}, "layers": []}
 # 1. Model Definition (mirror training ResNet18)
 # -----------------------------
 
+
 class FloatAdd(nn.Module):
     """A dummy module to make addition visible to calibration hooks."""
+
     def __init__(self):
         super().__init__()
 
     def forward(self, x, y):
         return x + y
+
 
 class BasicBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
@@ -91,6 +91,7 @@ class BasicBlock(nn.Module):
         out = self.relu2(out)
         return out
 
+
 class ResNet18Inference(nn.Module):
     def __init__(self, num_classes=10, in_channels=3):
         super(ResNet18Inference, self).__init__()
@@ -132,6 +133,7 @@ class ResNet18Inference(nn.Module):
         out = self.fc(out)
         return out
 
+
 # -----------------------------
 # 2. Setup and Data Extraction
 # -----------------------------
@@ -164,81 +166,6 @@ def get_random_sample(dataset_name: str):
     return image_tensor.unsqueeze(0), label
 
 
-# -----------------------------
-# 3. Calibration Hooks
-# -----------------------------
-activation_ranges = {}
-
-
-def calibration_hook(module, input, output, name):
-    activation_ranges[name] = {
-        "in_abs_max": input[0].detach().abs().max().item(),
-        "out_abs_max": output.detach().abs().max().item(),
-    }
-
-
-def register_hooks(model: ResNet18Inference):
-    handles = []
-
-    # 1. Hook conv1 JUST to capture the raw input image bounds
-    handles.append(
-        model.conv1.register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "conv1")
-        )
-    )
-
-    # 2. Hook initial conv block output (post-relu) for the first integer pass
-    handles.append(
-        model.relu.register_forward_hook(
-            lambda m, i, o: calibration_hook(m, i, o, "conv1_relu")
-        )
-    )
-
-    # Hook the distinct outputs of every block stage
-    for layer_idx, layer in enumerate(
-        [model.layer1, model.layer2, model.layer3, model.layer4], 1
-    ):
-        for block_idx, block in enumerate(layer):
-            prefix = f"layer{layer_idx}_block{block_idx}"
-
-            # Post-conv1 block (after ReLU)
-            handles.append(
-                block.relu1.register_forward_hook(
-                    lambda m, i, o, p=prefix: calibration_hook(
-                        m, i, o, f"{p}_conv1_relu"
-                    )
-                )
-            )
-            # Post-conv2 block (after BN, NO ReLU)
-            handles.append(
-                block.bn2.register_forward_hook(
-                    lambda m, i, o, p=prefix: calibration_hook(
-                        m, i, o, f"{p}_conv2_out"
-                    )
-                )
-            )
-            # Post-shortcut
-            handles.append(
-                block.shortcut.register_forward_hook(
-                    lambda m, i, o, p=prefix: calibration_hook(
-                        m, i, o, f"{p}_shortcut_out"
-                    )
-                )
-            )
-            # Final Block Output (after add -> relu2)
-            handles.append(
-                block.relu2.register_forward_hook(
-                    lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_out")
-                )
-            )
-
-    handles.append(
-        model.fc.register_forward_hook(lambda m, i, o: calibration_hook(m, i, o, "fc"))
-    )
-
-    return handles
-
-
 def fold_conv_bn_eval(conv, bn):
     """Folds BatchNorm parameters into Conv2d weights and biases."""
     w = conv.weight.detach()
@@ -264,70 +191,11 @@ def fold_conv_bn_eval(conv, bn):
 
     return w_folded, b_folded
 
+
 # -----------------------------
 # 4. Core Fixed-Point Inference Engine
 # -----------------------------
-def run_fixed_point_conv_block(q_input, conv, bn, layer_name, f_in, apply_relu=True):
-    # Fold BN into Conv
-    w_folded, b_folded = fold_conv_bn_eval(conv, bn)
-    
-    # Quantize Weights
-    f_w = get_fractional_bits(w_folded, num_bits=8)
-    q_w = quantize_fixed_point(w_folded, f_w, dtype=torch.int8)
 
-    # Get target output format
-    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
-    pseudo_out = torch.tensor([out_abs_max])
-    f_out = get_fractional_bits(pseudo_out, num_bits=8)
-
-    # Accumulator bits = f_in + f_w. Bias must exactly match this!
-    f_accum = f_in + f_w
-    q_bias = quantize_fixed_point(b_folded, f_accum, dtype=torch.int32)
-
-    # Math
-    int32_accum = fixed_point_conv2d(q_input, q_w, stride=conv.stride[0], padding=conv.padding[0])
-    int32_accum = add_bias(int32_accum, q_bias)
-
-    # Shift back to 8-bit and apply ReLU
-    shift_amount = f_accum - f_out
-    q_out_32 = downscale_fixed_point(int32_accum, shift=shift_amount)
-    q_out = torch.clamp(q_out_32, -128, 127).to(torch.int8)
-    
-    if apply_relu:
-        q_out = fixed_point_relu(q_out)
-
-    return q_out, f_out
-
-def run_fixed_point_basic_block(q_x, block, prefix, f_in):
-    # 1. Main Branch
-    q_out1, f_out1 = run_fixed_point_conv_block(
-        q_x, block.conv1, block.bn1, f"{prefix}_conv1_relu", f_in, apply_relu=True
-    )
-    q_out2, f_out2 = run_fixed_point_conv_block(
-        q_out1, block.conv2, block.bn2, f"{prefix}_conv2_out", f_out1, apply_relu=False
-    )
-
-    # 2. Shortcut Branch
-    if isinstance(block.shortcut, nn.Identity):
-        q_short, f_short = q_x, f_in
-    else:
-        short_conv, short_bn = block.shortcut[0], block.shortcut[1]
-        q_short, f_short = run_fixed_point_conv_block(
-            q_x, short_conv, short_bn, f"{prefix}_shortcut_out", f_in, apply_relu=False
-        )
-
-    # 3. Get target f_out for the addition
-    out_abs_max = activation_ranges[f"{prefix}_out"]["out_abs_max"]
-    pseudo_out = torch.tensor([out_abs_max])
-    f_final = get_fractional_bits(pseudo_out, num_bits=8)
-
-    # 4. ALIGN AND ADD
-    q_added = fixed_point_add(q_out2, f_out2, q_short, f_short, f_final)
-
-    # 5. Final ReLU
-    q_final = fixed_point_relu(q_added)
-
-    return q_final, f_final
 
 def _get_layer_config(model: ResNet18Inference):
     """Return conv/fc modules for calibration and integer inference.
@@ -345,28 +213,61 @@ def _get_layer_config(model: ResNet18Inference):
         "fc": model.fc,
     }
 
-def run_fixed_point_fc(q_input, fc, layer_name, f_in):
-    weight_float = fc.weight.detach()
-    f_w = get_fractional_bits(weight_float, num_bits=8)
-    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
 
-    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
-    pseudo_out = torch.tensor([out_abs_max])
-    f_out = get_fractional_bits(pseudo_out, num_bits=8)
+def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
+    # Fold BN into Conv
+    w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
-    f_accum = f_in + f_w
-    bias_float = fc.bias.detach()
-    q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
+    # Quantize Weights and Biases statically
+    q_w = quantize_fixed_point(w_folded)
+    q_bias = quantize_fixed_point(b_folded)
 
-    int32_accum = fixed_point_linear(q_input, q_w)
-    int32_accum = add_bias(int32_accum, q_bias)
+    # Math
+    q_accum = execute_and_shift_conv2d(
+        q_input, q_w, stride=conv.stride[0], padding=conv.padding[0]
+    )
+    q_out = add_bias(q_accum, q_bias)
 
-    shift_amount = f_accum - f_out
-    q_out_32 = downscale_fixed_point(int32_accum, shift=shift_amount)
-    q_out = torch.clamp(q_out_32, -128, 127).to(torch.int8)
+    if apply_relu:
+        q_out = fixed_point_relu(q_out)
 
-    # Final Stats Return for Logging
-    return q_out, f_out, f_w, shift_amount
+    return q_out
+
+
+def run_static_fixed_point_basic_block(q_x, block):
+    # 1. Main Branch
+    q_out1 = run_static_fixed_point_conv_block(
+        q_x, block.conv1, block.bn1, apply_relu=True
+    )
+    q_out2 = run_static_fixed_point_conv_block(
+        q_out1, block.conv2, block.bn2, apply_relu=False
+    )
+
+    # 2. Shortcut Branch
+    if isinstance(block.shortcut, nn.Identity):
+        q_short = q_x
+    else:
+        short_conv, short_bn = block.shortcut[0], block.shortcut[1]
+        q_short = run_static_fixed_point_conv_block(
+            q_x, short_conv, short_bn, apply_relu=False
+        )
+
+    # 3. Direct Addition (No alignment shifts required!)
+    q_added = torch.clamp(q_out2 + q_short, -9223372036854775808, 9223372036854775807)
+
+    # 4. Final ReLU
+    return fixed_point_relu(q_added)
+
+
+def run_static_fixed_point_fc(q_input, fc):
+    q_w = quantize_fixed_point(fc.weight.detach())
+    q_bias = quantize_fixed_point(fc.bias.detach())
+
+    q_out, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
+    q_out = add_bias(q_out, q_bias)
+
+    return q_out, max_bits, max_rem
+
 
 # -----------------------------
 # 5. Main Execution
@@ -407,51 +308,42 @@ def main(infer_data: str):
     model.load_state_dict(state)
     model.eval()
 
+    # ... [Keep initial setup and get_random_sample logic] ...
     image_tensor, true_label = get_random_sample(infer_data)
     print(f"\n[1] Extracted random {infer_data} sample (True Label: {true_label}).")
 
-    # Run Calibration (Float)
-    handles = register_hooks(model)
+    # Float Inference (For accuracy comparison only)
     with torch.no_grad():
         float_output = model(image_tensor)
-    for h in handles:
-        h.remove()
+        float_pred = float_output.argmax(dim=1).item()
+    print(f"[2] Float Inference complete. Prediction: {float_pred}")
 
-    float_pred = float_output.argmax(dim=1).item()
-    print(f"[2] Calibration complete. Float Model Prediction: {float_pred}")
+    # Quantize Input Image directly to Q31.32
+    q_x = quantize_fixed_point(image_tensor)
 
-    # Quantize Input Image
-    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
-    pseudo_in_tensor = torch.tensor([in_abs_max])
-    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
-
-    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
-
-    print("\n[3] Executing Dynamic Fixed-Point Inference...")
+    print("\n[3] Executing Static 64-Bit Fixed-Point Inference...")
 
     # Initial conv1
-    q_x, f_out = run_fixed_point_conv_block(
-        q_x, model.conv1, model.bn1, "conv1_relu", f_in, apply_relu=True
+    q_x = run_static_fixed_point_conv_block(
+        q_x, model.conv1, model.bn1, apply_relu=True
     )
 
     # Traverse all residual blocks
-    for layer_idx, stage in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
+    for layer_idx, stage in enumerate(
+        [model.layer1, model.layer2, model.layer3, model.layer4], 1
+    ):
         for block_idx, block in enumerate(stage):
-            prefix = f"layer{layer_idx}_block{block_idx}"
-            q_x, f_out = run_fixed_point_basic_block(q_x, block, prefix, f_out)
+            q_x = run_static_fixed_point_basic_block(q_x, block)
 
-    # Global Average Pooling (Pooling doesn't change fractional bits!)
+    # Global Average Pooling
     q_pooled = fixed_point_global_avg_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # Run Final FC Layer
-    fc_f_in = f_out
-    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_fc(
-        q_fc_in, model.fc, "fc", fc_f_in
-    )
+    q_out, max_bits_used, max_remainder = run_static_fixed_point_fc(q_fc_in, model.fc)
 
-    # Dequantize final output using fixed-point math
-    dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
+    # Dequantize final output
+    dequantized_logits = dequantize_fixed_point(q_out)
     int_pred = dequantized_logits.argmax(dim=1).item()
 
     # Logging
@@ -460,15 +352,34 @@ def main(infer_data: str):
     print("=" * 40)
     print(f"True Label:                   {true_label}")
     print(f"Float Model Prediction:       {float_pred}")
-    print(f"Fixed Point Model Prediction: {int_pred}")
+    print(f"Static 64-bit Prediction:     {int_pred}")
 
-    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
-    print(f"Input Fractional Bits (f_in):         {fc_f_in}") 
-    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
-    print(f"Accumulator Fractional Bits:          {fc_f_in + final_f_w}")
-    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
-    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
-    print("=" * 40)
+    if float_pred == int_pred:
+        print(
+            "\nSuccess! The 64-bit static model exactly matches the floating-point prediction."
+        )
+    else:
+        print(
+            "\nNote: The predictions differ. This can occasionally happen due to 32-bit truncation loss."
+        )
+
+    # ZK Logging Block
+    print("\n--- ZK Cryptographic Fixed-Point Stats (Final Layer) ---")
+    print(f"Architecture Format:         Q31.32 (64-bit Static Container)")
+    print(
+        f"Accumulator Max Bit-Length:  {max_bits_used} bits (Threshold: 63 for PyTorch, ~254 for ZK Field)"
+    )
+
+    headroom_used = (max_bits_used / 63.0) * 100 if max_bits_used else 0
+    print(f"PyTorch Container Headroom:  {headroom_used:.1f}% Capacity Reached")
+    print(
+        f"Max Truncation Remainder:    {max_remainder:.0f} (Precision dropped during >> 32 shift)"
+    )
+
+    print("\n--- Final Logit Sanity Check ---")
+    print(f"Raw 64-bit Integer Max:      {q_out.max().item()}")
+    print(f"Dequantized Float Max:       {dequantized_logits.max().item():.4f}")
+    print("=" * 56)
 
     # Save MNIST integer-only layer outputs (no floats) if enabled
     # if INT_TRACE_ENABLED:

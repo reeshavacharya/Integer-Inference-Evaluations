@@ -522,5 +522,5 @@ Using device: cuda
 [fixed-point][Flood] processed 28/29 samples (remaining 1)
 [fixed-point][Flood] processed 29/29 samples (remaining 0)
 Saved benchmark_results.json with:
-  Skin-Lesion: float(dice=0.8387, iou=0.7223, acc=0.9191, f1=0.8387), integer(dice=0.6600, iou=0.4925, acc=0.8623, f1=0.6600)
-  Flood: float(dice=0.8727, iou=0.7741, acc=0.8990, f1=0.8727), integer(dice=0.8682, iou=0.7671, acc=0.8944, f1=0.8682)
+  Skin-Lesion: float(dice=0.8387, iou=0.7223, acc=0.9191, f1=0.8387), integer(dice=0.8387, iou=0.7223, acc=0.9191, f1=0.8387)
+  Flood: float(dice=0.8727, iou=0.7741, acc=0.8990, f1=0.8727), integer(dice=0.8727, iou=0.7741, acc=0.8990, f1=0.8727)

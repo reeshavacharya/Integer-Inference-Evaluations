@@ -12,15 +12,12 @@ import json
 
 # Import the helper functions
 from utils import (
-    get_fractional_bits,
     quantize_fixed_point,
     dequantize_fixed_point,
-    downscale_fixed_point,
-    align_tensor_for_concat,
+    execute_and_shift_conv2d,
+    execute_and_shift_conv_transpose2d,
+    execute_and_shift_linear,
     fixed_point_relu,
-    fixed_point_conv2d,
-    fixed_point_conv_transpose2d,
-    fixed_point_linear,
     add_bias,
 )
 
@@ -236,43 +233,6 @@ def get_random_sample(dataset_name: str):
 # -----------------------------
 # 3. Calibration Hooks
 # -----------------------------
-activation_ranges = {}
-
-
-def calibration_hook(module, input, output, name):
-    activation_ranges[name] = {
-        "in_abs_max": input[0].detach().abs().max().item(),
-        "out_abs_max": output.detach().abs().max().item(),
-    }
-
-def get_concat_fractional_bits(range_dict, layer1_name, layer2_name):
-    """Finds the optimal shared fractional bits for concatenation."""
-    max1 = range_dict[layer1_name]["out_abs_max"]
-    max2 = range_dict[layer2_name]["out_abs_max"]
-    shared_max = max(max1, max2)
-    return get_fractional_bits(torch.tensor([shared_max]), num_bits=8)
-
-def get_concat_quantization_params(range_dict, layer1_name, layer2_name):
-    """
-    Finds the absolute minimum and maximum across two branches 
-    and calculates a shared 8-bit scale and zero-point.
-    """
-    min1, max1 = range_dict[layer1_name]["out_min"], range_dict[layer1_name]["out_max"]
-    min2, max2 = range_dict[layer2_name]["out_min"], range_dict[layer2_name]["out_max"]
-    
-    # The shared range must encompass both tensors
-    shared_min = min(min1, min2)
-    shared_max = max(max1, max2)
-    
-    # Force the minimum to be <= 0.0 to protect padding zero-points
-    shared_min = min(shared_min, 0.0)
-    
-    # Standard 8-bit uint8 quantization math
-    scale_cat = (shared_max - shared_min) / 255.0
-    zp_cat = int(round(0.0 - (shared_min / scale_cat)))
-    zp_cat = max(0, min(255, zp_cat))
-    
-    return scale_cat, zp_cat
 
 def _get_layer_config(model):
     """Return the conv/fc modules for calibration and integer inference.
@@ -313,67 +273,38 @@ def _get_layer_config(model):
         "outconv": model.outconv,
     }
 
+def run_static_fixed_point_layer(q_input, layer, apply_relu=True):
+    # Quantize Weights and Biases statically
+    q_w = quantize_fixed_point(layer.weight.detach())
 
-def register_hooks(model):
-    handles = []
-    cfg = _get_layer_config(model)
-
-    # Register calibration hooks for each layer in the configuration
-    def make_hook(layer_name):
-        def hook(m, inp, out):
-            calibration_hook(m, inp, out, layer_name)
-        return hook
-
-    for name, module in cfg.items():
-        handle = module.register_forward_hook(make_hook(name))
-        handles.append(handle)
-
-    return handles
-
-
-def run_fixed_point_layer(q_input, layer, layer_name, f_in, apply_relu=True):
-    weight_float = layer.weight.detach()
-    f_w = get_fractional_bits(weight_float, num_bits=8)
-    q_w = quantize_fixed_point(weight_float, f_w, dtype=torch.int8)
-
-    out_abs_max = activation_ranges[layer_name]["out_abs_max"]
-    pseudo_out = torch.tensor([out_abs_max])
-    f_out = get_fractional_bits(pseudo_out, num_bits=8)
-
-    f_accum = f_in + f_w
     if layer.bias is not None:
-        bias_float = layer.bias.detach()
-        q_bias = quantize_fixed_point(bias_float, f_accum, dtype=torch.int32)
+        q_bias = quantize_fixed_point(layer.bias.detach())
     else:
-        q_bias = torch.zeros(layer.out_channels, dtype=torch.int32)
+        q_bias = torch.zeros(layer.out_channels, dtype=torch.int64)
 
     # Route math based on layer type
     if isinstance(layer, nn.Conv2d):
         stride = getattr(layer, "stride", (1, 1))
         padding = getattr(layer, "padding", (0, 0))
-        int32_accum = fixed_point_conv2d(q_input, q_w, stride=stride, padding=padding)
+        q_accum, max_bits, max_rem = execute_and_shift_conv2d(q_input, q_w, stride=stride, padding=padding)
     elif isinstance(layer, nn.ConvTranspose2d):
         stride = getattr(layer, "stride", (1, 1))
         padding = getattr(layer, "padding", (0, 0))
         output_padding = getattr(layer, "output_padding", (0, 0))
-        int32_accum = fixed_point_conv_transpose2d(
+        q_accum, max_bits, max_rem = execute_and_shift_conv_transpose2d(
             q_input, q_w, stride=stride, padding=padding, output_padding=output_padding
         )
     elif isinstance(layer, nn.Linear):
-        int32_accum = fixed_point_linear(q_input, q_w)
+        q_accum, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
 
-    int32_accum = add_bias(int32_accum, q_bias)
-    
-    shift = f_accum - f_out
-    q_out = downscale_fixed_point(int32_accum, shift)
+    q_out = add_bias(q_accum, q_bias)
 
     if apply_relu:
         q_out = fixed_point_relu(q_out)
 
-    return q_out, f_out, f_w, shift
+    return q_out, max_bits, max_rem
 
-
-def pool_fixed_point(q_tensor, name=None):
+def pool_fixed_point(q_tensor):
     """Pure integer 2x2 max pooling."""
     B, C, H, W = q_tensor.shape
     windows = q_tensor.view(B, C, H // 2, 2, W // 2, 2)
@@ -409,14 +340,8 @@ def main(infer_data):
     # -----------------------------
     # [1] Float Inference + Calibration
     # -----------------------------
-    handles = register_hooks(model)
     with torch.no_grad():
         float_logits = model(image_tensor)
-    for h in handles:
-        h.remove()
-
-    # Binary segmentation metrics (lesion vs background)
-    with torch.no_grad():
         float_probs = torch.sigmoid(float_logits)
         float_preds = (float_probs > 0.5).float()
 
@@ -440,125 +365,77 @@ def main(infer_data):
     print("[1] Float inference and calibration complete.")
 
     # -----------------------------
-    # [2] Quantize Input
+    # [2] Static 64-bit Fixed-Point Forward Pass
     # -----------------------------
-    in_abs_max = activation_ranges["conv1"]["in_abs_max"]
-    pseudo_in_tensor = torch.tensor([in_abs_max])
-    f_in = get_fractional_bits(pseudo_in_tensor, num_bits=8)
+    print("\n[2] Executing Static 64-bit Fixed-Point Forward Pass...")
 
-    q_x = quantize_fixed_point(image_tensor, f_in, dtype=torch.int8)
-
-    # Save quantized input as an 8-bit grayscale image
-    q_x_img = torch.clamp(q_x[0, 0].to(torch.int16) + 128, 0, 255).to(torch.uint8).cpu().numpy()
-    Image.fromarray(q_x_img, mode="L").save(f"{infer_data.lower()}_quantized_sample.png")
-
-    debug_trace["input"] = {
-        "f_in": f_in,
-        "float_tensor": image_tensor.cpu().numpy().tolist(),
-        "quantized_tensor": q_x.cpu().numpy().tolist(),
-    }
-
-    print("[3] Executing Dynamic Fixed-Point Forward Pass...")
-
-    # -----------------------------
-    # [3] Fixed-Point Forward Through UNet
-    # -----------------------------
+    # Quantize Input statically to Q31.32
+    q_x = quantize_fixed_point(image_tensor)
+    
     layer_cfg = _get_layer_config(model)
 
     # Encoder block 1
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv1"], "conv1", f_in, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv2"], "conv2", f_out, apply_relu=True)
-    q_e12, f_e12 = q_x, f_out  # Skip connection 1 (before pool)
-    q_x = pool_fixed_point(q_x, name="pool1")
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv1"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv2"], apply_relu=True)
+    q_e12 = q_x  # Skip connection 1
+    q_x = pool_fixed_point(q_x)
 
     # Encoder block 2
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv3"], "conv3", f_out, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv4"], "conv4", f_out, apply_relu=True)
-    q_e22, f_e22 = q_x, f_out  # Skip connection 2
-    q_x = pool_fixed_point(q_x, name="pool2")
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv3"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv4"], apply_relu=True)
+    q_e22 = q_x  # Skip connection 2
+    q_x = pool_fixed_point(q_x)
 
     # Encoder block 3
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv5"], "conv5", f_out, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv6"], "conv6", f_out, apply_relu=True)
-    q_e32, f_e32 = q_x, f_out  # Skip connection 3
-    q_x = pool_fixed_point(q_x, name="pool3")
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv5"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv6"], apply_relu=True)
+    q_e32 = q_x  # Skip connection 3
+    q_x = pool_fixed_point(q_x)
 
     # Encoder block 4
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv7"], "conv7", f_out, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv8"], "conv8", f_out, apply_relu=True)
-    q_e42, f_e42 = q_x, f_out  # Skip connection 4
-    q_x = pool_fixed_point(q_x, name="pool4")
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv7"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv8"], apply_relu=True)
+    q_e42 = q_x  # Skip connection 4
+    q_x = pool_fixed_point(q_x)
 
-    # ==========================================
-    # Bottleneck (no pooling)
-    # ==========================================
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv9"], "conv9", f_out, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv10"], "conv10", f_out, apply_relu=True)
+    # Bottleneck
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv9"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv10"], apply_relu=True)
 
-    # ==========================================
-    # Decoder block 1 (Skip connection from e42 -> "conv8")
-    # ==========================================
-    q_x, f_up1, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv1"], "upconv1", f_out, apply_relu=False)
-    f_cat1 = get_concat_fractional_bits(activation_ranges, "upconv1", "conv8")
-    
-    q_x_aligned = align_tensor_for_concat(q_x, f_up1, f_cat1)
-    q_skip_aligned = align_tensor_for_concat(q_e42, f_e42, f_cat1)
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    
-    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv11"], "conv11", f_cat1, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv12"], "conv12", f_out, apply_relu=True)
+    # Decoder block 1 (Direct Concatenation without alignment shifts!)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["upconv1"], apply_relu=False)
+    q_cat = torch.cat([q_x, q_e42], dim=1)
+    q_x, _, _ = run_static_fixed_point_layer(q_cat, layer_cfg["conv11"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv12"], apply_relu=True)
 
-    # ==========================================
-    # Decoder block 2 (Skip connection from e32 -> "conv6")
-    # ==========================================
-    q_x, f_up2, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv2"], "upconv2", f_out, apply_relu=False)
-    f_cat2 = get_concat_fractional_bits(activation_ranges, "upconv2", "conv6")
-    
-    q_x_aligned = align_tensor_for_concat(q_x, f_up2, f_cat2)
-    q_skip_aligned = align_tensor_for_concat(q_e32, f_e32, f_cat2)
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    
-    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv13"], "conv13", f_cat2, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv14"], "conv14", f_out, apply_relu=True)
+    # Decoder block 2
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["upconv2"], apply_relu=False)
+    q_cat = torch.cat([q_x, q_e32], dim=1)
+    q_x, _, _ = run_static_fixed_point_layer(q_cat, layer_cfg["conv13"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv14"], apply_relu=True)
 
-    # ==========================================
-    # Decoder block 3 (Skip connection from e22 -> "conv4")
-    # ==========================================
-    q_x, f_up3, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv3"], "upconv3", f_out, apply_relu=False)
-    f_cat3 = get_concat_fractional_bits(activation_ranges, "upconv3", "conv4")
-    
-    q_x_aligned = align_tensor_for_concat(q_x, f_up3, f_cat3)
-    q_skip_aligned = align_tensor_for_concat(q_e22, f_e22, f_cat3)
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    
-    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv15"], "conv15", f_cat3, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv16"], "conv16", f_out, apply_relu=True)
+    # Decoder block 3
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["upconv3"], apply_relu=False)
+    q_cat = torch.cat([q_x, q_e22], dim=1)
+    q_x, _, _ = run_static_fixed_point_layer(q_cat, layer_cfg["conv15"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv16"], apply_relu=True)
 
-    # ==========================================
-    # Decoder block 4 (Skip connection from e12 -> "conv2")
-    # ==========================================
-    q_x, f_up4, _, _ = run_fixed_point_layer(q_x, layer_cfg["upconv4"], "upconv4", f_out, apply_relu=False)
-    f_cat4 = get_concat_fractional_bits(activation_ranges, "upconv4", "conv2")
-    
-    q_x_aligned = align_tensor_for_concat(q_x, f_up4, f_cat4)
-    q_skip_aligned = align_tensor_for_concat(q_e12, f_e12, f_cat4)
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    
-    q_x, f_out, _, _ = run_fixed_point_layer(q_cat, layer_cfg["conv17"], "conv17", f_cat4, apply_relu=True)
-    q_x, f_out, _, _ = run_fixed_point_layer(q_x, layer_cfg["conv18"], "conv18", f_out, apply_relu=True)
+    # Decoder block 4
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["upconv4"], apply_relu=False)
+    q_cat = torch.cat([q_x, q_e12], dim=1)
+    q_x, _, _ = run_static_fixed_point_layer(q_cat, layer_cfg["conv17"], apply_relu=True)
+    q_x, _, _ = run_static_fixed_point_layer(q_x, layer_cfg["conv18"], apply_relu=True)
 
-    # Final output conv (no ReLU)
-    outconv_f_in = f_out
-    q_out, final_f_out, final_f_w, final_shift = run_fixed_point_layer(
-        q_x, layer_cfg["outconv"], "outconv", outconv_f_in, apply_relu=False
+    # Final output conv
+    q_out, max_bits_used, max_remainder = run_static_fixed_point_layer(
+        q_x, layer_cfg["outconv"], apply_relu=False
     )
 
     # -----------------------------
-    # [4] Fixed-Point Metrics
+    # [3] Fixed-Point Metrics & ZK Logging
     # -----------------------------
     with torch.no_grad():
-        dequantized_logits = dequantize_fixed_point(q_out, final_f_out)
-
+        dequantized_logits = dequantize_fixed_point(q_out)
         fp_probs = torch.sigmoid(dequantized_logits)
         fp_preds = (fp_probs > 0.5).float()
 
@@ -578,11 +455,6 @@ def main(infer_data):
         recall = (tp + eps) / (tp + fn + eps)
         fp_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
 
-    print("[4] Fixed-Point U-Net inference complete.")
-
-    # -----------------------------
-    # [5] Summary Logging
-    # -----------------------------
     print("\n" + "=" * 50)
     print(" SEGMENTATION INFERENCE SUMMARY ")
     print("=" * 50)
@@ -590,15 +462,16 @@ def main(infer_data):
         f"Float Model       -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
     )
     print(
-        f"Fixed-Point Model -> Dice: {fp_dice:.4f}, IoU: {fp_iou:.4f}, Acc: {fp_acc:.4f}, F1: {fp_f1:.4f}"
+        f"Static 64-bit     -> Dice: {fp_dice:.4f}, IoU: {fp_iou:.4f}, Acc: {fp_acc:.4f}, F1: {fp_f1:.4f}"
     )
-
-    print("\n--- Final Layer Dynamic Fixed-Point Stats ---")
-    print(f"Input Fractional Bits (f_in):         {outconv_f_in}") 
-    print(f"Weight Fractional Bits (f_w):         {final_f_w}")
-    print(f"Accumulator Fractional Bits:          {outconv_f_in + final_f_w}")
-    print(f"Right Bit-Shift Amount (>>):          {final_shift}")
-    print(f"Final Output Fractional Bits (f_out): {final_f_out}")
+    
+    print("\n--- ZK Cryptographic Fixed-Point Stats (Final Layer) ---")
+    print(f"Architecture Format:         Q31.32 (Pre-Truncated)")
+    print(f"Accumulator Max Bit-Length:  {max_bits_used} bits (Safe for native PyTorch 64-bit!)")
+    
+    headroom_used = (max_bits_used / 63.0) * 100 if max_bits_used else 0
+    print(f"PyTorch Container Headroom:  {headroom_used:.1f}% Capacity Reached")
+    print(f"Max Truncation Remainder:    {max_remainder:.0f} (Precision dropped prior to multiplication)")
     print("=" * 50)
 
     # trace_path = "fixed_point_inference_trace.json"
