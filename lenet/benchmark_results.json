@@ -10,5 +10,41 @@
   "Brain-MRI": {
     "float": 94.16666666666667,
     "integer": 36.666666666666664
+  },
+  "EYE": {
+    "float": 74.23405867705965,
+    "integer": 73.07567392010392
+  },
+  "CHEST": {
+    "float": 92.9655990510083,
+    "integer": 91.72004744958481
+  },
+  "Brain-Cancer": {
+    "float": 96.73333333333333,
+    "integer": 31.6
+  },
+  "Breast-Cancer": {
+    "float": 93.3,
+    "integer": 42.5
+  },
+  "Cervical-Cancer": {
+    "float": 99.88,
+    "integer": 21.96
+  },
+  "Kidney-Cancer": {
+    "float": 100.0,
+    "integer": 49.7
+  },
+  "Lung-And-Colon-Cancer": {
+    "float": 98.48,
+    "integer": 33.72
+  },
+  "Lymphoma-Cancer": {
+    "float": 99.86666666666666,
+    "integer": 38.86666666666667
+  },
+  "Oral-Cancer": {
+    "float": 92.007992007992,
+    "integer": 50.14985014985015
   }
 }
