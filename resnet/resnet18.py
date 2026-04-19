@@ -1,13 +1,17 @@
 import kagglehub
 import os
 import argparse
+import csv
+import subprocess
+import shutil
 from collections import Counter
 from bisect import bisect_right
+from PIL import Image
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset
+from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset, Dataset
 from torchvision import datasets, transforms
 
 
@@ -119,6 +123,8 @@ model = None
 criterion = None
 optimizer = None
 scheduler = None
+is_multilabel = False
+chest_label_names = None
 
 
 # -----------------------------
@@ -376,6 +382,360 @@ def setup_Brain_MRI(batch_size: int = 64):
     return train_dataset
 
 
+class EyeRetinopathyDataset(Dataset):
+    def __init__(self, samples, transform=None):
+        self.samples = samples
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        image_path, label = self.samples[idx]
+        image = Image.open(image_path).convert("RGB")
+
+        if self.transform is not None:
+            image = self.transform(image)
+
+        return image, label
+
+
+def _load_eye_samples(image_dir: str, label_csv: str, id_col: str, label_col: str):
+    samples = []
+
+    with open(label_csv, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            image_id = row[id_col].strip()
+            label = int(row[label_col])
+            image_path = os.path.join(image_dir, f"{image_id}.jpg")
+            if os.path.exists(image_path):
+                samples.append((image_path, label))
+
+    return samples
+
+
+def setup_EYE(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    eye_root = "./data/EYE"
+    labels_root = os.path.join(eye_root, "labels")
+
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(8),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    samples = []
+    samples.extend(
+        _load_eye_samples(
+            os.path.join(eye_root, "resized train 15"),
+            os.path.join(labels_root, "trainLabels15.csv"),
+            id_col="image",
+            label_col="level",
+        )
+    )
+    samples.extend(
+        _load_eye_samples(
+            os.path.join(eye_root, "resized test 15"),
+            os.path.join(labels_root, "testLabels15.csv"),
+            id_col="image",
+            label_col="level",
+        )
+    )
+    samples.extend(
+        _load_eye_samples(
+            os.path.join(eye_root, "resized train 19"),
+            os.path.join(labels_root, "trainLabels19.csv"),
+            id_col="id_code",
+            label_col="diagnosis",
+        )
+    )
+
+    if os.path.exists(os.path.join(labels_root, "testImages19.csv")):
+        with open(os.path.join(labels_root, "testImages19.csv"), "r", newline="") as f:
+            unlabeled_count = sum(1 for _ in csv.DictReader(f))
+        print(f"Skipping {unlabeled_count} images from resized test 19 (no labels provided).")
+
+    if len(samples) == 0:
+        raise RuntimeError("No labeled EYE samples were found. Check data/EYE paths.")
+
+    eval_dataset = EyeRetinopathyDataset(samples, transform=eval_transform)
+    train_dataset = EyeRetinopathyDataset(samples, transform=train_transform)
+
+    total_len = len(eval_dataset)
+    train_size = int(0.8 * total_len)
+    val_size = int(0.1 * total_len)
+    test_size = total_len - train_size - val_size
+
+    train_subset_base, val_subset, test_subset = random_split(
+        eval_dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    train_subset = Subset(train_dataset, train_subset_base.indices)
+
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    return train_loader, val_loader, test_loader, 5, 3
+
+
+def setup_CHEST(batch_size: int = 64):
+    global train_loader, val_loader, test_loader, chest_label_names
+
+    chest_root = "./data/CHEST"
+    images_dir = os.path.join(chest_root, "sample", "images")
+    labels_csv = os.path.join(chest_root, "sample", "sample_labels.csv")
+
+    if not os.path.exists(images_dir):
+        raise RuntimeError(f"CHEST images directory not found: {images_dir}")
+    if not os.path.exists(labels_csv):
+        raise RuntimeError(f"CHEST labels CSV not found: {labels_csv}")
+
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.RandomRotation(5),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+        ]
+    )
+
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+        ]
+    )
+
+    records = []
+    label_set = set()
+    with open(labels_csv, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            image_name = row["Image Index"].strip()
+            finding_labels = [x.strip() for x in row["Finding Labels"].split("|") if x.strip()]
+            image_path = os.path.join(images_dir, image_name)
+            if not os.path.exists(image_path):
+                continue
+            records.append((image_path, finding_labels))
+            label_set.update(finding_labels)
+
+    if len(records) == 0:
+        raise RuntimeError("No valid CHEST samples found from sample_labels.csv")
+
+    chest_label_names = sorted(label_set)
+    label_to_idx = {name: i for i, name in enumerate(chest_label_names)}
+    print(f"CHEST labels ({len(chest_label_names)}): {chest_label_names}")
+
+    class ChestMultiLabelDataset(Dataset):
+        def __init__(self, samples, transform):
+            self.samples = samples
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.samples)
+
+        def __getitem__(self, idx):
+            image_path, labels = self.samples[idx]
+            image = Image.open(image_path).convert("L")
+            if self.transform is not None:
+                image = self.transform(image)
+            target = torch.zeros(len(label_to_idx), dtype=torch.float32)
+            for label_name in labels:
+                target[label_to_idx[label_name]] = 1.0
+            return image, target
+
+    eval_dataset = ChestMultiLabelDataset(records, transform=eval_transform)
+    train_dataset = ChestMultiLabelDataset(records, transform=train_transform)
+
+    total_len = len(eval_dataset)
+    train_size = int(0.8 * total_len)
+    val_size = int(0.1 * total_len)
+    test_size = total_len - train_size - val_size
+
+    train_subset_base, val_subset, test_subset = random_split(
+        eval_dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    train_subset = Subset(train_dataset, train_subset_base.indices)
+
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    return train_loader, val_loader, test_loader, len(chest_label_names), 1
+
+
+def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
+    base_root = "./data/Multi-Cancer/Multi Cancer/Multi Cancer"
+    cancer_root = os.path.join(base_root, cancer_folder)
+
+    if not os.path.exists(cancer_root):
+        raise RuntimeError(f"Multi-Cancer folder not found: {cancer_root}")
+
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    eval_dataset = datasets.ImageFolder(root=cancer_root, transform=eval_transform)
+    train_dataset = datasets.ImageFolder(root=cancer_root, transform=train_transform)
+
+    total_len = len(eval_dataset)
+    train_size = int(0.8 * total_len)
+    val_size = int(0.1 * total_len)
+    test_size = total_len - train_size - val_size
+
+    train_subset_base, val_subset, test_subset = random_split(
+        eval_dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    train_subset = Subset(train_dataset, train_subset_base.indices)
+
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    return train_loader, val_loader, test_loader, len(eval_dataset.classes), 3, eval_dataset.classes
+
+
+def setup_Multi_Cancer_Brain(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Brain Cancer", batch_size)
+
+
+def setup_Multi_Cancer_Breast(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Breast Cancer", batch_size)
+
+
+def setup_Multi_Cancer_Cervical(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Cervical Cancer", batch_size)
+
+
+def setup_Multi_Cancer_Kidney(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Kidney Cancer", batch_size)
+
+
+def setup_Multi_Cancer_Lung_Colon(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Lung and Colon Cancer", batch_size)
+
+
+def setup_Multi_Cancer_Lymphoma(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Lymphoma", batch_size)
+
+
+def setup_Multi_Cancer_Oral(batch_size: int = 64):
+    return _setup_multi_cancer_folder("Oral Cancer", batch_size)
+
+
+def setup_Multi_Cancer(batch_size: int = 64):
+    return [
+        ("Brain Cancer", setup_Multi_Cancer_Brain(batch_size)),
+        ("Breast Cancer", setup_Multi_Cancer_Breast(batch_size)),
+        ("Cervical Cancer", setup_Multi_Cancer_Cervical(batch_size)),
+        ("Kidney Cancer", setup_Multi_Cancer_Kidney(batch_size)),
+        ("Lung and Colon Cancer", setup_Multi_Cancer_Lung_Colon(batch_size)),
+        ("Lymphoma", setup_Multi_Cancer_Lymphoma(batch_size)),
+        ("Oral Cancer", setup_Multi_Cancer_Oral(batch_size)),
+    ]
+
+
+def _train_current_dataset(num_epochs: int, best_model_path: str):
+    best_val_acc = 0.0
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+            if labels.dim() > 1:
+                preds = (torch.sigmoid(outputs) >= 0.5).float()
+                correct += (preds == labels).sum().item()
+                total += labels.numel()
+            else:
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+
+        train_loss = running_loss / total
+        train_acc = 100.0 * correct / total
+
+        val_loss, val_acc = evaluate(model, val_loader, criterion)
+
+        if scheduler is not None:
+            scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]["lr"]
+            lr_msg = f" | LR: {current_lr:.6f}"
+        else:
+            lr_msg = ""
+
+        print(
+            f"Epoch [{epoch+1}/{num_epochs}] | "
+            f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
+            f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%"
+            f"{lr_msg}"
+        )
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), best_model_path)
+            print(f"Saved best model to {best_model_path}")
+
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
+    model.to(device)
+
+    test_loss, test_acc = evaluate(model, test_loader, criterion)
+    print(f"Best Validation Accuracy: {best_val_acc:.2f}%")
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+
+    return best_val_acc, test_loss, test_acc
+
+
 # -----------------------------
 # Evaluation function
 # -----------------------------
@@ -393,9 +753,14 @@ def evaluate(model, dataloader, criterion):
             loss = criterion(outputs, labels)
 
             total_loss += loss.item() * images.size(0)
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            if labels.dim() > 1:
+                preds = (torch.sigmoid(outputs) >= 0.5).float()
+                correct += (preds == labels).sum().item()
+                total += labels.numel()
+            else:
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
     avg_loss = total_loss / total
     acc = 100.0 * correct / total
@@ -406,10 +771,11 @@ def evaluate(model, dataloader, criterion):
 # Training loop with best model saving
 # -----------------------------
 def main(args: argparse.Namespace):
-    global model, criterion, optimizer, scheduler
+    global model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader, is_multilabel
 
     best_val_acc = 0.0
     num_epochs = 10
+    is_multilabel = False
 
     if args.data_dir == "./data/MNIST/":
         best_model_path = "best_resnet18_mnist.pth"
@@ -457,6 +823,83 @@ def main(args: argparse.Namespace):
             patience=3,
         )
 
+    elif args.data_dir == "./data/EYE/":
+        best_model_path = "best_resnet18_eye.pth"
+        num_epochs = 50
+
+        train_loader, val_loader, test_loader, num_classes, in_channels = setup_EYE(args.batch_size)
+
+        model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=1e-4,
+        )
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=3,
+        )
+
+    elif args.data_dir == "./data/CHEST/":
+        best_model_path = "best_resnet18_chest.pth"
+        num_epochs = 50
+
+        train_loader, val_loader, test_loader, num_classes, in_channels = setup_CHEST(args.batch_size)
+
+        model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=1e-4,
+        )
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=3,
+        )
+        is_multilabel = True
+
+    elif args.data_dir == "./data/Multi-Cancer/":
+        num_epochs = 50
+        multi_cancer_runs = setup_Multi_Cancer(args.batch_size)
+
+        for cancer_name, cancer_setup in multi_cancer_runs:
+            print(f"\n=== Training Multi-Cancer dataset: {cancer_name} ===")
+
+            (
+                train_loader,
+                val_loader,
+                test_loader,
+                num_classes,
+                in_channels,
+                class_names,
+            ) = cancer_setup
+
+            print(f"Classes ({num_classes}): {class_names}")
+
+            model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=0.5,
+                patience=3,
+            )
+
+            safe_name = cancer_name.lower().replace(" ", "_").replace("&", "and")
+            safe_name = safe_name.replace("__", "_")
+            best_model_path = f"best_resnet18_multi_{safe_name}.pth"
+
+            _train_current_dataset(num_epochs, best_model_path)
+
+        return
+
     else:
         print("Training using default data directory: ./data/MNIST/")
         best_model_path = "best_resnet18_mnist.pth"
@@ -483,9 +926,14 @@ def main(args: argparse.Namespace):
             optimizer.step()
 
             running_loss += loss.item() * images.size(0)
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            if labels.dim() > 1:
+                preds = (torch.sigmoid(outputs) >= 0.5).float()
+                correct += (preds == labels).sum().item()
+                total += labels.numel()
+            else:
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
         train_loss = running_loss / total
         train_acc = 100.0 * correct / total
@@ -523,6 +971,15 @@ def main(args: argparse.Namespace):
 
 
 def datasetDownloader(dataset_name: str):
+    def cleanup_chest_duplicates(chest_root: str):
+        primary_images = os.path.join(chest_root, "sample", "images")
+        duplicate_root = os.path.join(chest_root, "sample", "sample")
+        duplicate_images = os.path.join(duplicate_root, "images")
+
+        if os.path.exists(primary_images) and os.path.exists(duplicate_images):
+            print("Removing duplicated CHEST folder: ./data/CHEST/sample/sample")
+            shutil.rmtree(duplicate_root)
+
     if not os.path.exists("./data"):
         os.makedirs("./data")
 
@@ -547,6 +1004,32 @@ def datasetDownloader(dataset_name: str):
             print("Downloading CIFAR-10 dataset...")
             datasets.CIFAR10(root=cifar_root, train=True, download=True)
             datasets.CIFAR10(root=cifar_root, train=False, download=True)
+
+    if dataset_name == "EYE":
+        if not os.path.exists("./data/EYE"):
+            print("Downloading 2015-2019 Blindness Detection Images dataset...")
+            kagglehub.dataset_download(
+                "benjaminwarner/resized-2015-2019-blindness-detection-images",
+                output_dir="./data/EYE",
+            )
+            subprocess.run('cd ./data/EYE && unzip "*.zip"', shell=True)
+
+    if dataset_name == "CHEST":
+        chest_root = "./data/CHEST"
+        if not os.path.exists(chest_root):
+            print("Downloading NIH Chest X-ray sample dataset...")
+            kagglehub.dataset_download("nih-chest-xrays/sample", output_dir=chest_root)
+            subprocess.run('cd ./data/CHEST && unzip "*.zip"', shell=True)
+        cleanup_chest_duplicates(chest_root)
+
+    if dataset_name == "Multi-Cancer":
+        if not os.path.exists("./data/Multi-Cancer"):
+            print("Downloading Multi-Cancer dataset...")
+            kagglehub.dataset_download(
+                "obulisainaren/multi-cancer",
+                output_dir="./data/Multi-Cancer",
+            )
+            subprocess.run('cd ./data/Multi-Cancer && unzip "*.zip"', shell=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -586,6 +1069,15 @@ if __name__ == "__main__":
     elif args.train_data.upper() in ("CIFR10", "CIFAR10"):
         args.data_dir = "./data/CIFAR10/"
         datasetDownloader("CIFAR10")
+    elif args.train_data == "EYE":
+        args.data_dir = "./data/EYE/"
+        datasetDownloader("EYE")
+    elif args.train_data == "CHEST":
+        args.data_dir = "./data/CHEST/"
+        datasetDownloader("CHEST")
+    elif args.train_data == "Multi-Cancer":
+        args.data_dir = "./data/Multi-Cancer/"
+        datasetDownloader("Multi-Cancer")
     else:
         print("Invalid training data specified. Using default data directory: ./data/MNIST/")
         args.data_dir = "./data/MNIST/"

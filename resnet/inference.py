@@ -126,31 +126,147 @@ class ResNet18Inference(nn.Module):
 # -----------------------------
 
 
-def get_random_sample(dataset_name: str):
-	"""Return a single preprocessed sample tensor and label.
+def _multi_cancer_infer_map():
+    return {
+        "BRAIN-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Brain,
+            "model_path": "best_resnet18_multi_brain_cancer.pth",
+            "num_classes": 3,
+            "in_channels": 3,
+            "display": "Brain-Cancer",
+        },
+        "BREAST-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Breast,
+            "model_path": "best_resnet18_multi_breast_cancer.pth",
+            "num_classes": 2,
+            "in_channels": 3,
+            "display": "Breast-Cancer",
+        },
+        "CERVICAL-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Cervical,
+            "model_path": "best_resnet18_multi_cervical_cancer.pth",
+            "num_classes": 5,
+            "in_channels": 3,
+            "display": "Cervical-Cancer",
+        },
+        "KIDNEY-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Kidney,
+            "model_path": "best_resnet18_multi_kidney_cancer.pth",
+            "num_classes": 2,
+            "in_channels": 3,
+            "display": "Kidney-Cancer",
+        },
+        "LUNG-AND-COLON-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Lung_Colon,
+            "model_path": "best_resnet18_multi_lung_and_colon_cancer.pth",
+            "num_classes": 5,
+            "in_channels": 3,
+            "display": "Lung-And-Colon-Cancer",
+        },
+        "LYMPHOMA-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Lymphoma,
+            "model_path": "best_resnet18_multi_lymphoma.pth",
+            "num_classes": 3,
+            "in_channels": 3,
+            "display": "Lymphoma-Cancer",
+        },
+        "ORAL-CANCER": {
+            "setup_fn": train_mod.setup_Multi_Cancer_Oral,
+            "model_path": "best_resnet18_multi_oral_cancer.pth",
+            "num_classes": 2,
+            "in_channels": 3,
+            "display": "Oral-Cancer",
+        },
+    }
 
-	Uses the same 10% test partition as defined in resnet18.py for
-	MNIST, CIFAR10, and Brain-MRI by calling the corresponding
-	setup_* function and sampling from its test_loader.
-	"""
 
-	name = dataset_name.upper()
+def _resolve_infer_config(infer_data: str):
+    name = infer_data.upper()
 
-	if name == "MNIST":
-		train_mod.setup_MNIST(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	elif name in ("CIFR10", "CIFAR10"):
-		train_mod.setup_CIFAR10(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	elif name == "BRAIN-MRI":
-		train_mod.setup_Brain_MRI(batch_size=1)
-		test_dataset = train_mod.test_loader.dataset
-	else:
-		raise ValueError(f"Unknown dataset: {dataset_name}")
+    if name == "MNIST":
+        return {
+            "display": "MNIST",
+            "setup_fn": train_mod.setup_MNIST,
+            "model": ResNet18Inference(num_classes=10, in_channels=1),
+            "model_path": "best_resnet18_mnist.pth",
+            "is_multilabel": False,
+        }
 
-	idx = random.randint(0, len(test_dataset) - 1)
-	image_tensor, label = test_dataset[idx]
-	return image_tensor.unsqueeze(0), label
+    if name in ("CIFR10", "CIFAR10"):
+        return {
+            "display": "CIFAR10",
+            "setup_fn": train_mod.setup_CIFAR10,
+            "model": ResNet18Inference(num_classes=10, in_channels=3),
+            "model_path": "best_resnet18_cifar10.pth",
+            "is_multilabel": False,
+        }
+
+    if name == "BRAIN-MRI":
+        return {
+            "display": "Brain-MRI",
+            "setup_fn": train_mod.setup_Brain_MRI,
+            "model": ResNet18Inference(num_classes=4, in_channels=1),
+            "model_path": "best_resnet18_brain_mri.pth",
+            "is_multilabel": False,
+        }
+
+    if name == "EYE":
+        return {
+            "display": "EYE",
+            "setup_fn": train_mod.setup_EYE,
+            "model": ResNet18Inference(num_classes=5, in_channels=3),
+            "model_path": "best_resnet18_eye.pth",
+            "is_multilabel": False,
+        }
+
+    if name == "CHEST":
+        return {
+            "display": "CHEST",
+            "setup_fn": train_mod.setup_CHEST,
+            "model": ResNet18Inference(num_classes=15, in_channels=1),
+            "model_path": "best_resnet18_chest.pth",
+            "is_multilabel": True,
+        }
+
+    multi_map = _multi_cancer_infer_map()
+    if name in multi_map:
+        cfg = multi_map[name]
+        return {
+            "display": cfg["display"],
+            "setup_fn": cfg["setup_fn"],
+            "model": ResNet18Inference(
+                num_classes=cfg["num_classes"],
+                in_channels=cfg["in_channels"],
+            ),
+            "model_path": cfg["model_path"],
+            "is_multilabel": False,
+        }
+
+    raise ValueError(f"Unknown dataset: {infer_data}")
+
+
+def get_random_sample(dataset_name: str, setup_fn):
+    """Return a random sample from the deterministic 10% test split."""
+
+    setup_fn(batch_size=1)
+    test_dataset = train_mod.test_loader.dataset
+
+    idx = random.randint(0, len(test_dataset) - 1)
+    image_tensor, label = test_dataset[idx]
+
+    label_text = str(label)
+    if isinstance(label, torch.Tensor):
+        if label.dim() == 0:
+            label_text = str(int(label.item()))
+        else:
+            active_idx = torch.where(label > 0.5)[0].tolist()
+            if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
+                names = [train_mod.chest_label_names[i] for i in active_idx]
+                label_text = "|".join(names) if names else "No active label"
+            else:
+                label_text = str(active_idx)
+
+    return image_tensor.unsqueeze(0), label, label_text
 
 
 # -----------------------------
@@ -405,7 +521,11 @@ def run_integer_basic_block(q_x, block, prefix, scale_in, zp_in):
 def main(infer_data: str):
     print("--- Starting ResNet18 Quantized Inference Pipeline ---")
 
+    cfg = _resolve_infer_config(infer_data)
     name = infer_data.upper()
+    dataset_display = cfg["display"]
+    model = cfg["model"]
+    model_path = cfg["model_path"]
 
     global INT_TRACE_ENABLED, int_trace
     INT_TRACE_ENABLED = name == "MNIST"
@@ -413,18 +533,8 @@ def main(infer_data: str):
         # reset trace for this run
         int_trace = {"input": {}, "layers": []}
 
-    if name == "MNIST":
-        model = ResNet18Inference(num_classes=10, in_channels=1)
-        model_path = "best_resnet18_mnist.pth"
-    elif name in ("CIFR10", "CIFAR10"):
-        model = ResNet18Inference(num_classes=10, in_channels=3)
-        model_path = "best_resnet18_cifar10.pth"
-    elif name == "BRAIN-MRI":
-        # Note: Change in_channels=3 if your MRI training script used RGB images
-        model = ResNet18Inference(num_classes=4, in_channels=1) 
-        model_path = "best_resnet18_brain_mri.pth"
-    else:
-        raise ValueError(f"Unknown dataset: {infer_data}")
+    print(f"[0] Inference target: {dataset_display}")
+    print(f"[0] Loading model weights from: {model_path}")
 
     if not os.path.exists(model_path):
         print(f"Error: '{model_path}' not found. Please train the model first.")
@@ -438,8 +548,13 @@ def main(infer_data: str):
     model.load_state_dict(state)
     model.eval()
 
-    image_tensor, true_label = get_random_sample(infer_data)
-    print(f"\n[1] Extracted random {infer_data} sample (True Label: {true_label}).")
+    image_tensor, true_label, true_label_text = get_random_sample(
+        infer_data,
+        cfg["setup_fn"],
+    )
+    print(
+        f"\n[1] Extracted random {dataset_display} sample from test split (True Label: {true_label_text})."
+    )
 
     # Run Calibration (Float)
     handles = register_hooks(model)
@@ -513,9 +628,19 @@ def main(infer_data: str):
     print("\n" + "=" * 40)
     print(" RESNET18 INFERENCE SUMMARY ")
     print("=" * 40)
-    print(f"True Label:               {true_label}")
+    print(f"Dataset:                  {dataset_display}")
+    print(f"True Label:               {true_label_text}")
     print(f"Float Model Prediction:   {float_pred}")
     print(f"Integer Model Prediction: {int_pred}")
+
+    if cfg["is_multilabel"]:
+        chest_scores = torch.sigmoid(dequantized_logits)[0]
+        active = (chest_scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
+        if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
+            names = [train_mod.chest_label_names[i] for i in active]
+            print(f"Predicted Active Labels:  {names if names else ['None >= 0.5']}")
+        else:
+            print(f"Predicted Active Labels:  {active}")
 
     if float_pred == int_pred:
         print("\nSuccess! The integer-quantized model matches the floating-point prediction.")
@@ -543,7 +668,11 @@ if __name__ == "__main__":
 		"--infer",
 		type=str,
 		default="CIFAR10",
-		help="Inference data to use (MNIST, CIFAR10, Brain-MRI)",
+        help=(
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, EYE, CHEST, "
+            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
+            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+        ),
 	)
 	args = parser.parse_args()
 	main(args.infer)
