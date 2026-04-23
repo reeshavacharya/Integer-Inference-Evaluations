@@ -1,0 +1,57 @@
+{
+  "MNIST": {
+    "floating-point": 98.8,
+    "int": 98.74285714285715,
+    "fixed-point": 98.8
+  },
+  "CIFAR10": {
+    "floating-point": 64.88333333333334,
+    "int": 64.81666666666666,
+    "fixed-point": 64.9
+  },
+  "Brain-MRI": {
+    "floating-point": 94.16666666666667,
+    "int": 36.666666666666664,
+    "fixed-point": 36.666666666666664
+  },
+  "CHEST": {
+    "floating-point": 92.9655990510083,
+    "int": 91.72004744958481,
+    "fixed-point": 91.61328588374852
+  },
+  "Brain-Cancer": {
+    "floating-point": 96.73333333333333,
+    "int": 31.6,
+    "fixed-point": 31.6
+  },
+  "Breast-Cancer": {
+    "floating-point": 93.3,
+    "int": 42.5,
+    "fixed-point": 41.5
+  },
+  "Cervical-Cancer": {
+    "floating-point": 95.88,
+    "int": 21.96,
+    "fixed-point": 21.92
+  },
+  "Kidney-Cancer": {
+    "floating-point": 92.0,
+    "int": 49.7,
+    "fixed-point": 49.7
+  },
+  "Lung-And-Colon-Cancer": {
+    "floating-point": 98.48,
+    "int": 33.72,
+    "fixed-point": 36.32
+  },
+  "Lymphoma-Cancer": {
+    "floating-point": 94.86666666666666,
+    "int": 38.86666666666667,
+    "fixed-point": 38.93333333333333
+  },
+  "Oral-Cancer": {
+    "floating-point": 92.007992007992,
+    "int": 50.14985014985015,
+    "fixed-point": 50.14985014985015
+  }
+}
