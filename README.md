@@ -127,20 +127,21 @@ where:
 - \(M_0\) is an integer multiplier
 - \(n\) is a right-shift amount
 
-The output is then produced entirely with integer arithmetic:
+The output is then produced entirely with integer arithmetic. Written as separate steps:
 
 $$
-q_{out} =
-\min\left(
-255,\,
-\max\left(
-0,\,
+scaled =
 \left\lfloor
 \frac{acc_{bias} \cdot M_0}{2^{31+n}} + \frac{1}{2}
 \right\rfloor
-+ Z_{out}
-\right)
-\right)
+$$
+
+$$
+shifted = scaled + Z_{out}
+$$
+
+$$
+q_{out} = \min(255, \max(0, shifted))
 $$
 
 In the implementation, rounding is handled by adding a power-of-two offset before the right shift.
