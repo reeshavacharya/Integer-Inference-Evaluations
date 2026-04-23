@@ -324,6 +324,42 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None) -> dict:
 
 	return results
 
+def _get_results_filename(single_dataset_name: Optional[str]) -> str:
+	"""Build output filename for benchmark results."""
+	if single_dataset_name is None:
+		return "benchmark_results.json"
+
+	suffix = single_dataset_name.lower().replace("-", "_")
+	return f"benchmark_results_{suffix}.json"
+
+def _normalize_bench_name(name: str) -> str:
+	"""Normalize CLI dataset names to benchmark dataset identifiers."""
+	name_upper = name.upper()
+	if name_upper == "CIFR10":
+		return "CIFAR10"
+	if name_upper == "BRAIN-MRI":
+		return "Brain-MRI"
+	if name_upper == "BRAIN-CANCER":
+		return "Brain-Cancer"
+	if name_upper == "BREAST-CANCER":
+		return "Breast-Cancer"
+	if name_upper == "CERVICAL-CANCER":
+		return "Cervical-Cancer"
+	if name_upper == "KIDNEY-CANCER":
+		return "Kidney-Cancer"
+	if name_upper == "LUNG-AND-COLON-CANCER":
+		return "Lung-And-Colon-Cancer"
+	if name_upper == "LYMPHOMA-CANCER":
+		return "Lymphoma-Cancer"
+	if name_upper == "ORAL-CANCER":
+		return "Oral-Cancer"
+	if name_upper == "MNIST":
+		return "MNIST"
+	if name_upper == "CIFAR10":
+		return "CIFAR10"
+	if name_upper == "CHEST":
+		return "CHEST"
+	raise ValueError(f"Unknown benchmark dataset: {name}")
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
