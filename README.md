@@ -130,13 +130,16 @@ where:
 The output is then produced entirely with integer arithmetic:
 
 $$
-q_{\text{out}} =
-\mathrm{clip}_{[0,255]}
-\left(
-\mathrm{round}\!\left(
-\frac{\text{acc}_{\text{bias}} \cdot M_0}{2^{31+n}}
+q_{out} =
+\min\left(
+255,\,
+\max\left(
+0,\,
+\left\lfloor
+\frac{acc_{bias} \cdot M_0}{2^{31+n}} + \frac{1}{2}
+\right\rfloor
++ Z_{out}
 \right)
- + Z_{\text{out}}
 \right)
 $$
 
