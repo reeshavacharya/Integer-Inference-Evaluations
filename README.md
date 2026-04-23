@@ -63,7 +63,7 @@ S = \frac{r_{\max}-r_{\min}}{q_{\max}-q_{\min}}
 $$
 
 $$
-Z = \operatorname{round}\left(q_{\min} - \frac{r_{\min}}{S}\right)
+Z = \text{round}\left(q_{\min} - \frac{r_{\min}}{S}\right)
 $$
 
 with `Z` clamped to `[0,255]`, and the range is nudged so that `0.0` is representable.
@@ -71,7 +71,7 @@ with `Z` clamped to `[0,255]`, and the range is nudged so that `0.0` is represen
 The tensor quantization equation is:
 
 $$
-q = \operatorname{round}\left(\frac{r}{S}\right) + Z
+q = \text{round}\left(\frac{r}{S}\right) + Z
 $$
 
 The implementation applies this to:
@@ -131,7 +131,7 @@ The output is then produced entirely with integer arithmetic:
 
 $$
 q_{\text{out}} =
-\operatorname{clip}_{[0,255]}
+\text{clip}_{[0,255]}
 \left(
 \left(
 \frac{\text{acc}_{\text{bias}} \cdot M_0}{2^{31+n}}
@@ -153,7 +153,7 @@ $$
 For LeNet-style average pooling, the implementation uses pure integer pooling:
 
 $$
-\operatorname{avg}_{2\times2}(x) = \frac{x_1 + x_2 + x_3 + x_4}{4}
+\text{avg}_{2\times2}(x) = \frac{x_1 + x_2 + x_3 + x_4}{4}
 $$
 
 implemented with integer summation and a right shift, including a small rounding term.
@@ -174,7 +174,7 @@ For U-Net, the integer path additionally handles:
 The `FixedPoint64` paths use a signed `int64` representation instead of affine INT8 quantization. The format used in the utilities is a static Q31.32 layout:
 
 $$
-\hat{x} = \operatorname{round}(x \cdot 2^{32})
+\hat{x} = \text{round}(x \cdot 2^{32})
 $$
 
 That means:
