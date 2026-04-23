@@ -1,14 +1,25 @@
 import argparse
+import sys
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
-from PIL import Image
+from PIL import Image, ImageChops
 import random
 import os
 import json
+
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+UNET_DIR = os.path.dirname(THIS_DIR)
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
+if UNET_DIR not in sys.path:
+    sys.path.insert(1, UNET_DIR)
+
+from u_net import setup_data
 
 # Import the helper functions
 from utils import (
@@ -131,64 +142,15 @@ class UNet(nn.Module):
 # 2. Setup and Data Extraction
 # -----------------------------
 def _get_test_pairs(dataset_name: str):
-    """Return the 10% test split pairs for the given dataset.
+    """Return test split pairs from the same setup logic used in u_net.py."""
+    _, _, test_loader = setup_data(
+        train_data=dataset_name,
+        batch_size=1,
+        image_size=256,
+        num_workers=0,
+    )
 
-    Uses the same 80/10/10 split logic as in u_net.py so that
-    inference is performed on the held-out test set.
-    """
-    if dataset_name == "Skin-Lesion":
-        image_dir = "./data/Skin-Lesion/images"
-        mask_dir = "./data/Skin-Lesion/masks"
-    elif dataset_name == "Flood":
-        image_dir = "./data/Flood/Image"
-        mask_dir = "./data/Flood/Mask"
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    if not os.path.isdir(image_dir) or not os.path.isdir(mask_dir):
-        raise RuntimeError(
-            f"{dataset_name} image/mask directories not found. Make sure the dataset is downloaded and extracted correctly."
-        )
-
-    image_files = [
-        f
-        for f in os.listdir(image_dir)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
-
-    image_id_to_path = {}
-    for fname in image_files:
-        image_id, _ = os.path.splitext(fname)
-        image_id_to_path[image_id] = os.path.join(image_dir, fname)
-
-    mask_files = [
-        f
-        for f in os.listdir(mask_dir)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-
-    pairs = []
-    for mname in mask_files:
-        base, _ = os.path.splitext(mname)
-        image_id = base.split("_segmentation")[0]
-        if image_id in image_id_to_path:
-            img_path = image_id_to_path[image_id]
-            mask_path = os.path.join(mask_dir, mname)
-            pairs.append((img_path, mask_path))
-
-    if not pairs:
-        raise RuntimeError(f"No matching image/mask pairs found in {dataset_name} dataset.")
-
-    # Disjoint split: 80% train, 10% val, 10% test (same as u_net.py)
-    n = len(pairs)
-    generator = torch.Generator().manual_seed(42)
-    indices = torch.randperm(n, generator=generator).tolist()
-
-    n_train = int(0.80 * n)
-    n_val = int(0.10 * n)
-
-    # We only need the test split here
-    test_pairs = [pairs[i] for i in indices[n_train + n_val:]]
+    test_pairs = list(test_loader.dataset.pairs)
 
     if not test_pairs:
         raise RuntimeError(f"No test pairs created for {dataset_name} dataset.")
@@ -199,14 +161,22 @@ def _get_test_pairs(dataset_name: str):
 def get_random_sample(dataset_name: str):
     """Pick a random (image, mask) pair from the 10% test split.
 
-    Works for both Skin-Lesion and Flood datasets.
+    Works for Skin-Lesion, Flood, Brain-MRI-Seg, and BUSI datasets.
     """
     test_pairs = _get_test_pairs(dataset_name)
-    img_path, mask_path = random.choice(test_pairs)
+    img_path, mask_spec = random.choice(test_pairs)
 
     # Load PIL images
     image = Image.open(img_path).convert("RGB")
-    mask = Image.open(mask_path).convert("L")
+    if isinstance(mask_spec, list):
+        if not mask_spec:
+            raise RuntimeError(f"No masks found for sampled image: {img_path}")
+        mask = Image.open(mask_spec[0]).convert("L")
+        for extra_mask_path in mask_spec[1:]:
+            extra_mask = Image.open(extra_mask_path).convert("L")
+            mask = ImageChops.lighter(mask, extra_mask)
+    else:
+        mask = Image.open(mask_spec).convert("L")
 
     # Resize to match training setup (256x256)
     resize_img = transforms.Resize((256, 256), interpolation=Image.BILINEAR)
@@ -315,7 +285,7 @@ def pool_fixed_point(q_tensor):
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
-def main(infer_data):
+def main(infer_data, run_floating_point=True, run_fixed_point=True):
     image_tensor, mask_tensor = get_random_sample(infer_data)
 
     print("--- Starting Dynamic Fixed-Point Segmentation Inference ---")
@@ -327,6 +297,12 @@ def main(infer_data):
     elif infer_data == "Flood":
         model = UNet(num_classes=1)
         model_path = "best_unet5_flood.pth"
+    elif infer_data == "Brain-MRI-Seg":
+        model = UNet(num_classes=1)
+        model_path = "best_unet5_brain_mri_seg.pth"
+    elif infer_data == "BUSI":
+        model = UNet(num_classes=1)
+        model_path = "best_unet5_busi.pth"
     else:
         raise ValueError(f"Unknown dataset: {infer_data}")
 
@@ -337,32 +313,48 @@ def main(infer_data):
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
 
+    eps = 1e-7
+
+    float_dice = None
+    float_iou = None
+    float_acc = None
+    float_f1 = None
+
     # -----------------------------
     # [1] Float Inference + Calibration
     # -----------------------------
-    with torch.no_grad():
-        float_logits = model(image_tensor)
-        float_probs = torch.sigmoid(float_logits)
-        float_preds = (float_probs > 0.5).float()
+    if run_floating_point:
+        with torch.no_grad():
+            float_logits = model(image_tensor)
+            float_probs = torch.sigmoid(float_logits)
+            float_preds = (float_probs > 0.5).float()
 
-        preds_flat = float_preds.view(-1)
-        masks_flat = mask_tensor.view(-1)
+            preds_flat = float_preds.view(-1)
+            masks_flat = mask_tensor.view(-1)
 
-        tp = (preds_flat * masks_flat).sum().item()
-        tn = ((1 - preds_flat) * (1 - masks_flat)).sum().item()
-        fp = (preds_flat * (1 - masks_flat)).sum().item()
-        fn = ((1 - preds_flat) * masks_flat).sum().item()
+            tp = (preds_flat * masks_flat).sum().item()
+            tn = ((1 - preds_flat) * (1 - masks_flat)).sum().item()
+            fp = (preds_flat * (1 - masks_flat)).sum().item()
+            fn = ((1 - preds_flat) * masks_flat).sum().item()
 
-        eps = 1e-7
-        float_dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
-        float_iou = (tp + eps) / (tp + fp + fn + eps)
-        float_acc = (tp + tn + eps) / (tp + tn + fp + fn + eps)
+            float_dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
+            float_iou = (tp + eps) / (tp + fp + fn + eps)
+            float_acc = (tp + tn + eps) / (tp + tn + fp + fn + eps)
 
-        precision = (tp + eps) / (tp + fp + eps)
-        recall = (tp + eps) / (tp + fn + eps)
-        float_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
+            precision = (tp + eps) / (tp + fp + eps)
+            recall = (tp + eps) / (tp + fn + eps)
+            float_f1 = (2.0 * precision * recall + eps) / (precision + recall + eps)
 
-    print("[1] Float inference and calibration complete.")
+        print("[1] Float inference and calibration complete.")
+
+    if not run_fixed_point:
+        print("\n" + "=" * 50)
+        print(" SEGMENTATION INFERENCE SUMMARY ")
+        print("=" * 50)
+        print(
+            f"Float Model       -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
+        )
+        return
 
     # -----------------------------
     # [2] Static 64-bit Fixed-Point Forward Pass
@@ -458,9 +450,10 @@ def main(infer_data):
     print("\n" + "=" * 50)
     print(" SEGMENTATION INFERENCE SUMMARY ")
     print("=" * 50)
-    print(
-        f"Float Model       -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
-    )
+    if run_floating_point:
+        print(
+            f"Float Model       -> Dice: {float_dice:.4f}, IoU: {float_iou:.4f}, Acc: {float_acc:.4f}, F1: {float_f1:.4f}"
+        )
     print(
         f"Static 64-bit     -> Dice: {fp_dice:.4f}, IoU: {fp_iou:.4f}, Acc: {fp_acc:.4f}, F1: {fp_f1:.4f}"
     )
@@ -486,7 +479,33 @@ if __name__ == "__main__":
         "--infer",
         type=str,
         default="Skin-Lesion",
+        choices=["Skin-Lesion", "Flood", "Brain-MRI-Seg", "BUSI"],
         help="Inference data to use",
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--fixed-point",
+        action="store_true",
+        help="Run fixed-point inference only",
+    )
+    mode_group.add_argument(
+        "--floating-point",
+        action="store_true",
+        help="Run floating-point inference only",
+    )
     args = parser.parse_args()
-    main(args.infer)
+
+    run_floating_point = True
+    run_fixed_point = True
+    if args.fixed_point:
+        run_floating_point = False
+        run_fixed_point = True
+    elif args.floating_point:
+        run_floating_point = True
+        run_fixed_point = False
+
+    main(
+        args.infer,
+        run_floating_point=run_floating_point,
+        run_fixed_point=run_fixed_point,
+    )
