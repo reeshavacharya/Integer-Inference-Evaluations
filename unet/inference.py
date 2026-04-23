@@ -5,10 +5,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
-from PIL import Image
+from PIL import Image, ImageChops
 import random
 import os
 import json
+
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+DATA_SKIN_LESION_DIR = os.path.join(DATA_ROOT, "Skin-Lesion")
+DATA_FLOOD_DIR = os.path.join(DATA_ROOT, "Flood")
+DATA_BRAIN_MRI_SEG_DIR = os.path.join(DATA_ROOT, "Brain-MRI-Seg")
+DATA_BUSI_DIR = os.path.join(DATA_ROOT, "BUSI")
+
+# Reuse the same split/pairing logic from the training script.
+from u_net import setup_data
 
 # Import the helper functions
 from utils import (
@@ -136,65 +147,15 @@ class UNet(nn.Module):
 # 2. Setup and Data Extraction
 # -----------------------------
 def _get_test_pairs(dataset_name: str):
-    """Return the 10% test split pairs for the given dataset.
+    """Return test split pairs from the same setup logic used in u_net.py."""
+    _, _, test_loader = setup_data(
+        train_data=dataset_name,
+        batch_size=1,
+        image_size=256,
+        num_workers=0,
+    )
 
-    Uses the same 80/10/10 split logic as in u_net.py so that
-    inference is performed on the held-out test set.
-    """
-    if dataset_name == "Skin-Lesion":
-        image_dir = "./data/Skin-Lesion/images"
-        mask_dir = "./data/Skin-Lesion/masks"
-    elif dataset_name == "Flood":
-        image_dir = "./data/Flood/Image"
-        mask_dir = "./data/Flood/Mask"
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    if not os.path.isdir(image_dir) or not os.path.isdir(mask_dir):
-        raise RuntimeError(
-            f"{dataset_name} image/mask directories not found. Make sure the dataset is downloaded and extracted correctly."
-        )
-
-    image_files = [
-        f
-        for f in os.listdir(image_dir)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
-
-    image_id_to_path = {}
-    for fname in image_files:
-        image_id, _ = os.path.splitext(fname)
-        image_id_to_path[image_id] = os.path.join(image_dir, fname)
-
-    mask_files = [
-        f
-        for f in os.listdir(mask_dir)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-
-    pairs = []
-    for mname in mask_files:
-        base, _ = os.path.splitext(mname)
-        image_id = base.split("_segmentation")[0]
-        if image_id in image_id_to_path:
-            img_path = image_id_to_path[image_id]
-            mask_path = os.path.join(mask_dir, mname)
-            pairs.append((img_path, mask_path))
-
-    if not pairs:
-        raise RuntimeError(f"No matching image/mask pairs found in {dataset_name} dataset.")
-
-    # Disjoint split: 80% train, 10% val, 10% test (same as u_net.py)
-    n = len(pairs)
-    generator = torch.Generator().manual_seed(42)
-    indices = torch.randperm(n, generator=generator).tolist()
-
-    n_train = int(0.80 * n)
-    n_val = int(0.10 * n)
-
-    # We only need the test split here
-    test_pairs = [pairs[i] for i in indices[n_train + n_val:]]
-
+    test_pairs = list(test_loader.dataset.pairs)
     if not test_pairs:
         raise RuntimeError(f"No test pairs created for {dataset_name} dataset.")
 
@@ -204,14 +165,22 @@ def _get_test_pairs(dataset_name: str):
 def get_random_sample(dataset_name: str):
     """Pick a random (image, mask) pair from the 10% test split.
 
-    Works for both Skin-Lesion and Flood datasets.
+    Works for Skin-Lesion, Flood, Brain-MRI-Seg, and BUSI datasets.
     """
     test_pairs = _get_test_pairs(dataset_name)
-    img_path, mask_path = random.choice(test_pairs)
+    img_path, mask_spec = random.choice(test_pairs)
 
     # Load PIL images
     image = Image.open(img_path).convert("RGB")
-    mask = Image.open(mask_path).convert("L")
+    if isinstance(mask_spec, list):
+        if not mask_spec:
+            raise RuntimeError(f"No masks found for sampled image: {img_path}")
+        mask = Image.open(mask_spec[0]).convert("L")
+        for extra_mask_path in mask_spec[1:]:
+            extra_mask = Image.open(extra_mask_path).convert("L")
+            mask = ImageChops.lighter(mask, extra_mask)
+    else:
+        mask = Image.open(mask_spec).convert("L")
 
     # Resize to match training setup (256x256)
     resize_img = transforms.Resize((256, 256), interpolation=Image.BILINEAR)
@@ -487,6 +456,12 @@ def main(infer_data):
     elif infer_data == "Flood":
         model = UNet(num_classes=1)
         model_path = "best_unet5_flood.pth"
+    elif infer_data == "Brain-MRI-Seg":
+        model = UNet(num_classes=1)
+        model_path = "best_unet5_brain_mri_seg.pth"
+    elif infer_data == "BUSI":
+        model = UNet(num_classes=1)
+        model_path = "best_unet5_busi.pth"
     else:
         raise ValueError(f"Unknown dataset: {infer_data}")
 
@@ -723,6 +698,7 @@ if __name__ == "__main__":
         "--infer",
         type=str,
         default="Skin-Lesion",
+        choices=["Skin-Lesion", "Flood", "Brain-MRI-Seg", "BUSI"],
         help="Inference data to use",
     )
     args = parser.parse_args()

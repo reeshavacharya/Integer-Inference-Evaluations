@@ -11,10 +11,6 @@ Using device: cuda
 [bench] Dataset: Brain-MRI
 [bench] Brain-MRI: float=94.17% | integer=36.67%
 
-[bench] Dataset: EYE
-Skipping 1928 images from resized test 19 (no labels provided).
-[bench] EYE: float=74.23% | integer=73.08%
-
 [bench] Dataset: CHEST
 CHEST labels (15): ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Effusion', 'Emphysema', 'Fibrosis', 'Hernia', 'Infiltration', 'Mass', 'No Finding', 'Nodule', 'Pleural_Thickening', 'Pneumonia', 'Pneumothorax']
 [bench] CHEST: float=92.97% | integer=91.72%
@@ -44,7 +40,6 @@ Saved benchmark_results.json with:
   MNIST: float=98.80%, integer=98.74%
   CIFAR10: float=64.88%, integer=64.82%
   Brain-MRI: float=94.17%, integer=36.67%
-  EYE: float=74.23%, integer=73.08%
   CHEST: float=92.97%, integer=91.72%
   Brain-Cancer: float=96.73%, integer=31.60%
   Breast-Cancer: float=93.30%, integer=42.50%

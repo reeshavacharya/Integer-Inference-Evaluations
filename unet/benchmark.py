@@ -1,4 +1,4 @@
-"""Benchmark float vs integer inference on Skin-Lesion and Flood.
+"""Benchmark float vs integer inference on supported UNet datasets.
 
 Runs the same models and integer pipeline as inference.py over the
 corresponding 10% test splits (from u_net.setup_data) and saves
@@ -65,6 +65,10 @@ def _build_model(dataset_name: str) -> torch.nn.Module:
         model_path = "best_unet5_skin_lesion.pth"
     elif dataset_name == "Flood":
         model_path = "best_unet5_flood.pth"
+    elif dataset_name == "Brain-MRI-Seg":
+        model_path = "best_unet5_brain_mri_seg.pth"
+    elif dataset_name == "BUSI":
+        model_path = "best_unet5_busi.pth"
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -103,20 +107,29 @@ def _compute_metrics_from_logits(logits: torch.Tensor, masks: torch.Tensor):
 
     return dice, iou, acc, f1
 
-
-def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = None) -> dict:
+def _float_metrics(
+	model: torch.nn.Module,
+	loader,
+	dataset_name: str,
+	num_data: Optional[int] = None,
+) -> dict:
     """Compute average float Dice, IoU, accuracy, F1 over the test loader.
 
     If num_data is provided, only the first num_data samples from the loader
     are used for a quick benchmark.
     """
+    total_samples = len(loader.dataset)
+    target_samples = total_samples if num_data is None else min(num_data, total_samples)
+    print(
+        f"[bench][{dataset_name}][float] Starting benchmark over {target_samples}/{total_samples} samples."
+    )
 
     # Accumulate confusion counts across all batches
     tp = tn = fp = fn = 0.0
     seen = 0
 
     with torch.no_grad():
-        for images, masks in loader:
+        for batch_idx, (images, masks) in enumerate(loader, 1):
             if num_data is not None and seen >= num_data:
                 break
 
@@ -139,6 +152,10 @@ def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = Non
             fn += ((1 - preds_flat) * masks_flat).sum().item()
 
             seen += images.size(0)
+            remaining = max(target_samples - seen, 0)
+            print(
+                f"[bench][{dataset_name}][float] Batch {batch_idx}: processed {seen}/{target_samples} samples, remaining {remaining}."
+            )
 
     eps = 1e-7
     dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
@@ -152,16 +169,28 @@ def _float_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = Non
     return {"dice": dice, "iou": iou, "acc": acc, "f1": f1}
 
 
-def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = None) -> dict:
+def _integer_metrics(
+    model: torch.nn.Module,
+    loader,
+    dataset_name: str,
+    num_data: Optional[int] = None,
+) -> dict:
     """Compute average integer Dice, IoU, accuracy, F1 using integer UNet path.
 
     This mirrors the integer-only path in inference.main, but runs over
     all batches from the 10% test DataLoader.
     """
+
     tp = tn = fp = fn = 0.0
+    total_samples = len(loader.dataset)
+    target_samples = total_samples if num_data is None else min(num_data, total_samples)
+    print(
+        f"[bench][{dataset_name}][integer] Starting benchmark over {target_samples}/{total_samples} samples."
+    )
+
     seen = 0
 
-    for images, masks in loader:
+    for batch_idx, (images, masks) in enumerate(loader, 1):
         if num_data is not None and seen >= num_data:
             break
 
@@ -169,6 +198,7 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
             keep = num_data - seen
             images = images[:keep]
             masks = masks[:keep]
+
         # 1) Calibration for this batch (float forward pass with hooks)
         inference.activation_ranges.clear()
         handles = inference.register_hooks(model)
@@ -364,6 +394,10 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
             fn += ((1 - preds_flat) * masks_flat).sum().item()
 
         seen += images.size(0)
+        remaining = max(target_samples - seen, 0)
+        print(
+            f"[bench][{dataset_name}][integer] Batch {batch_idx}: processed {seen}/{target_samples} samples, remaining {remaining}."
+        )
 
     eps = 1e-7
     dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
@@ -377,8 +411,8 @@ def _integer_metrics(model: torch.nn.Module, loader, num_data: Optional[int] = N
     return {"dice": dice, "iou": iou, "acc": acc, "f1": f1}
 
 
-def benchmark(num_data: Optional[int] = None) -> dict:
-    """Run float and integer evaluation for Skin-Lesion and Flood.
+def benchmark(bench: str = "all", num_data: Optional[int] = None) -> dict:
+    """Run float and integer evaluation for selected dataset(s).
 
     If num_data is provided, only the first num_data samples from each
     test split are used for a quicker benchmark.
@@ -386,14 +420,20 @@ def benchmark(num_data: Optional[int] = None) -> dict:
 
     _disable_inference_debug_trace()
 
+    supported_datasets = ("Skin-Lesion", "Flood", "Brain-MRI-Seg", "BUSI")
+    if bench == "all":
+        benchmark_datasets = supported_datasets
+    else:
+        benchmark_datasets = (bench,)
+
     results = {}
-    for dataset_name in ("Skin-Lesion", "Flood"):
+    for dataset_name in benchmark_datasets:
         loader = _get_test_loader(dataset_name)
         
         model = _build_model(dataset_name)
 
-        float_metrics = _float_metrics(model, loader, num_data=num_data)
-        int_metrics = _integer_metrics(model, loader, num_data=num_data)
+        float_metrics = _float_metrics(model, loader, dataset_name, num_data=num_data)
+        int_metrics = _integer_metrics(model, loader, dataset_name, num_data=num_data)
 
         results[dataset_name] = {
             "float": float_metrics,
@@ -403,12 +443,43 @@ def benchmark(num_data: Optional[int] = None) -> dict:
     return results
 
 
+def _get_results_filename(bench: str) -> str:
+    """Return output json filename for the selected benchmark target."""
+    filename_map = {
+        "BUSI": "benchmark_results_busi.json",
+        "Brain-MRI-Seg": "benchmark_results_brain_mri_seg.json",
+        "Skin-Lesion": "benchmark_results_skin_lesion.json",
+        "Flood": "benchmark_results_flood.json",
+    }
+    return filename_map.get(bench, "benchmark_results.json")
+
+
 if __name__ == "__main__":
-    metrics = benchmark(num_data=20)
-    with open("benchmark_results.json", "w") as f:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--bench",
+        type=str,
+        default="all",
+        choices=["all", "Skin-Lesion", "Flood", "Brain-MRI-Seg", "BUSI"],
+        help="Dataset to benchmark. Use 'all' to run every dataset.",
+    )
+    parser.add_argument(
+        "--num_data",
+        type=int,
+        default=None,
+        help="Number of test samples to benchmark per dataset. If omitted, benchmarks the full test split.",
+    )
+
+    args = parser.parse_args()
+
+    metrics = benchmark(bench=args.bench, num_data=args.num_data)
+    results_file = _get_results_filename(args.bench)
+    with open(results_file, "w") as f:
         json.dump(metrics, f, indent=2)
 
-    print("Saved benchmark_results.json with:")
+    print(f"Saved {results_file} with:")
     for ds, vals in metrics.items():
         fl = vals["float"]
         it = vals["integer"]

@@ -15,6 +15,16 @@ from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset, Da
 from torchvision import datasets, transforms
 
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+DATA_MNIST_DIR = os.path.join(DATA_ROOT, "MNIST")
+DATA_CIFAR10_DIR = os.path.join(DATA_ROOT, "CIFAR10")
+DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain-MRI")
+DATA_CHEST_DIR = os.path.join(DATA_ROOT, "CHEST")
+DATA_MULTI_CANCER_DIR = os.path.join(DATA_ROOT, "Multi-Cancer")
+CHEST_IMAGE_SIZE = 28
+
+
 # -----------------------------
 # Device
 # -----------------------------
@@ -103,6 +113,56 @@ is_multilabel = False
 chest_label_names = None
 
 
+PREPROCESS_SPECS = {
+    "MNIST": {"channels": 1, "height": 28, "width": 28},
+    "CIFAR10": {"channels": 3, "height": 28, "width": 28},
+    "BRAIN-MRI": {"channels": 1, "height": 28, "width": 28},
+    "CHEST": {
+        "channels": 1,
+        "height": CHEST_IMAGE_SIZE,
+        "width": CHEST_IMAGE_SIZE,
+    },
+    "MULTI-CANCER": {"channels": 3, "height": 28, "width": 28},
+}
+
+
+def _normalize_dataset_key(dataset_name: str) -> str:
+    key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
+    if key == "CIFR10":
+        return "CIFAR10"
+    if "CANCER" in key and key not in ("BRAIN-MRI",):
+        return "MULTI-CANCER"
+    return key
+
+
+def validate_preprocessed_batch(images: torch.Tensor, dataset_name: str, stage: str = "runtime"):
+    key = _normalize_dataset_key(dataset_name)
+    if key not in PREPROCESS_SPECS:
+        return
+
+    spec = PREPROCESS_SPECS[key]
+    if images.dim() != 4:
+        raise RuntimeError(
+            f"[{stage}] Expected NCHW tensor for {dataset_name}, got shape {tuple(images.shape)}"
+        )
+
+    _, c, h, w = images.shape
+    if c != spec["channels"] or h != spec["height"] or w != spec["width"]:
+        raise RuntimeError(
+            f"[{stage}] Preprocessing mismatch for {dataset_name}: "
+            f"expected (C,H,W)=({spec['channels']},{spec['height']},{spec['width']}), "
+            f"got ({c},{h},{w})"
+        )
+
+    if not torch.isfinite(images).all():
+        raise RuntimeError(f"[{stage}] Found non-finite values after preprocessing for {dataset_name}")
+
+
+def validate_loader_preprocessing(loader: DataLoader, dataset_name: str, stage: str = "runtime"):
+    images, _ = next(iter(loader))
+    validate_preprocessed_batch(images, dataset_name, stage=stage)
+
+
 # -----------------------------
 # Data
 # -----------------------------
@@ -114,11 +174,11 @@ def setup_MNIST(batch_size: int):
     )
 
     train_dataset_full = datasets.MNIST(
-        root="./data", train=True, download=True, transform=transform
+        root=DATA_ROOT, train=True, download=True, transform=transform
     )
 
     test_dataset_full = datasets.MNIST(
-        root="./data", train=False, download=True, transform=transform
+        root=DATA_ROOT, train=False, download=True, transform=transform
     )
 
     # Combine official train and test into one pool, then split 80/10/10.
@@ -138,6 +198,9 @@ def setup_MNIST(batch_size: int):
     train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False)
+
+    validate_loader_preprocessing(train_loader, "MNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "MNIST", stage="training")
 
 
 def setup_CIFAR10(batch_size: int = 64):
@@ -174,10 +237,10 @@ def setup_CIFAR10(batch_size: int = 64):
 
     # Base datasets with eval transforms for a stable split
     train_base_eval = datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=transform_eval
+        root=DATA_ROOT, train=True, download=True, transform=transform_eval
     )
     test_base_eval = datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=transform_eval
+        root=DATA_ROOT, train=False, download=True, transform=transform_eval
     )
 
     full_base_eval = ConcatDataset([train_base_eval, test_base_eval])
@@ -195,10 +258,10 @@ def setup_CIFAR10(batch_size: int = 64):
 
     # Parallel dataset with training-time augmentation
     train_base_tf = datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=transform_train
+        root=DATA_ROOT, train=True, download=True, transform=transform_train
     )
     test_base_tf = datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=transform_train
+        root=DATA_ROOT, train=False, download=True, transform=transform_train
     )
     full_base_tf = ConcatDataset([train_base_tf, test_base_tf])
 
@@ -225,6 +288,9 @@ def setup_CIFAR10(batch_size: int = 64):
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
     )
+
+    validate_loader_preprocessing(train_loader, "CIFAR10", stage="training")
+    validate_loader_preprocessing(test_loader, "CIFAR10", stage="training")
 
 
 def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
@@ -268,14 +334,14 @@ def setup_Brain_MRI(batch_size: int = 64):
     Prepare Brain-MRI loaders from the Training/Testing folder structure.
 
     Expected layout:
-        ./data/Brain-MRI/Training/{glioma, meningioma, notumor, pituitary}/...
-        ./data/Brain-MRI/Testing/{glioma, meningioma, notumor, pituitary}/...
+        <project_root>/data/Brain-MRI/Training/{glioma, meningioma, notumor, pituitary}/...
+        <project_root>/data/Brain-MRI/Testing/{glioma, meningioma, notumor, pituitary}/...
     """
 
     global train_loader, val_loader, test_loader
 
-    train_root = "./data/Brain-MRI/Training"
-    test_root = "./data/Brain-MRI/Testing"
+    train_root = os.path.join(DATA_BRAIN_MRI_DIR, "Training")
+    test_root = os.path.join(DATA_BRAIN_MRI_DIR, "Testing")
 
     # Better augmentation for training only
     train_transform = transforms.Compose(
@@ -359,154 +425,16 @@ def setup_Brain_MRI(batch_size: int = 64):
         pin_memory=torch.cuda.is_available(),
     )
 
+    validate_loader_preprocessing(train_loader, "Brain-MRI", stage="training")
+    validate_loader_preprocessing(test_loader, "Brain-MRI", stage="training")
+
     return train_dataset
-
-
-class EyeRetinopathyDataset(Dataset):
-    """CSV-driven dataset for diabetic retinopathy grading images."""
-
-    def __init__(self, samples, transform=None):
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        image_path, label = self.samples[idx]
-        image = Image.open(image_path).convert("RGB")
-
-        if self.transform is not None:
-            image = self.transform(image)
-
-        return image, label
-
-
-def _load_eye_samples(image_dir: str, label_csv: str, id_col: str, label_col: str):
-    samples = []
-
-    with open(label_csv, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            image_id = row[id_col].strip()
-            label = int(row[label_col])
-
-            image_path = os.path.join(image_dir, f"{image_id}.jpg")
-            if os.path.exists(image_path):
-                samples.append((image_path, label))
-
-    return samples
-
-
-def setup_EYE(batch_size: int = 64):
-    global train_loader, val_loader, test_loader
-
-    eye_root = "./data/EYE"
-    labels_root = os.path.join(eye_root, "labels")
-
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((28, 28)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(8),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-
-    eval_transform = transforms.Compose(
-        [
-            transforms.Resize((28, 28)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-
-    # Use every labeled image available across both years.
-    samples = []
-    samples.extend(
-        _load_eye_samples(
-            os.path.join(eye_root, "resized train 15"),
-            os.path.join(labels_root, "trainLabels15.csv"),
-            id_col="image",
-            label_col="level",
-        )
-    )
-    samples.extend(
-        _load_eye_samples(
-            os.path.join(eye_root, "resized test 15"),
-            os.path.join(labels_root, "testLabels15.csv"),
-            id_col="image",
-            label_col="level",
-        )
-    )
-    samples.extend(
-        _load_eye_samples(
-            os.path.join(eye_root, "resized train 19"),
-            os.path.join(labels_root, "trainLabels19.csv"),
-            id_col="id_code",
-            label_col="diagnosis",
-        )
-    )
-
-    # testImages19.csv does not include diagnosis labels, so those files are not
-    # used for supervised train/val/test splits.
-    test19_images_csv = os.path.join(labels_root, "testImages19.csv")
-    if os.path.exists(test19_images_csv):
-        with open(test19_images_csv, "r", newline="") as f:
-            unlabeled_count = sum(1 for _ in csv.DictReader(f))
-        print(
-            f"Skipping {unlabeled_count} images from resized test 19 (no labels provided)."
-        )
-
-    if len(samples) == 0:
-        raise RuntimeError("No labeled EYE samples were found. Check data/EYE paths.")
-
-    full_eval_dataset = EyeRetinopathyDataset(samples, transform=eval_transform)
-    full_train_dataset = EyeRetinopathyDataset(samples, transform=train_transform)
-
-    total_len = len(full_eval_dataset)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
-
-    train_subset_base, val_subset, test_subset = random_split(
-        full_eval_dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
-
-    train_subset = Subset(full_train_dataset, train_subset_base.indices)
-
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-    val_loader = DataLoader(
-        val_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-    test_loader = DataLoader(
-        test_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    return train_loader, val_loader, test_loader
 
 
 def setup_CHEST(batch_size: int = 64):
     global train_loader, val_loader, test_loader, chest_label_names
 
-    chest_root = "./data/CHEST"
+    chest_root = DATA_CHEST_DIR
     images_dir = os.path.join(chest_root, "sample", "images")
     labels_csv = os.path.join(chest_root, "sample", "sample_labels.csv")
 
@@ -517,8 +445,7 @@ def setup_CHEST(batch_size: int = 64):
 
     train_transform = transforms.Compose(
         [
-            transforms.Resize((28, 28)),
-            transforms.RandomRotation(5),
+            transforms.Resize((CHEST_IMAGE_SIZE, CHEST_IMAGE_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,)),
         ]
@@ -526,7 +453,7 @@ def setup_CHEST(batch_size: int = 64):
 
     eval_transform = transforms.Compose(
         [
-            transforms.Resize((28, 28)),
+            transforms.Resize((CHEST_IMAGE_SIZE, CHEST_IMAGE_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,)),
         ]
@@ -616,13 +543,16 @@ def setup_CHEST(batch_size: int = 64):
         pin_memory=torch.cuda.is_available(),
     )
 
+    validate_loader_preprocessing(train_loader, "CHEST", stage="training")
+    validate_loader_preprocessing(test_loader, "CHEST", stage="training")
+
     return train_loader, val_loader, test_loader
 
 
 def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
     """Build 80/10/10 loaders for one Multi-Cancer subgroup."""
 
-    base_root = "./data/Multi-Cancer/Multi Cancer/Multi Cancer"
+    base_root = os.path.join(DATA_MULTI_CANCER_DIR, "Multi Cancer", "Multi Cancer")
     cancer_root = os.path.join(base_root, cancer_folder)
 
     if not os.path.exists(cancer_root):
@@ -684,6 +614,9 @@ def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
         pin_memory=torch.cuda.is_available(),
     )
 
+    validate_loader_preprocessing(train_loader, "Multi-Cancer", stage="training")
+    validate_loader_preprocessing(test_loader, "Multi-Cancer", stage="training")
+
     return train_loader, val_loader, test_loader, len(eval_dataset.classes), 3, eval_dataset.classes
 
 
@@ -733,6 +666,25 @@ def setup_Multi_Cancer(batch_size: int = 64):
         prepared.append((cancer_name, setup_fn(batch_size)))
 
     return prepared
+
+
+def _resolve_multi_cancer_target(train_data: str):
+    """Map CLI train_data to a single Multi-Cancer setup target."""
+
+    key = train_data.strip().upper().replace("_", "-").replace(" ", "-")
+    target_map = {
+        "BRAIN-CANCER": ("Brain Cancer", setup_Multi_Cancer_Brain),
+        "BREAST-CANCER": ("Breast Cancer", setup_Multi_Cancer_Breast),
+        "CERVICAL-CANCER": ("Cervical Cancer", setup_Multi_Cancer_Cervical),
+        "KIDNEY-CANCER": ("Kidney Cancer", setup_Multi_Cancer_Kidney),
+        "LUNG-AND-COLON-CANCER": (
+            "Lung and Colon Cancer",
+            setup_Multi_Cancer_Lung_Colon,
+        ),
+        "LYMPHOMA-CANCER": ("Lymphoma", setup_Multi_Cancer_Lymphoma),
+        "ORAL-CANCER": ("Oral Cancer", setup_Multi_Cancer_Oral),
+    }
+    return target_map.get(key)
 
 
 def _train_current_dataset(num_epochs: int, best_model_path: str):
@@ -840,7 +792,7 @@ def main(args: argparse.Namespace):
     num_epochs = 10
     is_multilabel = False
 
-    if args.data_dir == "./data/MNIST/":
+    if args.data_dir == DATA_MNIST_DIR:
         best_model_path = "best_lenet5_mnist.pth"
         setup_MNIST(args.batch_size)
 
@@ -850,7 +802,7 @@ def main(args: argparse.Namespace):
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
 
-    elif args.data_dir == "./data/CIFAR10/":
+    elif args.data_dir == DATA_CIFAR10_DIR:
         best_model_path = "best_lenet5_cifar10.pth"
         num_epochs = 100
 
@@ -868,7 +820,7 @@ def main(args: argparse.Namespace):
         )
         scheduler = None
 
-    elif args.data_dir == "./data/Brain-MRI/":
+    elif args.data_dir == DATA_BRAIN_MRI_DIR:
         best_model_path = "best_lenet5_brain_mri.pth"
         num_epochs = 100
 
@@ -892,24 +844,7 @@ def main(args: argparse.Namespace):
             factor=0.5,
             patience=3,
         )
-    elif args.data_dir == "./data/EYE/":
-        best_model_path = "best_lenet5_eye.pth"
-        num_epochs = 100
-
-        setup_EYE(args.batch_size)
-
-        # EYE fundus images are RGB with 5 DR classes.
-        model = MedicalLeNet(num_classes=5, in_channels=3).to(device)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=0.5,
-            patience=3,
-        )
-
-    elif args.data_dir == "./data/CHEST/":
+    elif args.data_dir == DATA_CHEST_DIR:
         best_model_path = "best_lenet5_chest.pth"
         num_epochs = 100
 
@@ -932,8 +867,48 @@ def main(args: argparse.Namespace):
         )
         is_multilabel = True
 
-    elif args.data_dir == "./data/Multi-Cancer/":
+    elif args.data_dir == DATA_MULTI_CANCER_DIR:
         num_epochs = 100
+
+        single_multi_target = getattr(args, "multi_cancer_target", None)
+        if single_multi_target:
+            resolved = _resolve_multi_cancer_target(single_multi_target)
+            if resolved is None:
+                raise ValueError(
+                    f"Unknown Multi-Cancer target: {single_multi_target}"
+                )
+
+            cancer_name, setup_fn = resolved
+            print(f"\n=== Training Multi-Cancer dataset: {cancer_name} ===")
+
+            (
+                train_loader,
+                val_loader,
+                test_loader,
+                num_classes,
+                in_channels,
+                class_names,
+            ) = setup_fn(args.batch_size)
+
+            print(f"Classes ({num_classes}): {class_names}")
+
+            model = MedicalLeNet(num_classes=num_classes, in_channels=in_channels).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=0.5,
+                patience=3,
+            )
+
+            safe_name = cancer_name.lower().replace(" ", "_").replace("&", "and")
+            safe_name = safe_name.replace("__", "_")
+            best_model_path = f"best_lenet5_multi_{safe_name}.pth"
+
+            _train_current_dataset(num_epochs, best_model_path)
+            return
+
         multi_cancer_runs = setup_Multi_Cancer(args.batch_size)
 
         for cancer_name, cancer_setup in multi_cancer_runs:
@@ -969,7 +944,7 @@ def main(args: argparse.Namespace):
         return
 
     else:
-        print("Training using default data directory: ./data/MNIST/")
+        print(f"Training using default data directory: {DATA_MNIST_DIR}")
         best_model_path = "best_lenet5_mnist.pth"
         setup_MNIST(args.batch_size)
 
@@ -1045,59 +1020,50 @@ def datasetDownloader(dataset_name: str):
         duplicate_images = os.path.join(duplicate_root, "images")
 
         if os.path.exists(primary_images) and os.path.exists(duplicate_images):
-            print("Removing duplicated CHEST folder: ./data/CHEST/sample/sample")
+            print(f"Removing duplicated CHEST folder: {duplicate_root}")
             shutil.rmtree(duplicate_root)
 
-    if not os.path.exists("./data"):
-        os.makedirs("./data")
+    if not os.path.exists(DATA_ROOT):
+        os.makedirs(DATA_ROOT)
 
     if dataset_name == "MNIST":
-        if not os.path.exists("./data/MNIST"):
+        if not os.path.exists(DATA_MNIST_DIR):
             print("Downloading MNIST dataset...")
-            datasets.MNIST(root="./data", train=True, download=True)
-            datasets.MNIST(root="./data", train=False, download=True)
+            datasets.MNIST(root=DATA_ROOT, train=True, download=True)
+            datasets.MNIST(root=DATA_ROOT, train=False, download=True)
 
     if dataset_name == "Brain-MRI":
-        if not os.path.exists("./data/Brain-MRI"):
+        if not os.path.exists(DATA_BRAIN_MRI_DIR):
             print("Downloading Brain-MRI dataset from Kaggle...")
             kagglehub.dataset_download(
                 "masoudnickparvar/brain-tumor-mri-dataset",
-                output_dir="./data/Brain-MRI",
+                output_dir=DATA_BRAIN_MRI_DIR,
             )
-            subprocess.run('cd ./data/Brain-MRI && unzip "*.zip"', shell=True)
+            subprocess.run(f'cd "{DATA_BRAIN_MRI_DIR}" && unzip "*.zip"', shell=True)
 
     if dataset_name == "CIFAR10":
-        cifar_root = "./data"
+        cifar_root = DATA_ROOT
         cifar_folder = os.path.join(cifar_root, "cifar-10-batches-py")
         if not os.path.exists(cifar_folder):
             print("Downloading CIFAR-10 dataset...")
             datasets.CIFAR10(root=cifar_root, train=True, download=True)
             datasets.CIFAR10(root=cifar_root, train=False, download=True)
 
-    if dataset_name == "EYE":
-        if not os.path.exists("./data/EYE"):
-            print("Downloading 2015-2019 Blindness Detection Images dataset...")
-            kagglehub.dataset_download(
-                "benjaminwarner/resized-2015-2019-blindness-detection-images",
-                output_dir="./data/EYE",
-            )
-            subprocess.run('cd ./data/EYE && unzip "*.zip"', shell=True)
-
     if dataset_name == "CHEST":
-        chest_root = "./data/CHEST"
+        chest_root = DATA_CHEST_DIR
         if not os.path.exists(chest_root):
             print("Downloading NIH Chest X-ray dataset...")
             kagglehub.dataset_download(
-                "nih-chest-xrays/sample", output_dir="./data/CHEST"
+                "nih-chest-xrays/sample", output_dir=DATA_CHEST_DIR
             )
-            subprocess.run('cd ./data/CHEST && unzip "*.zip"', shell=True)
+            subprocess.run(f'cd "{DATA_CHEST_DIR}" && unzip "*.zip"', shell=True)
         cleanup_chest_duplicates(chest_root)
 
     if dataset_name == "Multi-Cancer":
-        if not os.path.exists("./data/Multi-Cancer"):
+        if not os.path.exists(DATA_MULTI_CANCER_DIR):
             print("Downloading Multi-Cancer Histology dataset...")
             kagglehub.dataset_download(
-                "obulisainaren/multi-cancer", output_dir="./data/Multi-Cancer"
+                "obulisainaren/multi-cancer", output_dir=DATA_MULTI_CANCER_DIR
             )
 
 
@@ -1119,33 +1085,39 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help="Training data to use",
+        help=(
+            "Training data to use: MNIST, CIFAR10, Brain-MRI, CHEST, Multi-Cancer, "
+            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
+            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+        ),
     )
 
     args = parser.parse_args()
+    args.multi_cancer_target = None
 
-    if args.train_data == "MNIST":
-        args.data_dir = "./data/MNIST/"
+    train_data_key = args.train_data.strip().upper().replace("_", "-").replace(" ", "-")
+
+    if train_data_key == "MNIST":
+        args.data_dir = DATA_MNIST_DIR
         datasetDownloader("MNIST")
-    elif args.train_data == "Brain-MRI":
-        args.data_dir = "./data/Brain-MRI/"
+    elif train_data_key == "BRAIN-MRI":
+        args.data_dir = DATA_BRAIN_MRI_DIR
         datasetDownloader("Brain-MRI")
-    elif args.train_data.upper() in ("CIFR10", "CIFAR10"):
-        args.data_dir = "./data/CIFAR10/"
+    elif train_data_key in ("CIFR10", "CIFAR10"):
+        args.data_dir = DATA_CIFAR10_DIR
         datasetDownloader("CIFAR10")
-    elif args.train_data == "EYE":
-        args.data_dir = "./data/EYE/"
-        datasetDownloader("EYE")
-    elif args.train_data == "CHEST":
-        args.data_dir = "./data/CHEST/"
+    elif train_data_key == "CHEST":
+        args.data_dir = DATA_CHEST_DIR
         datasetDownloader("CHEST")
-    elif args.train_data == "Multi-Cancer":
-        args.data_dir = "./data/Multi-Cancer/"
+    elif train_data_key == "MULTI-CANCER":
+        args.data_dir = DATA_MULTI_CANCER_DIR
+        datasetDownloader("Multi-Cancer")
+    elif _resolve_multi_cancer_target(args.train_data) is not None:
+        args.data_dir = DATA_MULTI_CANCER_DIR
+        args.multi_cancer_target = args.train_data
         datasetDownloader("Multi-Cancer")
     else:
-        print(
-            "Invalid training data specified. Using default data directory: ./data/MNIST/"
-        )
-        args.data_dir = "./data/MNIST/"
+        print(f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}")
+        args.data_dir = DATA_MNIST_DIR
 
     main(args)

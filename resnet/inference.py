@@ -210,15 +210,6 @@ def _resolve_infer_config(infer_data: str):
             "is_multilabel": False,
         }
 
-    if name == "EYE":
-        return {
-            "display": "EYE",
-            "setup_fn": train_mod.setup_EYE,
-            "model": ResNet18Inference(num_classes=5, in_channels=3),
-            "model_path": "best_resnet18_eye.pth",
-            "is_multilabel": False,
-        }
-
     if name == "CHEST":
         return {
             "display": "CHEST",
@@ -248,11 +239,35 @@ def _resolve_infer_config(infer_data: str):
 def get_random_sample(dataset_name: str, setup_fn):
     """Return a random sample from the deterministic 10% test split."""
 
-    setup_fn(batch_size=1)
-    test_dataset = train_mod.test_loader.dataset
+    # Prevent stale loader leakage between different dataset setups.
+    train_mod.train_loader = None
+    train_mod.val_loader = None
+    train_mod.test_loader = None
+
+    setup_result = setup_fn(batch_size=1)
+
+    # Some setup functions populate train_mod.test_loader globals, while others
+    # (e.g. per-cancer Multi-Cancer helpers) return loaders directly.
+    test_dataset = None
+    if (
+        isinstance(setup_result, tuple)
+        and len(setup_result) >= 3
+        and hasattr(setup_result[2], "dataset")
+    ):
+        test_dataset = setup_result[2].dataset
+    elif train_mod.test_loader is not None:
+        test_dataset = train_mod.test_loader.dataset
+
+    if test_dataset is None:
+        raise RuntimeError(
+            f"Could not resolve test split dataset for inference target: {dataset_name}"
+        )
 
     idx = random.randint(0, len(test_dataset) - 1)
     image_tensor, label = test_dataset[idx]
+    train_mod.validate_preprocessed_batch(
+        image_tensor.unsqueeze(0), dataset_name, stage="inference"
+    )
 
     label_text = str(label)
     if isinstance(label, torch.Tensor):
@@ -669,7 +684,7 @@ if __name__ == "__main__":
 		type=str,
 		default="CIFAR10",
         help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, EYE, CHEST, "
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, CHEST, "
             "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
             "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
         ),

@@ -2,7 +2,7 @@
 
 This script evaluates the same trained models used by inference.py over the
 deterministic 10% test splits created in lenet5.py. It supports:
-MNIST, CIFAR10, Brain-MRI, EYE, CHEST, and all Multi-Cancer submodels.
+MNIST, CIFAR10, Brain-MRI, CHEST, and all Multi-Cancer submodels.
 
 If a checkpoint for a dataset is missing, the script trains it first using
 the correct train_data flag in lenet5.py, then benchmarks it.
@@ -11,6 +11,7 @@ the correct train_data flag in lenet5.py, then benchmarks it.
 import argparse
 import json
 import os
+from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -23,7 +24,6 @@ BENCHMARK_DATASETS = [
 	"MNIST",
 	"CIFAR10",
 	"Brain-MRI",
-	"EYE",
 	"CHEST",
 	"Brain-Cancer",
 	"Breast-Cancer",
@@ -82,17 +82,15 @@ def _train_dataset_for_checkpoint(dataset_name: str, multi_trained: bool) -> boo
 	)
 
 	if train_data_flag == "MNIST":
-		args.data_dir = "./data/MNIST/"
+		args.data_dir = train_mod.DATA_MNIST_DIR
 	elif train_data_flag == "Brain-MRI":
-		args.data_dir = "./data/Brain-MRI/"
+		args.data_dir = train_mod.DATA_BRAIN_MRI_DIR
 	elif train_data_flag in ("CIFR10", "CIFAR10"):
-		args.data_dir = "./data/CIFAR10/"
-	elif train_data_flag == "EYE":
-		args.data_dir = "./data/EYE/"
+		args.data_dir = train_mod.DATA_CIFAR10_DIR
 	elif train_data_flag == "CHEST":
-		args.data_dir = "./data/CHEST/"
+		args.data_dir = train_mod.DATA_CHEST_DIR
 	elif train_data_flag == "Multi-Cancer":
-		args.data_dir = "./data/Multi-Cancer/"
+		args.data_dir = train_mod.DATA_MULTI_CANCER_DIR
 	else:
 		raise ValueError(f"Unsupported train_data flag: {train_data_flag}")
 
@@ -137,9 +135,14 @@ def _get_test_loader(dataset_name: str, batch_size: int = 64) -> DataLoader:
 		and len(setup_result) >= 3
 		and hasattr(setup_result[2], "dataset")
 	):
-		return setup_result[2]
+		loader = setup_result[2]
+		train_mod.validate_loader_preprocessing(loader, dataset_name, stage="benchmark")
+		return loader
 
 	if train_mod.test_loader is not None:
+		train_mod.validate_loader_preprocessing(
+			train_mod.test_loader, dataset_name, stage="benchmark"
+		)
 		return train_mod.test_loader
 
 	raise RuntimeError(f"Could not resolve test loader for dataset: {dataset_name}")
@@ -154,12 +157,23 @@ def _build_model(dataset_name: str) -> torch.nn.Module:
 	return model
 
 
-def _float_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
+def _float_accuracy(model: torch.nn.Module, loader: DataLoader, dataset_name: str = "dataset", num_data: Optional[int] = None) -> float:
+	total_samples = len(loader.dataset)
+	target_samples = total_samples if num_data is None else min(num_data, total_samples)
+	print(f"[bench][{dataset_name}][float] Starting benchmark over {target_samples}/{total_samples} samples.")
 	correct = 0
 	total = 0
 
 	with torch.no_grad():
-		for images, labels in loader:
+		for batch_idx, (images, labels) in enumerate(loader, 1):
+			if num_data is not None and total >= num_data:
+				break
+			
+			if num_data is not None and total + images.size(0) > num_data:
+				keep = num_data - total
+				images = images[:keep]
+				labels = labels[:keep]
+			
 			outputs = model(images)
 			if labels.dim() > 1:
 				preds = (torch.sigmoid(outputs) >= 0.5).float()
@@ -169,16 +183,30 @@ def _float_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 				preds = outputs.argmax(dim=1)
 				correct += (preds == labels).sum().item()
 				total += labels.size(0)
+		
+			remaining = max(target_samples - total, 0)
+			print(f"[bench][{dataset_name}][float] Batch {batch_idx}: processed {total}/{target_samples} samples, remaining {remaining}.")
 
 	return 100.0 * correct / max(total, 1)
 
 
-def _integer_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
+def _integer_accuracy(model: torch.nn.Module, loader: DataLoader, dataset_name: str = "dataset", num_data: Optional[int] = None) -> float:
 	"""Compute accuracy using the integer pipeline from inference.py."""
+	total_samples = len(loader.dataset)
+	target_samples = total_samples if num_data is None else min(num_data, total_samples)
+	print(f"[bench][{dataset_name}][integer] Starting benchmark over {target_samples}/{total_samples} samples.")
 	correct = 0
 	total = 0
 
-	for images, labels in loader:
+	for batch_idx, (images, labels) in enumerate(loader, 1):
+		if num_data is not None and total >= num_data:
+			break
+		
+		if num_data is not None and total + images.size(0) > num_data:
+			keep = num_data - total
+			images = images[:keep]
+			labels = labels[:keep]
+		
 		# Calibration on current batch
 		inference.activation_ranges.clear()
 		handles = inference.register_hooks(model)
@@ -262,12 +290,18 @@ def _integer_accuracy(model: torch.nn.Module, loader: DataLoader) -> float:
 			int_preds = dequantized_logits.argmax(dim=1)
 			correct += (int_preds == labels).sum().item()
 			total += labels.size(0)
+		
+		remaining = max(target_samples - total, 0)
+		print(f"[bench][{dataset_name}][integer] Batch {batch_idx}: processed {total}/{target_samples} samples, remaining {remaining}.")
 
 	return 100.0 * correct / max(total, 1)
 
 
-def benchmark(dataset_names=None) -> dict:
-	"""Run float and integer evaluation for all requested datasets."""
+def benchmark(dataset_names=None, num_data: Optional[int] = None) -> dict:
+	"""Run float and integer evaluation for all requested datasets.
+	If num_data is provided, only the first num_data samples from each
+	test split are used for a quicker benchmark.
+	"""
 	_disable_inference_debug_trace()
 
 	targets = dataset_names or BENCHMARK_DATASETS
@@ -280,8 +314,8 @@ def benchmark(dataset_names=None) -> dict:
 
 		loader = _get_test_loader(name)
 		model = _build_model(name)
-		float_acc = _float_accuracy(model, loader)
-		int_acc = _integer_accuracy(model, loader)
+		float_acc = _float_accuracy(model, loader, name, num_data=num_data)
+		int_acc = _integer_accuracy(model, loader, name, num_data=num_data)
 		results[name] = {"float": float_acc, "integer": int_acc}
 
 		print(
@@ -292,10 +326,37 @@ def benchmark(dataset_names=None) -> dict:
 
 
 if __name__ == "__main__":
-	metrics = benchmark()
-	with open("benchmark_results.json", "w") as f:
+	parser = argparse.ArgumentParser()
+	parser.add_argument(
+		"--bench",
+		type=str,
+		default=None,
+		help=(
+			"Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, CHEST, "
+			"Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
+			"Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+		),
+	)
+	parser.add_argument(
+		"--num_data",
+		type=int,
+		default=None,
+		help="Number of test samples to benchmark per dataset. If omitted, benchmarks the full test split.",
+	)
+	args = parser.parse_args()
+
+	if args.bench is None:
+		targets = None
+		single_name = None
+	else:
+		single_name = _normalize_bench_name(args.bench)
+		targets = [single_name]
+
+	metrics = benchmark(dataset_names=targets, num_data=args.num_data)
+	results_file = _get_results_filename(single_name)
+	with open(results_file, "w") as f:
 		json.dump(metrics, f, indent=2)
 
-	print("\nSaved benchmark_results.json with:")
+	print(f"\nSaved {results_file} with:")
 	for ds, vals in metrics.items():
 		print(f"  {ds}: float={vals['float']:.2f}%, integer={vals['integer']:.2f}%")

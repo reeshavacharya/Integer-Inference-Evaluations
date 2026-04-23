@@ -1,12 +1,21 @@
 import argparse
 import os
 import cv2
+import random
 from torch import nn, relu
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
-from PIL import Image
+from PIL import Image, ImageChops
 import torchvision.transforms.functional as TF
 import kagglehub
+
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+DATA_SKIN_LESION_DIR = os.path.join(DATA_ROOT, "Skin-Lesion")
+DATA_FLOOD_DIR = os.path.join(DATA_ROOT, "Flood")
+DATA_BRAIN_MRI_SEG_DIR = os.path.join(DATA_ROOT, "Brain-MRI-Seg")
+DATA_BUSI_DIR = os.path.join(DATA_ROOT, "BUSI")
 
 # -----------------------------
 # Device
@@ -131,23 +140,69 @@ scheduler = None
 # Data
 # -----------------------------
 class SegmentationDataset(Dataset):
-    def __init__(self, pairs, image_size: int = 256):
-        # pairs is a list of (image_path, mask_path)
+    def __init__(self, pairs, image_size: int = 256, train_data: str = ""):
+        # pairs is a list of (image_path, mask_path) where mask_path can be
+        # a single path or a list of paths to merge.
         self.pairs = pairs
         self.image_size = image_size
+        self.train_data = train_data
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, idx):
-        image_path, mask_path = self.pairs[idx]
+        image_path, mask_spec = self.pairs[idx]
 
         image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+
+        if isinstance(mask_spec, list):
+            if not mask_spec:
+                raise RuntimeError(f"No masks found for image: {image_path}")
+            mask = Image.open(mask_spec[0]).convert("L")
+            for extra_mask_path in mask_spec[1:]:
+                extra_mask = Image.open(extra_mask_path).convert("L")
+                mask = ImageChops.lighter(mask, extra_mask)
+        else:
+            mask = Image.open(mask_spec).convert("L")
 
         # Resize to a fixed size compatible with the UNet
         image = image.resize((self.image_size, self.image_size), Image.BILINEAR)
         mask = mask.resize((self.image_size, self.image_size), Image.NEAREST)
+
+        # BUSI-only train-time augmentation to improve generalization.
+        if self.train_data == "BUSI":
+            if random.random() < 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+
+            if random.random() < 0.2:
+                image = TF.vflip(image)
+                mask = TF.vflip(mask)
+
+            if random.random() < 0.4:
+                angle = random.uniform(-10.0, 10.0)
+                image = image.rotate(angle, resample=Image.BILINEAR)
+                mask = mask.rotate(angle, resample=Image.NEAREST)
+
+            if random.random() < 0.3:
+                image = TF.adjust_brightness(image, random.uniform(0.9, 1.1))
+            if random.random() < 0.3:
+                image = TF.adjust_contrast(image, random.uniform(0.9, 1.1))
+
+        # Brain-MRI-Seg train-time augmentation (geometry-preserving for masks).
+        if self.train_data == "Brain-MRI-Seg":
+            if random.random() < 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+
+            if random.random() < 0.5:
+                image = TF.vflip(image)
+                mask = TF.vflip(mask)
+
+            if random.random() < 0.3:
+                angle = random.uniform(-8.0, 8.0)
+                image = image.rotate(angle, resample=Image.BILINEAR)
+                mask = mask.rotate(angle, resample=Image.NEAREST)
 
         image = TF.to_tensor(image)
         mask = TF.to_tensor(mask)
@@ -163,53 +218,192 @@ def setup_data(
 ):
     global train_loader, val_loader, test_loader
 
+    def stratified_split_by_class(pairs_with_class):
+        grouped = {}
+        for class_name, img_path, mask_spec in pairs_with_class:
+            grouped.setdefault(class_name, []).append((img_path, mask_spec))
+
+        train_local, val_local, test_local = [], [], []
+        generator = torch.Generator().manual_seed(42)
+
+        for class_name in sorted(grouped.keys()):
+            class_pairs = grouped[class_name]
+            n_class = len(class_pairs)
+            indices = torch.randperm(n_class, generator=generator).tolist()
+
+            n_train = int(0.80 * n_class)
+            n_val = int(0.10 * n_class)
+
+            train_local.extend([class_pairs[i] for i in indices[:n_train]])
+            val_local.extend([class_pairs[i] for i in indices[n_train:n_train + n_val]])
+            test_local.extend([class_pairs[i] for i in indices[n_train + n_val:]])
+
+        final_indices = {
+            "train": torch.randperm(len(train_local), generator=generator).tolist(),
+            "val": torch.randperm(len(val_local), generator=generator).tolist(),
+            "test": torch.randperm(len(test_local), generator=generator).tolist(),
+        }
+
+        train_local = [train_local[i] for i in final_indices["train"]]
+        val_local = [val_local[i] for i in final_indices["val"]]
+        test_local = [test_local[i] for i in final_indices["test"]]
+
+        return train_local, val_local, test_local
+
+    def build_brain_mri_seg_pairs():
+        search_roots = [
+            os.path.join(DATA_BRAIN_MRI_SEG_DIR, "kaggle_3m"),
+            os.path.join(DATA_BRAIN_MRI_SEG_DIR, "lgg-mri-segmentation", "kaggle_3m"),
+        ]
+
+        dataset_root = None
+        for root in search_roots:
+            if os.path.exists(root):
+                dataset_root = root
+                break
+
+        if dataset_root is None:
+            raise RuntimeError(
+                f"Could not find Brain-MRI-Seg data under {DATA_BRAIN_MRI_SEG_DIR}."
+            )
+
+        pairs_local = []
+        valid_ext = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+
+        for current_root, _, files in os.walk(dataset_root):
+            for fname in files:
+                lower = fname.lower()
+                if "_mask" not in lower or not lower.endswith(valid_ext):
+                    continue
+
+                mask_path = os.path.join(current_root, fname)
+                image_name = fname.replace("_mask", "")
+                image_path = os.path.join(current_root, image_name)
+
+                if os.path.exists(image_path):
+                    pairs_local.append((image_path, mask_path))
+
+        return pairs_local
+
+    def build_busi_pairs():
+        dataset_root = os.path.join(DATA_BUSI_DIR, "Dataset_BUSI_with_GT")
+        class_dirs = ["benign", "malignant", "normal"]
+        valid_ext = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
+
+        if not os.path.exists(dataset_root):
+            raise RuntimeError(f"Could not find BUSI data under {DATA_BUSI_DIR}.")
+
+        pairs_local = []
+
+        for class_name in class_dirs:
+            class_root = os.path.join(dataset_root, class_name)
+            if not os.path.isdir(class_root):
+                continue
+
+            files = os.listdir(class_root)
+            image_names = []
+            for fname in files:
+                lower = fname.lower()
+                if "_mask" in lower or not lower.endswith(valid_ext):
+                    continue
+                image_names.append(fname)
+
+            for image_name in image_names:
+                base, _ = os.path.splitext(image_name)
+                image_path = os.path.join(class_root, image_name)
+
+                mask_candidates = []
+                for fname in files:
+                    lower = fname.lower()
+                    if not lower.endswith(valid_ext):
+                        continue
+                    if lower.startswith(base.lower() + "_mask"):
+                        mask_candidates.append(os.path.join(class_root, fname))
+
+                mask_candidates.sort()
+                if mask_candidates:
+                    pairs_local.append((class_name, image_path, mask_candidates))
+
+        return pairs_local
+
     if train_data == "Skin-Lesion":
-        image_dir = "./data/Skin-Lesion/images"
-        mask_dir = "./data/Skin-Lesion/masks"
+        image_dir = os.path.join(DATA_SKIN_LESION_DIR, "images")
+        mask_dir = os.path.join(DATA_SKIN_LESION_DIR, "masks")
+        image_files = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+        image_id_to_path = {}
+        for fname in image_files:
+            image_id, _ = os.path.splitext(fname)
+            image_id_to_path[image_id] = os.path.join(image_dir, fname)
+
+        mask_files = [
+            f for f in os.listdir(mask_dir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+        pairs = []
+        for mname in mask_files:
+            base, _ = os.path.splitext(mname)
+            image_id = base.split("_segmentation")[0]
+            if image_id in image_id_to_path:
+                img_path = image_id_to_path[image_id]
+                mask_path = os.path.join(mask_dir, mname)
+                pairs.append((img_path, mask_path))
     elif train_data == "Flood":
-        image_dir = "./data/Flood/Image"
-        mask_dir = "./data/Flood/Mask"
+        image_dir = os.path.join(DATA_FLOOD_DIR, "Image")
+        mask_dir = os.path.join(DATA_FLOOD_DIR, "Mask")
+        image_files = [
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+        image_id_to_path = {}
+        for fname in image_files:
+            image_id, _ = os.path.splitext(fname)
+            image_id_to_path[image_id] = os.path.join(image_dir, fname)
+
+        mask_files = [
+            f for f in os.listdir(mask_dir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+        pairs = []
+        for mname in mask_files:
+            base, _ = os.path.splitext(mname)
+            image_id = base.split("_segmentation")[0]
+            if image_id in image_id_to_path:
+                img_path = image_id_to_path[image_id]
+                mask_path = os.path.join(mask_dir, mname)
+                pairs.append((img_path, mask_path))
+    elif train_data == "Brain-MRI-Seg":
+        pairs = build_brain_mri_seg_pairs()
+    elif train_data == "BUSI":
+        pairs = build_busi_pairs()
     else:
         raise ValueError(f"Unknown training data: {train_data}")
-
-    image_files = [
-        f for f in os.listdir(image_dir)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
-    image_id_to_path = {}
-    for fname in image_files:
-        image_id, _ = os.path.splitext(fname)
-        image_id_to_path[image_id] = os.path.join(image_dir, fname)
-
-    mask_files = [
-        f for f in os.listdir(mask_dir)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
-    pairs = []
-    for mname in mask_files:
-        base, _ = os.path.splitext(mname)
-        image_id = base.split("_segmentation")[0]
-        if image_id in image_id_to_path:
-            img_path = image_id_to_path[image_id]
-            mask_path = os.path.join(mask_dir, mname)
-            pairs.append((img_path, mask_path))
 
     if not pairs:
         raise RuntimeError(f"No matching image/mask pairs found in {train_data} dataset.")
 
     # Disjoint split: 80% train, 10% val, 10% test
-    n = len(pairs)
-    generator = torch.Generator().manual_seed(42)
-    indices = torch.randperm(n, generator=generator).tolist()
+    if train_data == "BUSI":
+        train_pairs, val_pairs, test_pairs = stratified_split_by_class(pairs)
+    else:
+        n = len(pairs)
+        generator = torch.Generator().manual_seed(42)
+        indices = torch.randperm(n, generator=generator).tolist()
 
-    n_train = int(0.80 * n)
-    n_val = int(0.10 * n)
+        n_train = int(0.80 * n)
+        n_val = int(0.10 * n)
 
-    train_pairs = [pairs[i] for i in indices[:n_train]]
-    val_pairs = [pairs[i] for i in indices[n_train:n_train + n_val]]
-    test_pairs = [pairs[i] for i in indices[n_train + n_val:]]
+        train_pairs = [pairs[i] for i in indices[:n_train]]
+        val_pairs = [pairs[i] for i in indices[n_train:n_train + n_val]]
+        test_pairs = [pairs[i] for i in indices[n_train + n_val:]]
 
-    train_dataset = SegmentationDataset(train_pairs, image_size=image_size)
+    train_dataset = SegmentationDataset(
+        train_pairs,
+        image_size=image_size,
+        train_data=train_data if train_data in ("BUSI", "Brain-MRI-Seg") else "",
+    )
     val_dataset = SegmentationDataset(val_pairs, image_size=image_size)
     test_dataset = SegmentationDataset(test_pairs, image_size=image_size)
 
@@ -243,7 +437,7 @@ def setup_data(
 # -----------------------------
 # Evaluation function
 # -----------------------------
-def evaluate(model, dataloader, criterion):
+def evaluate(model, dataloader, criterion, threshold: float = 0.5):
     """Evaluate a segmentation model on a dataloader.
 
     Assumes binary segmentation with masks in {0,1} and a single-channel
@@ -274,7 +468,7 @@ def evaluate(model, dataloader, criterion):
             # Convert logits to probabilities then to binary predictions
             if outputs.shape[1] == 1:
                 probs = torch.sigmoid(outputs)
-                preds = (probs > 0.5).float()
+                preds = (probs > threshold).float()
             else:
                 # Fallback for multi-class: take argmax over channels and treat
                 # the foreground (class 1) as positive.
@@ -309,10 +503,27 @@ def evaluate(model, dataloader, criterion):
 def main(args: argparse.Namespace):
     global model, criterion, optimizer, scheduler
 
-    best_val_dice = 0.0
-    num_epochs = 50
+    def compute_positive_class_weight(seg_dataset: SegmentationDataset):
+        total_pos = 0.0
+        total_pix = 0.0
+        for _, mask in seg_dataset:
+            total_pos += mask.sum().item()
+            total_pix += mask.numel()
 
-    if args.data_dir == "./data/Skin-Lesion":
+        total_neg = max(total_pix - total_pos, 0.0)
+        if total_pos <= 0:
+            return torch.tensor(1.0, device=device)
+
+        weight = total_neg / total_pos
+        return torch.tensor(max(weight, 1.0), device=device)
+
+    best_val_dice = 0.0
+    best_eval_threshold = 0.5
+    num_epochs = 50
+    is_brain_mri_seg = False
+    is_busi = False
+
+    if args.data_dir == DATA_SKIN_LESION_DIR:
         best_model_path = "best_unet5_skin_lesion.pth"
         setup_data(
             train_data="Skin-Lesion",
@@ -325,7 +536,7 @@ def main(args: argparse.Namespace):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="max", factor=0.5, patience=5
         )
-    elif args.data_dir == "./data/Flood":
+    elif args.data_dir == DATA_FLOOD_DIR:
         best_model_path = "best_unet5_flood.pth"
         setup_data(
             train_data="Flood",
@@ -335,6 +546,79 @@ def main(args: argparse.Namespace):
         model = UNet(n_class=1).to(device)
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=5
+        )
+
+    elif args.data_dir == DATA_BRAIN_MRI_SEG_DIR:
+        is_brain_mri_seg = True
+        best_model_path = "best_unet5_brain_mri_seg.pth"
+        setup_data(
+            train_data="Brain-MRI-Seg",
+            batch_size=args.batch_size,
+            image_size=args.image_size,
+        )
+        model = UNet(n_class=1).to(device)
+
+        raw_brain_pos_weight = compute_positive_class_weight(train_loader.dataset).item()
+        capped_brain_pos_weight = max(1.0, min(raw_brain_pos_weight, 20.0))
+        brain_pos_weight = torch.tensor(capped_brain_pos_weight, device=device)
+        print(
+            f"Brain-MRI-Seg BCE pos_weight raw/capped: {raw_brain_pos_weight:.4f}/{capped_brain_pos_weight:.4f}"
+        )
+        bce_loss = nn.BCEWithLogitsLoss(pos_weight=brain_pos_weight)
+
+        def brain_mri_seg_loss(logits, targets):
+            bce = bce_loss(logits, targets)
+
+            probs = torch.sigmoid(logits)
+            eps = 1e-7
+            intersection = (probs * targets).sum(dim=(1, 2, 3))
+            denom = probs.sum(dim=(1, 2, 3)) + targets.sum(dim=(1, 2, 3))
+            dice_loss = 1.0 - ((2.0 * intersection + eps) / (denom + eps))
+
+            return 0.6 * bce + 0.4 * dice_loss.mean()
+
+        criterion = brain_mri_seg_loss
+        brain_lr = min(args.learning_rate, 3e-4)
+        print(f"Brain-MRI-Seg training lr: {brain_lr:.6f}")
+        optimizer = torch.optim.Adam(model.parameters(), lr=brain_lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=5
+        )
+    elif args.data_dir == DATA_BUSI_DIR:
+        is_busi = True
+        best_model_path = "best_unet5_busi.pth"
+        setup_data(
+            train_data="BUSI",
+            batch_size=args.batch_size,
+            image_size=args.image_size,
+        )
+        model = UNet(n_class=1).to(device)
+        raw_busi_pos_weight = compute_positive_class_weight(train_loader.dataset).item()
+        capped_busi_pos_weight = max(1.0, min(raw_busi_pos_weight, 6.0))
+        busi_pos_weight = torch.tensor(capped_busi_pos_weight, device=device)
+        print(
+            f"BUSI BCE pos_weight raw/capped: {raw_busi_pos_weight:.4f}/{capped_busi_pos_weight:.4f}"
+        )
+
+        bce_loss = nn.BCEWithLogitsLoss(pos_weight=busi_pos_weight)
+
+        def busi_loss(logits, targets):
+            bce = bce_loss(logits, targets)
+
+            probs = torch.sigmoid(logits)
+            eps = 1e-7
+            intersection = (probs * targets).sum(dim=(1, 2, 3))
+            denom = probs.sum(dim=(1, 2, 3)) + targets.sum(dim=(1, 2, 3))
+            dice_loss = 1.0 - ((2.0 * intersection + eps) / (denom + eps))
+
+            return 0.7 * bce + 0.3 * dice_loss.mean()
+
+        criterion = busi_loss
+        busi_lr = min(args.learning_rate, 1e-4)
+        print(f"BUSI training lr: {busi_lr:.6f}")
+        optimizer = torch.optim.Adam(model.parameters(), lr=busi_lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="max", factor=0.5, patience=5
         )
@@ -354,17 +638,45 @@ def main(args: argparse.Namespace):
             loss.backward()
             optimizer.step()
 
-        val_dice, val_iou, val_acc, val_f1 = evaluate(model, val_loader, criterion)
+        if is_brain_mri_seg or is_busi:
+            if is_busi:
+                candidate_thresholds = [round(x, 2) for x in torch.arange(0.20, 0.82, 0.02).tolist()]
+            else:
+                candidate_thresholds = [round(x, 2) for x in torch.arange(0.30, 0.92, 0.02).tolist()]
+            best_epoch_metrics = None
+            best_epoch_threshold = 0.5
+
+            for threshold in candidate_thresholds:
+                metrics = evaluate(
+                    model,
+                    val_loader,
+                    criterion,
+                    threshold=threshold,
+                )
+                if best_epoch_metrics is None or metrics[0] > best_epoch_metrics[0]:
+                    best_epoch_metrics = metrics
+                    best_epoch_threshold = threshold
+
+            val_dice, val_iou, val_acc, val_f1 = best_epoch_metrics
+        else:
+            best_epoch_threshold = 0.5
+            val_dice, val_iou, val_acc, val_f1 = evaluate(
+                model, val_loader, criterion, threshold=0.5
+            )
+
         print(
-            f"Epoch {epoch+1}/{num_epochs} - Val Dice: {val_dice:.4f}, Val IoU: {val_iou:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}"
+            f"Epoch {epoch+1}/{num_epochs} - Val Dice: {val_dice:.4f}, Val IoU: {val_iou:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}, Thr: {best_epoch_threshold:.2f}"
         )
 
         scheduler.step(val_dice)
 
         if val_dice > best_val_dice:
             best_val_dice = val_dice
+            best_eval_threshold = best_epoch_threshold
             torch.save(model.state_dict(), best_model_path)
-            print(f"New best model saved with Val Dice: {best_val_dice:.4f}")
+            print(
+                f"New best model saved with Val Dice: {best_val_dice:.4f} at Thr: {best_eval_threshold:.2f}"
+            )
 
     # -----------------------------
     # Load best model and test
@@ -372,29 +684,46 @@ def main(args: argparse.Namespace):
     model.load_state_dict(torch.load(best_model_path, map_location=device))
     model.to(device)
 
-    test_dice, test_iou, test_acc, test_f1 = evaluate(model, test_loader, criterion)
+    test_dice, test_iou, test_acc, test_f1 = evaluate(
+        model,
+        test_loader,
+        criterion,
+        threshold=best_eval_threshold,
+    )
     print(
-        f"Test Dice: {test_dice:.4f}, Test IoU: {test_iou:.4f}, Test Acc: {test_acc:.4f}, Test F1: {test_f1:.4f}"
+        f"Test Dice: {test_dice:.4f}, Test IoU: {test_iou:.4f}, Test Acc: {test_acc:.4f}, Test F1: {test_f1:.4f}, Thr: {best_eval_threshold:.2f}"
     )
 
 
 def dataset_downloader(dataset_name: str):
-    if not os.path.exists("./data"):
-        os.makedirs("./data")
+    if not os.path.exists(DATA_ROOT):
+        os.makedirs(DATA_ROOT)
 
     if dataset_name == "Skin-Lesion":
-        if not os.path.exists("./data/Skin-Lesion"):
+        if not os.path.exists(DATA_SKIN_LESION_DIR):
             print("Downloading Skin-Lesion dataset from Kaggle...")
             kagglehub.dataset_download(
                 "surajghuwalewala/ham1000-segmentation-and-classification",
-                output_dir="./data/Skin-Lesion",
+                output_dir=DATA_SKIN_LESION_DIR,
             )
             print("Download complete.")
     elif dataset_name == "Flood":
-        if not os.path.exists("./data/Flood"):
+        if not os.path.exists(DATA_FLOOD_DIR):
             print("Downloading Flood dataset from Kaggle...")
             kagglehub.dataset_download(
-                "faizalkarim/flood-area-segmentation", output_dir="./data/Flood"
+                "faizalkarim/flood-area-segmentation", output_dir=DATA_FLOOD_DIR
+            )
+            print("Download complete.")
+    elif dataset_name == "Brain-MRI-Seg":
+        if not os.path.exists(DATA_BRAIN_MRI_SEG_DIR):
+            print("Downloading Brain-MRI-Seg dataset from Kaggle...")
+            kagglehub.dataset_download("mateuszbuda/lgg-mri-segmentation", output_dir=DATA_BRAIN_MRI_SEG_DIR)
+            print("Download complete.")
+    elif dataset_name == "BUSI":
+        if not os.path.exists(DATA_BUSI_DIR):
+            print("Downloading BUSI dataset from Kaggle...")
+            kagglehub.dataset_download(
+                "sabahesaraki/breast-ultrasound-images-dataset", output_dir=DATA_BUSI_DIR
             )
             print("Download complete.")
     else:
@@ -431,14 +760,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.train_data == "Skin-Lesion":
-        args.data_dir = "./data/Skin-Lesion"
+        args.data_dir = DATA_SKIN_LESION_DIR
         dataset_downloader("Skin-Lesion")
     elif args.train_data == "Flood":
-        args.data_dir = "./data/Flood"
+        args.data_dir = DATA_FLOOD_DIR
         dataset_downloader("Flood")
+    elif args.train_data == "Brain-MRI-Seg":
+        args.data_dir = DATA_BRAIN_MRI_SEG_DIR
+        dataset_downloader("Brain-MRI-Seg")
+    elif args.train_data == "BUSI":
+        args.data_dir = DATA_BUSI_DIR
+        dataset_downloader("BUSI")
     else:
-        print(
-            "Invalid training data specified. Using default data directory: ./data/Skin-Lesion/"
-        )
-        args.data_dir = "./data/Skin-Lesion/"
+        print(f"Invalid training data specified. Using default data directory: {DATA_SKIN_LESION_DIR}")
+        args.data_dir = DATA_SKIN_LESION_DIR
     main(args)
