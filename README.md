@@ -131,11 +131,11 @@ The output is then produced entirely with integer arithmetic:
 
 $$
 q_{\text{out}} =
-\text{clip}_{[0,255]}
+\mathrm{clip}_{[0,255]}
 \left(
-\left(
+\mathrm{round}\!\left(
 \frac{\text{acc}_{\text{bias}} \cdot M_0}{2^{31+n}}
-\right)_{\text{rounded}}
+\right)
  + Z_{\text{out}}
 \right)
 $$
