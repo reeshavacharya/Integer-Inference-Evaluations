@@ -3,6 +3,7 @@ import os
 import random
 import json
 import sys
+import time
 
 import torch
 import torch.nn as nn
@@ -299,6 +300,39 @@ def get_random_sample(dataset_name: str, setup_fn):
 activation_ranges = {}
 
 
+def _calibration_file_name(dataset_display: str):
+    return f"{dataset_display.lower().replace(' ', '_')}_calibration.json"
+
+
+def _calibration_file_path(dataset_display: str):
+    return os.path.normpath(
+        os.path.join(THIS_DIR, "..", "calibration", _calibration_file_name(dataset_display))
+    )
+
+
+def load_calibration_ranges(dataset_display: str):
+    """Load offline calibration stats for a dataset from the calibration folder."""
+    calibration_path = _calibration_file_path(dataset_display)
+    if not os.path.exists(calibration_path):
+        raise FileNotFoundError(
+            f"Missing calibration file for {dataset_display}: {calibration_path}. "
+            f"Run resnet/calibration.py for this dataset first."
+        )
+
+    with open(calibration_path, "r") as f:
+        payload = json.load(f)
+
+    layers = payload.get("layers")
+    if not isinstance(layers, dict) or not layers:
+        raise RuntimeError(f"Invalid calibration file format: {calibration_path}")
+
+    activation_ranges.clear()
+    for layer_name, stats in layers.items():
+        activation_ranges[layer_name] = stats
+
+    return activation_ranges
+
+
 def calibration_hook(module, input, output, name):
 	in_tensor = input[0].detach()
 	out_tensor = output.detach()
@@ -406,10 +440,8 @@ def run_integer_conv_block(q_input, conv, bn, layer_name, scale_in, zp_in, apply
     q_w = quantize_tensor(w_folded, scale_w, zp_w, dtype=torch.uint8)
 
     out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor(
-        [out_range["out_min"], out_range["out_max"]], dtype=torch.float32
-    )
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    scale_out = out_range["out_scale"]
+    zp_out = out_range["out_zero_point"]
 
     scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
     q_bias = quantize_tensor(b_folded, scale_bias, zp_bias, dtype=torch.int32)
@@ -455,10 +487,8 @@ def run_integer_fc(q_input, fc, layer_name, scale_in, zp_in):
     q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
 
     out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor(
-        [out_range["out_min"], out_range["out_max"]], dtype=torch.float32
-    )
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    scale_out = out_range["out_scale"]
+    zp_out = out_range["out_zero_point"]
 
     bias_float = fc.bias.detach()
     scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
@@ -524,8 +554,8 @@ def run_integer_basic_block(q_x, block, prefix, scale_in, zp_in):
 
     # 4. Pre-fetch target calibration ranges for the addition output
     out_range = activation_ranges[f"{prefix}_out"]
-    pseudo_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]], dtype=torch.float32)
-    s_final, z_final = get_quantization_params(pseudo_tensor, num_bits=8)
+    s_final = out_range["out_scale"]
+    z_final = out_range["out_zero_point"]
 
     # 5. STRICT INTEGER ADDITION
     q_added = integer_add(
@@ -582,25 +612,24 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
 
     float_output = None
     float_pred = None
+    float_inference_time = None
+    integer_inference_time = None
 
     if run_integer:
-        # Integer inference needs activation calibration ranges from a float forward pass.
-        handles = register_hooks(model)
-        with torch.no_grad():
-            float_output = model(image_tensor)
-        for h in handles:
-            h.remove()
-    elif run_floating_point:
-        with torch.no_grad():
-            float_output = model(image_tensor)
+        load_calibration_ranges(dataset_display)
 
     if run_floating_point:
+        float_start = time.perf_counter()
+        with torch.no_grad():
+            float_output = model(image_tensor)
         if cfg["is_multilabel"]:
             scores = torch.sigmoid(float_output)[0]
             float_pred = (scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
         else:
             float_pred = float_output.argmax(dim=1).item()
+        float_inference_time = time.perf_counter() - float_start
         print(f"[2] Floating-Point Inference complete. Prediction: {float_pred}")
+        print(f"[timing] Floating-point inference time: {float_inference_time:.4f}s")
 
     if not run_integer:
         print("\n" + "=" * 40)
@@ -613,11 +642,10 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
         return
 
     # Quantize Input
+    integer_start = time.perf_counter()
     in_range = activation_ranges["conv1"]
-    pseudo_in_tensor = torch.tensor(
-        [in_range["in_min"], in_range["in_max"]], dtype=torch.float32
-    )
-    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=8)
+    scale_in = in_range["in_scale"]
+    zp_in = in_range["in_zero_point"]
     q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
 
     # Log quantized input for MNIST-only integer trace
@@ -648,10 +676,8 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     # 1. First, fetch the target ranges for the inputs to the FC layer 
     # (Since pooling feeds directly into FC, they share the same range/scale)
     fc_in_range = activation_ranges["fc"]
-    pseudo_fc_in = torch.tensor(
-        [fc_in_range["in_min"], fc_in_range["in_max"]], dtype=torch.float32
-    )
-    s_fc_in, z_fc_in = get_quantization_params(pseudo_fc_in, num_bits=8)
+    s_fc_in = fc_in_range["in_scale"]
+    z_fc_in = fc_in_range["in_zero_point"]
 
     # 2. STRICT INTEGER POOLING
     q_pooled = integer_global_avg_pool2d(
@@ -670,6 +696,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     int_logits = q_out.to(torch.float32)
     dequantized_logits = final_s * (int_logits - final_z)
     int_pred = dequantized_logits.argmax(dim=1).item()
+    integer_inference_time = time.perf_counter() - integer_start
 
     print("\n" + "=" * 40)
     print(" RESNET18 INFERENCE SUMMARY ")
@@ -678,7 +705,10 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     print(f"True Label:               {true_label_text}")
     if run_floating_point:
         print(f"Float Model Prediction:   {float_pred}")
+        print(f"Float Inference Time:      {float_inference_time:.4f}s")
+    print ("-" * 40)
     print(f"Integer Model Prediction: {int_pred}")
+    print(f"Integer Inference Time:    {integer_inference_time:.4f}s")
 
     if cfg["is_multilabel"]:
         chest_scores = torch.sigmoid(dequantized_logits)[0]

@@ -1,0 +1,617 @@
+{
+  "meta": {
+    "dataset": "Oral-Cancer",
+    "true_label": "0",
+    "fp32_prediction": 0,
+    "int8_prediction": 0
+  },
+  "layer_metrics": {
+    "conv1_relu": {
+      "tensor_shape": [
+        1,
+        64,
+        224,
+        224
+      ],
+      "quantization_params": {
+        "scale": 0.024275465572581572,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 6.190243721008301,
+        "mean": 0.15533459186553955
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 6.190243721008301,
+        "mean": 0.1562790721654892
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9998361468315125,
+        "sqnr_db": 33.125244140625,
+        "mean_absolute_error": 0.003707293886691332,
+        "max_absolute_error": 0.0699123740196228,
+        "mean_shift": -0.000944480299949646
+      }
+    },
+    "layer1_block0_conv1_relu": {
+      "tensor_shape": [
+        1,
+        64,
+        224,
+        224
+      ],
+      "quantization_params": {
+        "scale": 0.018957925310321883,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 4.83427095413208,
+        "mean": 0.11212316155433655
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 4.83427095413208,
+        "mean": 0.11267805844545364
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9998036623001099,
+        "sqnr_db": 32.42186737060547,
+        "mean_absolute_error": 0.002804596209898591,
+        "max_absolute_error": 0.07968401908874512,
+        "mean_shift": -0.000554896891117096
+      }
+    },
+    "layer1_block0_conv2_out": {
+      "tensor_shape": [
+        1,
+        64,
+        224,
+        224
+      ],
+      "quantization_params": {
+        "scale": 0.07052870357737821,
+        "zero_point": 137
+      },
+      "fp32_distribution": {
+        "min": -9.697440147399902,
+        "max": 8.287379264831543,
+        "mean": -0.1359940618276596
+      },
+      "int8_dequantized_distribution": {
+        "min": -9.662431716918945,
+        "max": 8.322386741638184,
+        "mean": -0.1374792605638504
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9994320869445801,
+        "sqnr_db": 29.75066375732422,
+        "mean_absolute_error": 0.020956795662641525,
+        "max_absolute_error": 0.1213979721069336,
+        "mean_shift": 0.001485198736190796
+      }
+    },
+    "layer1_block1_conv1_relu": {
+      "tensor_shape": [
+        1,
+        64,
+        224,
+        224
+      ],
+      "quantization_params": {
+        "scale": 0.009212598613664216,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 2.349212646484375,
+        "mean": 0.23806597292423248
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 2.349212646484375,
+        "mean": 0.23995551466941833
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9998064041137695,
+        "sqnr_db": 33.437171936035156,
+        "mean_absolute_error": 0.004659008234739304,
+        "max_absolute_error": 0.06726288795471191,
+        "mean_shift": -0.001889541745185852
+      }
+    },
+    "layer1_block1_conv2_out": {
+      "tensor_shape": [
+        1,
+        64,
+        224,
+        224
+      ],
+      "quantization_params": {
+        "scale": 0.021721077432819442,
+        "zero_point": 176
+      },
+      "fp32_distribution": {
+        "min": -3.8137717247009277,
+        "max": 1.7251030206680298,
+        "mean": -0.17181454598903656
+      },
+      "int8_dequantized_distribution": {
+        "min": -3.8229098320007324,
+        "max": 1.7159651517868042,
+        "mean": -0.17217065393924713
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9996511936187744,
+        "sqnr_db": 33.22593307495117,
+        "mean_absolute_error": 0.009669528342783451,
+        "max_absolute_error": 0.10481137037277222,
+        "mean_shift": 0.0003561079502105713
+      }
+    },
+    "layer2_block0_conv1_relu": {
+      "tensor_shape": [
+        1,
+        128,
+        112,
+        112
+      ],
+      "quantization_params": {
+        "scale": 0.024955407310934628,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 6.36362886428833,
+        "mean": 0.23833568394184113
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 6.36362886428833,
+        "mean": 0.23780173063278198
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9996816515922546,
+        "sqnr_db": 32.2917366027832,
+        "mean_absolute_error": 0.005889383610337973,
+        "max_absolute_error": 0.13695186376571655,
+        "mean_shift": 0.0005339533090591431
+      }
+    },
+    "layer2_block0_conv2_out": {
+      "tensor_shape": [
+        1,
+        128,
+        112,
+        112
+      ],
+      "quantization_params": {
+        "scale": 0.05717919293571921,
+        "zero_point": 131
+      },
+      "fp32_distribution": {
+        "min": -7.484981536865234,
+        "max": 7.095712661743164,
+        "mean": -0.059273358434438705
+      },
+      "int8_dequantized_distribution": {
+        "min": -7.490474224090576,
+        "max": 7.090219974517822,
+        "mean": -0.05791175737977028
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9996239542961121,
+        "sqnr_db": 31.246185302734375,
+        "mean_absolute_error": 0.019600670784711838,
+        "max_absolute_error": 0.19079852104187012,
+        "mean_shift": -0.0013616010546684265
+      }
+    },
+    "layer2_block0_shortcut_out": {
+      "tensor_shape": [
+        1,
+        128,
+        112,
+        112
+      ],
+      "quantization_params": {
+        "scale": 0.07056674209295534,
+        "zero_point": 121
+      },
+      "fp32_distribution": {
+        "min": -8.53559684753418,
+        "max": 9.458922386169434,
+        "mean": -0.22323733568191528
+      },
+      "int8_dequantized_distribution": {
+        "min": -8.538576126098633,
+        "max": 9.455944061279297,
+        "mean": -0.2277662456035614
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9990175366401672,
+        "sqnr_db": 28.223726272583008,
+        "mean_absolute_error": 0.02497563511133194,
+        "max_absolute_error": 0.2710418105125427,
+        "mean_shift": 0.004528909921646118
+      }
+    },
+    "layer2_block1_conv1_relu": {
+      "tensor_shape": [
+        1,
+        128,
+        112,
+        112
+      ],
+      "quantization_params": {
+        "scale": 0.02624498255112592,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 6.692470550537109,
+        "mean": 0.1820879727602005
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 6.692470550537109,
+        "mean": 0.18104669451713562
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9995574355125427,
+        "sqnr_db": 30.452434539794922,
+        "mean_absolute_error": 0.0055796001106500626,
+        "max_absolute_error": 0.11616790294647217,
+        "mean_shift": 0.0010412782430648804
+      }
+    },
+    "layer2_block1_conv2_out": {
+      "tensor_shape": [
+        1,
+        128,
+        112,
+        112
+      ],
+      "quantization_params": {
+        "scale": 0.057168917562447345,
+        "zero_point": 153
+      },
+      "fp32_distribution": {
+        "min": -8.768780708312988,
+        "max": 5.809293270111084,
+        "mean": -0.18306219577789307
+      },
+      "int8_dequantized_distribution": {
+        "min": -8.746844291687012,
+        "max": 5.7740607261657715,
+        "mean": -0.18380418419837952
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9993776082992554,
+        "sqnr_db": 28.871488571166992,
+        "mean_absolute_error": 0.017407773062586784,
+        "max_absolute_error": 0.1590852439403534,
+        "mean_shift": 0.0007419884204864502
+      }
+    },
+    "layer3_block0_conv1_relu": {
+      "tensor_shape": [
+        1,
+        256,
+        56,
+        56
+      ],
+      "quantization_params": {
+        "scale": 0.030744225371117685,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 7.83977746963501,
+        "mean": 0.19008402526378632
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 7.83977746963501,
+        "mean": 0.19036543369293213
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9996973276138306,
+        "sqnr_db": 32.25093460083008,
+        "mean_absolute_error": 0.0050306543707847595,
+        "max_absolute_error": 0.16481220722198486,
+        "mean_shift": -0.000281408429145813
+      }
+    },
+    "layer3_block0_conv2_out": {
+      "tensor_shape": [
+        1,
+        256,
+        56,
+        56
+      ],
+      "quantization_params": {
+        "scale": 0.04809889325908586,
+        "zero_point": 115
+      },
+      "fp32_distribution": {
+        "min": -5.508506774902344,
+        "max": 6.756711006164551,
+        "mean": -0.1782718002796173
+      },
+      "int8_dequantized_distribution": {
+        "min": -5.531372547149658,
+        "max": 6.733844757080078,
+        "mean": -0.17956776916980743
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9997406601905823,
+        "sqnr_db": 32.22671890258789,
+        "mean_absolute_error": 0.01594558358192444,
+        "max_absolute_error": 0.149871826171875,
+        "mean_shift": 0.0012959688901901245
+      }
+    },
+    "layer3_block0_shortcut_out": {
+      "tensor_shape": [
+        1,
+        256,
+        56,
+        56
+      ],
+      "quantization_params": {
+        "scale": 0.06159554088816923,
+        "zero_point": 117
+      },
+      "fp32_distribution": {
+        "min": -7.199629306793213,
+        "max": 8.507233619689941,
+        "mean": -0.254652738571167
+      },
+      "int8_dequantized_distribution": {
+        "min": -7.20667839050293,
+        "max": 8.500185012817383,
+        "mean": -0.2551557421684265
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.999478816986084,
+        "sqnr_db": 29.204517364501953,
+        "mean_absolute_error": 0.027408648282289505,
+        "max_absolute_error": 0.3593442440032959,
+        "mean_shift": 0.0005030035972595215
+      }
+    },
+    "layer3_block1_conv1_relu": {
+      "tensor_shape": [
+        1,
+        256,
+        56,
+        56
+      ],
+      "quantization_params": {
+        "scale": 0.02041020486869064,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 5.204602241516113,
+        "mean": 0.3346041142940521
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 5.122961044311523,
+        "mean": 0.3344004154205322
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9999116659164429,
+        "sqnr_db": 35.472618103027344,
+        "mean_absolute_error": 0.005014624912291765,
+        "max_absolute_error": 0.13469910621643066,
+        "mean_shift": 0.00020369887351989746
+      }
+    },
+    "layer3_block1_conv2_out": {
+      "tensor_shape": [
+        1,
+        256,
+        56,
+        56
+      ],
+      "quantization_params": {
+        "scale": 0.02850020820019292,
+        "zero_point": 159
+      },
+      "fp32_distribution": {
+        "min": -4.539199352264404,
+        "max": 2.72835373878479,
+        "mean": -0.11576445400714874
+      },
+      "int8_dequantized_distribution": {
+        "min": -4.531533241271973,
+        "max": 2.736020088195801,
+        "mean": -0.11475127190351486
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9997525215148926,
+        "sqnr_db": 32.7889404296875,
+        "mean_absolute_error": 0.010564045049250126,
+        "max_absolute_error": 0.10072875022888184,
+        "mean_shift": -0.0010131821036338806
+      }
+    },
+    "layer4_block0_conv1_relu": {
+      "tensor_shape": [
+        1,
+        512,
+        28,
+        28
+      ],
+      "quantization_params": {
+        "scale": 0.024281569088206573,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 6.191800117492676,
+        "mean": 0.17882809042930603
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 6.191800117492676,
+        "mean": 0.1786123365163803
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9997743368148804,
+        "sqnr_db": 33.39436721801758,
+        "mean_absolute_error": 0.00366441928781569,
+        "max_absolute_error": 0.14745306968688965,
+        "mean_shift": 0.00021575391292572021
+      }
+    },
+    "layer4_block0_conv2_out": {
+      "tensor_shape": [
+        1,
+        512,
+        28,
+        28
+      ],
+      "quantization_params": {
+        "scale": 0.031144041173598345,
+        "zero_point": 139
+      },
+      "fp32_distribution": {
+        "min": -4.338257312774658,
+        "max": 3.60347318649292,
+        "mean": -0.40506887435913086
+      },
+      "int8_dequantized_distribution": {
+        "min": -4.32902193069458,
+        "max": 3.612708806991577,
+        "mean": -0.4043479859828949
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9998056888580322,
+        "sqnr_db": 33.881431579589844,
+        "mean_absolute_error": 0.011270075105130672,
+        "max_absolute_error": 0.09424936771392822,
+        "mean_shift": -0.0007208883762359619
+      }
+    },
+    "layer4_block0_shortcut_out": {
+      "tensor_shape": [
+        1,
+        512,
+        28,
+        28
+      ],
+      "quantization_params": {
+        "scale": 0.05356390709970511,
+        "zero_point": 105
+      },
+      "fp32_distribution": {
+        "min": -5.598849296569824,
+        "max": 8.05994701385498,
+        "mean": -0.28910356760025024
+      },
+      "int8_dequantized_distribution": {
+        "min": -5.624210357666016,
+        "max": 8.034585952758789,
+        "mean": -0.2879132032394409
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9993977546691895,
+        "sqnr_db": 29.407772064208984,
+        "mean_absolute_error": 0.016938908025622368,
+        "max_absolute_error": 0.1644650101661682,
+        "mean_shift": -0.0011903643608093262
+      }
+    },
+    "layer4_block1_conv1_relu": {
+      "tensor_shape": [
+        1,
+        512,
+        28,
+        28
+      ],
+      "quantization_params": {
+        "scale": 0.015998086742326324,
+        "zero_point": 0
+      },
+      "fp32_distribution": {
+        "min": 0.0,
+        "max": 4.079512119293213,
+        "mean": 0.1575256884098053
+      },
+      "int8_dequantized_distribution": {
+        "min": 0.0,
+        "max": 4.079512119293213,
+        "mean": 0.15767739713191986
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9997169971466064,
+        "sqnr_db": 32.443973541259766,
+        "mean_absolute_error": 0.0035327463410794735,
+        "max_absolute_error": 0.11410391330718994,
+        "mean_shift": -0.000151708722114563
+      }
+    },
+    "layer4_block1_conv2_out": {
+      "tensor_shape": [
+        1,
+        512,
+        28,
+        28
+      ],
+      "quantization_params": {
+        "scale": 0.02895505381565468,
+        "zero_point": 144
+      },
+      "fp32_distribution": {
+        "min": -4.177597522735596,
+        "max": 3.2059412002563477,
+        "mean": -0.3839154839515686
+      },
+      "int8_dequantized_distribution": {
+        "min": -4.169527530670166,
+        "max": 3.2140109539031982,
+        "mean": -0.3834242522716522
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9997601509094238,
+        "sqnr_db": 33.72500228881836,
+        "mean_absolute_error": 0.009146681986749172,
+        "max_absolute_error": 0.0910605788230896,
+        "mean_shift": -0.0004912316799163818
+      }
+    },
+    "fc": {
+      "tensor_shape": [
+        1,
+        2
+      ],
+      "quantization_params": {
+        "scale": 0.002257231871287028,
+        "zero_point": 132
+      },
+      "fp32_distribution": {
+        "min": -0.2977510392665863,
+        "max": 0.27784308791160583,
+        "mean": -0.009953975677490234
+      },
+      "int8_dequantized_distribution": {
+        "min": -0.29795461893081665,
+        "max": 0.2776395082473755,
+        "mean": -0.010157555341720581
+      },
+      "error_metrics": {
+        "cosine_similarity": 0.9999996423721313,
+        "sqnr_db": 63.01223373413086,
+        "mean_absolute_error": 0.00020357966423034668,
+        "max_absolute_error": 0.00020357966423034668,
+        "mean_shift": 0.00020357966423034668
+      }
+    }
+  }
+}

@@ -163,6 +163,18 @@ def validate_loader_preprocessing(loader: DataLoader, dataset_name: str, stage: 
     validate_preprocessed_batch(images, dataset_name, stage=stage)
 
 
+def _deterministic_split_indices(total_len: int, train_frac: float = 0.8, val_frac: float = 0.1, seed: int = 42):
+    train_size = int(train_frac * total_len)
+    val_size = int(val_frac * total_len)
+    test_size = total_len - train_size - val_size
+    gen = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(total_len, generator=gen).tolist()
+    train_idx = perm[:train_size]
+    val_idx = perm[train_size: train_size + val_size]
+    test_idx = perm[train_size + val_size:]
+    return train_idx, val_idx, test_idx
+
+
 # -----------------------------
 # Data
 # -----------------------------
@@ -185,15 +197,11 @@ def setup_MNIST(batch_size: int):
     full_dataset = ConcatDataset([train_dataset_full, test_dataset_full])
 
     total_len = len(full_dataset)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
 
-    train_subset, val_subset, test_subset = random_split(
-        full_dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    train_subset = Subset(full_dataset, train_idx)
+    val_subset = Subset(full_dataset, val_idx)
+    test_subset = Subset(full_dataset, test_idx)
 
     train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
@@ -246,15 +254,7 @@ def setup_CIFAR10(batch_size: int = 64):
     full_base_eval = ConcatDataset([train_base_eval, test_base_eval])
 
     total_len = len(full_base_eval)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
-
-    train_subset_base, val_subset, test_subset = random_split(
-        full_base_eval,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
 
     # Parallel dataset with training-time augmentation
     train_base_tf = datasets.CIFAR10(
@@ -265,7 +265,9 @@ def setup_CIFAR10(batch_size: int = 64):
     )
     full_base_tf = ConcatDataset([train_base_tf, test_base_tf])
 
-    train_subset = Subset(full_base_tf, train_subset_base.indices)
+    train_subset = Subset(full_base_tf, train_idx)
+    val_subset = Subset(full_base_eval, val_idx)
+    test_subset = Subset(full_base_eval, test_idx)
 
     train_loader = DataLoader(
         train_subset,
@@ -380,15 +382,7 @@ def setup_Brain_MRI(batch_size: int = 64):
     full_base_eval = ConcatDataset([full_train_base, full_test_base])
 
     total_len = len(full_base_eval)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
-
-    train_subset_base, val_dataset, test_dataset = random_split(
-        full_base_eval,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
 
     # Parallel dataset with training augmentations, indexed by the same split
     full_train_tf = datasets.ImageFolder(
@@ -401,7 +395,9 @@ def setup_Brain_MRI(batch_size: int = 64):
     )
     full_base_tf = ConcatDataset([full_train_tf, full_test_tf])
 
-    train_dataset = Subset(full_base_tf, train_subset_base.indices)
+    train_dataset = Subset(full_base_tf, train_idx)
+    val_dataset = Subset(full_base_eval, val_idx)
+    test_dataset = Subset(full_base_eval, test_idx)
 
     train_loader = DataLoader(
         train_dataset,
@@ -509,17 +505,11 @@ def setup_CHEST(batch_size: int = 64):
     full_train_dataset = ChestMultiLabelDataset(records, transform=train_transform)
 
     total_len = len(full_eval_dataset)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
 
-    train_subset_base, val_subset, test_subset = random_split(
-        full_eval_dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
-
-    train_subset = Subset(full_train_dataset, train_subset_base.indices)
+    train_subset = Subset(full_train_dataset, train_idx)
+    val_subset = Subset(full_eval_dataset, val_idx)
+    test_subset = Subset(full_eval_dataset, test_idx)
 
     train_loader = DataLoader(
         train_subset,
@@ -580,17 +570,11 @@ def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
     train_dataset = datasets.ImageFolder(root=cancer_root, transform=train_transform)
 
     total_len = len(eval_dataset)
-    train_size = int(0.8 * total_len)
-    val_size = int(0.1 * total_len)
-    test_size = total_len - train_size - val_size
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
 
-    train_subset_base, val_subset, test_subset = random_split(
-        eval_dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42),
-    )
-
-    train_subset = Subset(train_dataset, train_subset_base.indices)
+    train_subset = Subset(train_dataset, train_idx)
+    val_subset = Subset(eval_dataset, val_idx)
+    test_subset = Subset(eval_dataset, test_idx)
 
     train_loader = DataLoader(
         train_subset,

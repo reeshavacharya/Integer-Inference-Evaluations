@@ -290,6 +290,8 @@ def _integer_accuracy(
 
     print(f"[bench][{dataset_name}][int] Starting benchmark over {target_images}/{total_images} images.")
 
+    int8_inference.load_calibration_ranges(dataset_name)
+
     correct = 0.0
     total = 0
     processed_images = 0
@@ -303,18 +305,9 @@ def _integer_accuracy(
             images = images[:remaining]
             labels = labels[:remaining]
 
-        int8_inference.activation_ranges.clear()
-        handles = int8_inference.register_hooks(model)
-        with torch.no_grad():
-            _ = model(images)
-        for h in handles:
-            h.remove()
-
         in_range = int8_inference.activation_ranges["conv1"]
-        pseudo_in_tensor = torch.tensor(
-            [in_range["in_min"], in_range["in_max"]], dtype=torch.float32
-        )
-        scale_in, zp_in = int8_utils.get_quantization_params(pseudo_in_tensor, num_bits=8)
+        scale_in = in_range["in_scale"]
+        zp_in = in_range["in_zero_point"]
         q_x = int8_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
 
         q_x, s_out, z_out = int8_inference.run_integer_conv_block(
@@ -337,10 +330,8 @@ def _integer_accuracy(
                 )
 
         fc_in_range = int8_inference.activation_ranges["fc"]
-        pseudo_fc_in = torch.tensor(
-            [fc_in_range["in_min"], fc_in_range["in_max"]], dtype=torch.float32
-        )
-        s_fc_in, z_fc_in = int8_utils.get_quantization_params(pseudo_fc_in, num_bits=8)
+        s_fc_in = fc_in_range["in_scale"]
+        z_fc_in = fc_in_range["in_zero_point"]
 
         q_pooled = int8_utils.integer_global_avg_pool2d(
             q_x, z_out, s_out, z_fc_in, s_fc_in
