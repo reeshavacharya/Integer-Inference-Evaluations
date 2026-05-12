@@ -1,0 +1,40 @@
+{
+  "dataset": "NIH-CHEST",
+  "layer_metrics": {
+    "conv1": {
+      "cosine_similarity": 0.9995035640895367,
+      "sqnr_db": 29.75686776638031,
+      "mean_absolute_error": 0.0016301952709909528,
+      "max_absolute_error": 0.034521788358688354,
+      "mean_shift": -0.0007730657234787941
+    },
+    "conv2": {
+      "cosine_similarity": 0.9891510456800461,
+      "sqnr_db": 16.26642519235611,
+      "mean_absolute_error": 0.000732042166418978,
+      "max_absolute_error": 0.05189460515975952,
+      "mean_shift": -0.00015593908028677106
+    },
+    "fc1": {
+      "cosine_similarity": 0.9891957715153694,
+      "sqnr_db": 16.36954289674759,
+      "mean_absolute_error": 0.002872982688131742,
+      "max_absolute_error": 0.1724330186843872,
+      "mean_shift": -0.0006291413446888328
+    },
+    "fc2": {
+      "cosine_similarity": 0.9776750840246677,
+      "sqnr_db": 13.295456528663635,
+      "mean_absolute_error": 0.01542490697465837,
+      "max_absolute_error": 0.4819755554199219,
+      "mean_shift": -0.0010209339670836926
+    },
+    "fc3": {
+      "cosine_similarity": 0.9639855958521366,
+      "sqnr_db": 11.400932967662811,
+      "mean_absolute_error": 0.1982684787362814,
+      "max_absolute_error": 1.8294965028762817,
+      "mean_shift": -0.00316871446557343
+    }
+  }
+}

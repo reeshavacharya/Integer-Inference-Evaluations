@@ -97,6 +97,13 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 		return "MNIST"
 	if key == "CIFAR10":
 		return "CIFAR10"
+	if key == "OCTMNIST":
+		return "OCTMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
+	if key == "ORGANAMNIST":
+		return "OrganAMNIST"
+
 	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
@@ -185,42 +192,52 @@ def _run_fp32_trace(model, images):
 
 
 def _run_int8_trace(model, images, int8_state):
-	traces = {}
-	in_range = int8_inference.activation_ranges["conv1"]
-	scale_in = in_range["in_scale"]
-	zp_in = in_range["in_zero_point"]
-	q_x = int8_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
+    traces = {}
+    
+    # 1. Pull global input boundaries from the compiled offline dictionary
+    scale_in = int8_state["meta"]["in_scale"]
+    zp_in = int8_state["meta"]["in_zp"]
+    
+    # 2. Quantize Input Image
+    q_x = int8_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
 
-	q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-		q_x, int8_state["conv1"], "conv1", scale_in, zp_in, apply_relu=True, is_conv=True
-	)
-	q_x = int8_inference.avg_pool_uint8(q_x, name="pool_after_conv1")
-	traces["conv1"] = s_out * (q_x.to(torch.float32) - z_out)
+    # ---------------------------------------------------------
+    # Execute Convs using int8_state
+    # ---------------------------------------------------------
+    q_x, s_out, z_out = int8_inference.run_integer_layer(
+        q_x, int8_state["conv1"], "conv1", zp_in, apply_relu=True, is_conv=True
+    )
+    q_x = int8_inference.avg_pool_uint8(q_x, name="bench_pool_after_conv1")
+    traces["conv1"] = s_out * (q_x.to(torch.float32) - z_out)
 
-	q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-		q_x, int8_state["conv2"], "conv2", s_out, z_out, apply_relu=True, is_conv=True
-	)
-	q_x = int8_inference.avg_pool_uint8(q_x, name="pool_after_conv2")
-	traces["conv2"] = s_out * (q_x.to(torch.float32) - z_out)
+    q_x, s_out, z_out = int8_inference.run_integer_layer(
+        q_x, int8_state["conv2"], "conv2", z_out, apply_relu=True, is_conv=True
+    )
+    q_x = int8_inference.avg_pool_uint8(q_x, name="bench_pool_after_conv2")
+    traces["conv2"] = s_out * (q_x.to(torch.float32) - z_out)
 
-	q_x = q_x.view(q_x.size(0), -1)
+    # Flatten for Dense Layers
+    q_x = q_x.view(q_x.size(0), -1)
 
-	q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-		q_x, int8_state["fc1"], "fc1", s_out, z_out, apply_relu=True, is_conv=False
-	)
-	traces["fc1"] = s_out * (q_x.to(torch.float32) - z_out)
+    # ---------------------------------------------------------
+    # Execute FCs using int8_state
+    # ---------------------------------------------------------
+    q_x, s_out, z_out = int8_inference.run_integer_layer(
+        q_x, int8_state["fc1"], "fc1", z_out, apply_relu=True, is_conv=False
+    )
+    traces["fc1"] = s_out * (q_x.to(torch.float32) - z_out)
 
-	q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-		q_x, int8_state["fc2"], "fc2", s_out, z_out, apply_relu=True, is_conv=False
-	)
-	traces["fc2"] = s_out * (q_x.to(torch.float32) - z_out)
+    q_x, s_out, z_out = int8_inference.run_integer_layer(
+        q_x, int8_state["fc2"], "fc2", z_out, apply_relu=True, is_conv=False
+    )
+    traces["fc2"] = s_out * (q_x.to(torch.float32) - z_out)
 
-	q_out, final_s, final_z, _, _, _ = int8_inference.run_integer_layer(
-		q_x, int8_state["fc3"], "fc3", s_out, z_out, apply_relu=False, is_conv=False
-	)
-	traces["fc3"] = final_s * (q_out.to(torch.float32) - final_z)
+    q_out, final_s, final_z = int8_inference.run_integer_layer(
+        q_x, int8_state["fc3"], "fc3", z_out, apply_relu=False, is_conv=False
+    )
+    traces["fc3"] = final_s * (q_out.to(torch.float32) - final_z)
 
-	return traces
+    return traces
 
 
 def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64):
@@ -340,6 +357,9 @@ if __name__ == "__main__":
 	parser.add_argument("--CIFAR10", dest="cifar10", action="store_true", help="Evaluate CIFAR10")
 	parser.add_argument("--Brain-MRI", dest="brain_mri", action="store_true", help="Evaluate Brain-MRI")
 	parser.add_argument("--NIH-CHEST", dest="nih_chest", action="store_true", help="Evaluate NIH-CHEST")
+	parser.add_argument("--OCTMNIST", dest="octmnist", action="store_true", help="Evaluate OCTMNIST")
+	parser.add_argument("--BloodMNIST", dest="bloodmnist", action="store_true", help="Evaluate BloodMNIST")
+	parser.add_argument("--OrganAMNIST", dest="organamnist", action="store_true", help="Evaluate OrganAMNIST")
 	parser.add_argument("--num_data", type=int, default=None, help="Number of images to process")
 	parser.add_argument("--batch-size", type=int, default=64, help="Batch size for evaluation")
 	args = parser.parse_args()
@@ -350,6 +370,9 @@ if __name__ == "__main__":
 		(args.cifar10, "CIFAR10"),
 		(args.brain_mri, "Brain-MRI"),
 		(args.nih_chest, "NIH-CHEST"),
+		(args.octmnist, "OCTMNIST"),
+		(args.bloodmnist, "BloodMNIST"),
+		(args.organamnist, "OrganAMNIST"),
 	]:
 		if enabled:
 			selected.append(dataset_name)
@@ -357,7 +380,7 @@ if __name__ == "__main__":
 	if args.dataset is not None:
 		selected = [_normalize_dataset_name(args.dataset)]
 	elif not selected:
-		selected = ["MNIST", "CIFAR10", "Brain-MRI", "NIH-CHEST"]
+		selected = ["MNIST", "CIFAR10", "Brain-MRI", "NIH-CHEST", "OCTMNIST", "BloodMNIST", "OrganAMNIST"]
 
 	for dataset_name in selected:
 		print(f"\n[error] === Evaluating dataset: {dataset_name} ===")

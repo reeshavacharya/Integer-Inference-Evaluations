@@ -1,0 +1,180 @@
+{
+  "dataset": "Brain-MRI",
+  "layer_metrics": {
+    "features_0": {
+      "cosine_similarity": 0.9995439350605011,
+      "sqnr_db": 29.33751392364502,
+      "mean_absolute_error": 0.013499405467882752,
+      "max_absolute_error": 0.12307906150817871,
+      "mean_shift": 0.009388938546180725
+    },
+    "features_3": {
+      "cosine_similarity": 0.9990982115268707,
+      "sqnr_db": 25.759658813476562,
+      "mean_absolute_error": 0.020328962709754705,
+      "max_absolute_error": 0.24944400787353516,
+      "mean_shift": 0.014172345399856567
+    },
+    "features_3_pool": {
+      "cosine_similarity": 0.9992351084947586,
+      "sqnr_db": 27.053290367126465,
+      "mean_absolute_error": 0.02894754707813263,
+      "max_absolute_error": 0.24510973691940308,
+      "mean_shift": 0.020773008465766907
+    },
+    "features_7": {
+      "cosine_similarity": 0.9985621869564056,
+      "sqnr_db": 24.77828073501587,
+      "mean_absolute_error": 0.022259411867707968,
+      "max_absolute_error": 0.272574782371521,
+      "mean_shift": 0.009676478803157806
+    },
+    "features_10": {
+      "cosine_similarity": 0.9982807487249374,
+      "sqnr_db": 23.665093421936035,
+      "mean_absolute_error": 0.02560597565025091,
+      "max_absolute_error": 0.3484349250793457,
+      "mean_shift": 0.013868935406208038
+    },
+    "features_10_pool": {
+      "cosine_similarity": 0.9988119155168533,
+      "sqnr_db": 25.08023738861084,
+      "mean_absolute_error": 0.042001789435744286,
+      "max_absolute_error": 0.3484349250793457,
+      "mean_shift": 0.02531185746192932
+    },
+    "features_14": {
+      "cosine_similarity": 0.9976464956998825,
+      "sqnr_db": 22.616373538970947,
+      "mean_absolute_error": 0.02868277346715331,
+      "max_absolute_error": 0.4137533903121948,
+      "mean_shift": 0.013416208326816559
+    },
+    "features_17": {
+      "cosine_similarity": 0.9971000254154205,
+      "sqnr_db": 21.715052127838135,
+      "mean_absolute_error": 0.031294113490730524,
+      "max_absolute_error": 0.4381885528564453,
+      "mean_shift": 0.012779511511325836
+    },
+    "features_20": {
+      "cosine_similarity": 0.9965859651565552,
+      "sqnr_db": 21.103137969970703,
+      "mean_absolute_error": 0.03316789213567972,
+      "max_absolute_error": 0.5017626285552979,
+      "mean_shift": 0.0132613405585289
+    },
+    "features_23": {
+      "cosine_similarity": 0.9964241534471512,
+      "sqnr_db": 20.65012836456299,
+      "mean_absolute_error": 0.03439986798912287,
+      "max_absolute_error": 0.612290620803833,
+      "mean_shift": 0.016509339213371277
+    },
+    "features_23_pool": {
+      "cosine_similarity": 0.9976789802312851,
+      "sqnr_db": 22.123610973358154,
+      "mean_absolute_error": 0.06082566548138857,
+      "max_absolute_error": 0.612290620803833,
+      "mean_shift": 0.0352119505405426
+    },
+    "features_27": {
+      "cosine_similarity": 0.9959467053413391,
+      "sqnr_db": 20.36277484893799,
+      "mean_absolute_error": 0.03524779807776213,
+      "max_absolute_error": 0.5791225433349609,
+      "mean_shift": 0.011938691139221191
+    },
+    "features_30": {
+      "cosine_similarity": 0.9964105635881424,
+      "sqnr_db": 20.78341245651245,
+      "mean_absolute_error": 0.032545425929129124,
+      "max_absolute_error": 0.822113037109375,
+      "mean_shift": 0.012057192623615265
+    },
+    "features_33": {
+      "cosine_similarity": 0.9974809736013412,
+      "sqnr_db": 21.631130695343018,
+      "mean_absolute_error": 0.027945091016590595,
+      "max_absolute_error": 0.9056396484375,
+      "mean_shift": 0.01603454351425171
+    },
+    "features_36": {
+      "cosine_similarity": 0.9983196556568146,
+      "sqnr_db": 22.49998140335083,
+      "mean_absolute_error": 0.0237467591650784,
+      "max_absolute_error": 0.9298582077026367,
+      "mean_shift": 0.015955612063407898
+    },
+    "features_36_pool": {
+      "cosine_similarity": 0.9988024681806564,
+      "sqnr_db": 23.21494150161743,
+      "mean_absolute_error": 0.05633482430130243,
+      "max_absolute_error": 0.9298582077026367,
+      "mean_shift": 0.04506993293762207
+    },
+    "features_40": {
+      "cosine_similarity": 0.998928964138031,
+      "sqnr_db": 23.467042446136475,
+      "mean_absolute_error": 0.021391460672020912,
+      "max_absolute_error": 0.5495626926422119,
+      "mean_shift": 0.01698075234889984
+    },
+    "features_43": {
+      "cosine_similarity": 0.9983836263418198,
+      "sqnr_db": 21.91508150100708,
+      "mean_absolute_error": 0.025405672378838062,
+      "max_absolute_error": 0.9350652694702148,
+      "mean_shift": 0.021945826709270477
+    },
+    "features_46": {
+      "cosine_similarity": 0.9960782527923584,
+      "sqnr_db": 18.233352661132812,
+      "mean_absolute_error": 0.033837863244116306,
+      "max_absolute_error": 1.198331356048584,
+      "mean_shift": 0.03154222294688225
+    },
+    "features_49": {
+      "cosine_similarity": 0.9923747032880783,
+      "sqnr_db": 14.942882537841797,
+      "mean_absolute_error": 0.03999562934041023,
+      "max_absolute_error": 1.352919578552246,
+      "mean_shift": 0.03950875997543335
+    },
+    "features_49_pool": {
+      "cosine_similarity": 0.9935003519058228,
+      "sqnr_db": 15.444479942321777,
+      "mean_absolute_error": 0.06814664509147406,
+      "max_absolute_error": 1.352919578552246,
+      "mean_shift": 0.067447729408741
+    },
+    "avgpool": {
+      "cosine_similarity": 0.9935348480939865,
+      "sqnr_db": 15.444480180740356,
+      "mean_absolute_error": 0.06814664602279663,
+      "max_absolute_error": 1.352919578552246,
+      "mean_shift": 0.0674477070569992
+    },
+    "classifier_0": {
+      "cosine_similarity": 0.9942362010478973,
+      "sqnr_db": 14.60850191116333,
+      "mean_absolute_error": 0.07846271060407162,
+      "max_absolute_error": 32.46693420410156,
+      "mean_shift": 0.07737850397825241
+    },
+    "classifier_3": {
+      "cosine_similarity": 0.9925683885812759,
+      "sqnr_db": 13.394761800765991,
+      "mean_absolute_error": 0.16375702619552612,
+      "max_absolute_error": 11.944368362426758,
+      "mean_shift": 0.16329746693372726
+    },
+    "classifier_6": {
+      "cosine_similarity": 0.9916489273309708,
+      "sqnr_db": 13.172895908355713,
+      "mean_absolute_error": 2.054307371377945,
+      "max_absolute_error": 21.137611389160156,
+      "mean_shift": 0.8149329721927643
+    }
+  }
+}
