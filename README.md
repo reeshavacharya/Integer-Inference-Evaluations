@@ -12,7 +12,7 @@ The experiments cover three model families:
 - `resnet/`: deeper residual image classification models
 - `unet/`: image segmentation models
 
-The medical-facing datasets in this experiment include Brain MRI, CHEST, several Multi-Cancer subsets, Skin-Lesion, Brain-MRI-Seg, and BUSI. Some scripts also include MNIST, CIFAR10, and Flood as reference workloads. Training scripts download datasets into `./data/` when needed, then build deterministic `80/10/10` train/validation/test splits.
+The datasets in this experiment include Brain MRI, MNIST, CIFAR10, and various medical imaging formats. Training scripts download datasets into `./data/` when needed, then build deterministic `80/10/10` train/validation/test splits.
 
 ## Experiment Overview
 
@@ -322,31 +322,12 @@ Run commands from the implementation root.
 
 LeNet checkpoints are created by `lenet/lenet5.py`. Train the datasets you want before running random-sample inference or benchmarks.
 
-Train the reference datasets:
+Train the supported datasets:
 
 ```bash
 python lenet/lenet5.py --train_data MNIST
 python lenet/lenet5.py --train_data CIFAR10
 python lenet/lenet5.py --train_data Brain-MRI
-python lenet/lenet5.py --train_data CHEST
-```
-
-Train all Multi-Cancer subsets in one run:
-
-```bash
-python lenet/lenet5.py --train_data Multi-Cancer
-```
-
-Or train a single Multi-Cancer subset directly:
-
-```bash
-python lenet/lenet5.py --train_data Brain-Cancer
-python lenet/lenet5.py --train_data Breast-Cancer
-python lenet/lenet5.py --train_data Cervical-Cancer
-python lenet/lenet5.py --train_data Kidney-Cancer
-python lenet/lenet5.py --train_data Lung-And-Colon-Cancer
-python lenet/lenet5.py --train_data Lymphoma-Cancer
-python lenet/lenet5.py --train_data Oral-Cancer
 ```
 
 ### 2. Random Test-Sample Checks
@@ -374,14 +355,6 @@ Other valid `--infer` values are:
 - `MNIST`
 - `CIFAR10`
 - `Brain-MRI`
-- `CHEST`
-- `Brain-Cancer`
-- `Breast-Cancer`
-- `Cervical-Cancer`
-- `Kidney-Cancer`
-- `Lung-And-Colon-Cancer`
-- `Lymphoma-Cancer`
-- `Oral-Cancer`
 
 ### 3. Benchmarks
 
@@ -485,31 +458,12 @@ python unet/benchmark.py --bench Brain-MRI-Seg --mode floating-point
 
 ResNet checkpoints are created by `resnet/resnet18.py`.
 
-Train the reference datasets:
+Train the supported datasets:
 
 ```bash
 python resnet/resnet18.py --train_data MNIST --in_channels 1
 python resnet/resnet18.py --train_data CIFAR10 --in_channels 3
 python resnet/resnet18.py --train_data Brain-MRI --in_channels 1
-python resnet/resnet18.py --train_data CHEST --in_channels 1
-```
-
-Train all Multi-Cancer subsets in one run:
-
-```bash
-python resnet/resnet18.py --train_data Multi-Cancer
-```
-
-Or train a single Multi-Cancer subset directly:
-
-```bash
-python resnet/resnet18.py --train_data Brain-Cancer
-python resnet/resnet18.py --train_data Breast-Cancer
-python resnet/resnet18.py --train_data Cervical-Cancer
-python resnet/resnet18.py --train_data Kidney-Cancer
-python resnet/resnet18.py --train_data Lung-And-Colon-Cancer
-python resnet/resnet18.py --train_data Lymphoma-Cancer
-python resnet/resnet18.py --train_data Oral-Cancer
 ```
 
 ### 2. Random Test-Sample Checks
@@ -535,14 +489,6 @@ Other valid `--infer` values are:
 - `MNIST`
 - `CIFAR10`
 - `Brain-MRI`
-- `CHEST`
-- `Brain-Cancer`
-- `Breast-Cancer`
-- `Cervical-Cancer`
-- `Kidney-Cancer`
-- `Lung-And-Colon-Cancer`
-- `Lymphoma-Cancer`
-- `Oral-Cancer`
 
 ### 3. Benchmarks
 
@@ -580,4 +526,3 @@ python resnet/benchmark.py --bench Brain-MRI --mode floating-point
 - Classification benchmarks report accuracy.
 - U-Net benchmarks report Dice, IoU, pixel accuracy, and F1.
 - Several training scripts auto-download datasets into `./data/` if they are not present.
-- Multi-Cancer training creates separate checkpoints per cancer subset.

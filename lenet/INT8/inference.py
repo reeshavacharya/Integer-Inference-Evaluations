@@ -41,6 +41,7 @@ from utils import (
 # Debug trace storage
 # -----------------------------
 debug_trace = {"input": {}, "layers": [], "pooling": []}
+CALIBRATION_DIR = os.path.join(LENET_DIR, "calibration")
 
 
 # -----------------------------
@@ -78,61 +79,6 @@ class LeNet5(nn.Module):
 # 2. Setup and Data Extraction
 # -----------------------------
 
-
-def _multi_cancer_infer_map():
-    return {
-        "BRAIN-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Brain,
-            "model_path": "best_lenet5_multi_brain_cancer.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Brain-Cancer",
-        },
-        "BREAST-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Breast,
-            "model_path": "best_lenet5_multi_breast_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Breast-Cancer",
-        },
-        "CERVICAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Cervical,
-            "model_path": "best_lenet5_multi_cervical_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Cervical-Cancer",
-        },
-        "KIDNEY-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Kidney,
-            "model_path": "best_lenet5_multi_kidney_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Kidney-Cancer",
-        },
-        "LUNG-AND-COLON-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lung_Colon,
-            "model_path": "best_lenet5_multi_lung_and_colon_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Lung-And-Colon-Cancer",
-        },
-        "LYMPHOMA-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lymphoma,
-            "model_path": "best_lenet5_multi_lymphoma.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Lymphoma-Cancer",
-        },
-        "ORAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Oral,
-            "model_path": "best_lenet5_multi_oral_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Oral-Cancer",
-        },
-    }
-
-
 def _resolve_infer_config(infer_data: str):
     name = infer_data.upper()
 
@@ -143,6 +89,7 @@ def _resolve_infer_config(infer_data: str):
             "model": LeNet5(num_classes=10, in_channels=1),
             "model_path": "best_lenet5_mnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name in ("CIFR10", "CIFAR10"):
@@ -152,6 +99,7 @@ def _resolve_infer_config(infer_data: str):
             "model": LeNet5(num_classes=10, in_channels=3),
             "model_path": "best_lenet5_cifar10.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name == "BRAIN-MRI":
@@ -161,29 +109,47 @@ def _resolve_infer_config(infer_data: str):
             "model": MedicalLeNet(num_classes=4, in_channels=1),
             "model_path": "best_lenet5_brain_mri.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
-    if name == "CHEST":
+    if name == "NIH-CHEST":
         return {
-            "display": "CHEST",
-            "setup_fn": train_mod.setup_CHEST,
-            "model": MedicalLeNet(num_classes=15, in_channels=1),
-            "model_path": "best_lenet5_chest.pth",
+            "display": "NIH-CHEST",
+            "setup_fn": train_mod.setup_NIH_Chest,
+            "model": LeNet5(num_classes=15, in_channels=1),
+            "model_path": "best_lenet5_NIH_Chest_XRay.pth",
             "is_multilabel": True,
+            "eval_batch_size": 8,
         }
 
-    multi_map = _multi_cancer_infer_map()
-    if name in multi_map:
-        cfg = multi_map[name]
+    if name == "OCTMNIST":
         return {
-            "display": cfg["display"],
-            "setup_fn": cfg["setup_fn"],
-            "model": MedicalLeNet(
-                num_classes=cfg["num_classes"],
-                in_channels=cfg["in_channels"],
-            ),
-            "model_path": cfg["model_path"],
+            "display": "OCTMNIST",
+            "setup_fn": train_mod.setup_OCTMNIST,
+            "model": LeNet5(num_classes=4, in_channels=1),
+            "model_path": "best_lenet5_octmnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "BLOODMNIST":
+        return {
+            "display": "BloodMNIST",
+            "setup_fn": train_mod.setup_BloodMNIST,
+            "model": LeNet5(num_classes=8, in_channels=3),
+            "model_path": "best_lenet5_bloodmnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "ORGANAMNIST":
+        return {
+            "display": "OrganAMNIST",
+            "setup_fn": train_mod.setup_OrganAMNIST,
+            "model": LeNet5(num_classes=11, in_channels=1),
+            "model_path": "best_lenet5_organamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     raise ValueError(f"Unknown dataset: {infer_data}")
@@ -199,8 +165,7 @@ def get_random_sample(dataset_name: str, setup_fn):
 
     setup_result = setup_fn(batch_size=1)
 
-    # Some setup functions populate train_mod.test_loader globals, while others
-    # (e.g. per-cancer Multi-Cancer helpers) return loaders directly.
+    # Standard loaders from setup functions
     test_dataset = None
     if train_mod.test_loader is not None:
         test_dataset = train_mod.test_loader.dataset
@@ -224,16 +189,10 @@ def get_random_sample(dataset_name: str, setup_fn):
 
     label_text = str(label)
     if isinstance(label, torch.Tensor):
-        if label.dim() == 0:
+        if label.numel() == 1:
             label_text = str(int(label.item()))
         else:
-            # Multi-label case (CHEST): print active label names when available.
-            active_idx = torch.where(label > 0.5)[0].tolist()
-            if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
-                names = [train_mod.chest_label_names[i] for i in active_idx]
-                label_text = "|".join(names) if names else "No active label"
-            else:
-                label_text = str(active_idx)
+            label_text = str(label.detach().cpu().view(-1).tolist())
 
     return image_tensor.unsqueeze(0), label, label_text
 
@@ -242,6 +201,34 @@ def get_random_sample(dataset_name: str, setup_fn):
 # 3. Calibration Hooks
 # -----------------------------
 activation_ranges = {}
+
+
+def _calibration_file_name(dataset_display: str):
+    return f"{dataset_display.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+
+
+def _calibration_file_path(dataset_display: str):
+    return os.path.join(CALIBRATION_DIR, _calibration_file_name(dataset_display))
+
+
+def load_calibration_ranges(dataset_display: str):
+    calibration_path = _calibration_file_path(dataset_display)
+    if not os.path.exists(calibration_path):
+        raise FileNotFoundError(
+            f"Missing calibration file for {dataset_display}: {calibration_path}. "
+            f"Run lenet/calibration.py for this dataset first."
+        )
+
+    with open(calibration_path, "r") as f:
+        payload = json.load(f)
+
+    layers = payload.get("layers")
+    if not isinstance(layers, dict) or not layers:
+        raise RuntimeError(f"Invalid calibration file format: {calibration_path}")
+
+    activation_ranges.clear()
+    activation_ranges.update(layers)
+    return activation_ranges
 
 
 def calibration_hook(module, input, output, name):
@@ -321,85 +308,35 @@ def register_hooks(model):
 # 4. Core Integer Inference Engine
 # -----------------------------
 def run_integer_layer(
-    q_input, layer, layer_name, scale_in, zp_in, apply_relu=True, is_conv=False
+    q_input, layer_data, layer_name, zp_in, apply_relu=True, is_conv=False
 ):
     """
-    Executes a single layer entirely in integer arithmetic.
+    Executes a single layer entirely using the offline-compiled integer arithmetic.
     """
-    # 1. Get float weights and calculate their quantization params
-    weight_float = layer.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
-    # 2. Calculate output activation params from calibration data
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]])
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    # 1. Extract purely quantized data from the offline dictionary
+    q_w = layer_data["q_weight"].to(q_input.device)
+    zp_w = layer_data["zp_w"]
+    q_bias = layer_data["q_bias"].to(q_input.device)
+    q_M0 = layer_data["q_M0"]
+    shift = layer_data["shift"]
+    zp_out = layer_data["zp_out"]
+    scale_out = layer_data["scale_out"]
 
-    # 3. Quantize Bias to int32
-    bias_float = layer.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
-
-    # 4. Calculate Downscale Multiplier (Offline Simulation)
-    # This now returns the int32 M0 and the bit-shift n
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    # --- Execute Integer Math (Online Simulation) ---
+    # 2. Execute Integer Math
     if is_conv:
         int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w)
     else:
         int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
+        
     int32_accum = add_bias(int32_accum, q_bias)
 
-    # Pass the integer multiplier and shift instead of the float M
+    # 3. Downscale back to INT8 limits
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
 
     if apply_relu:
         q_out = quantized_relu(q_out, zp_out)
 
-    # Log layer details for debugging/analysis
-    layer_log = {
-        "layer_name": layer_name,
-        "type": "conv" if is_conv else "linear",
-        "input": {
-            "scale": float(scale_in),
-            "zero_point": int(zp_in),
-            "tensor": q_input.cpu().numpy().tolist(),
-        },
-        "weights": {
-            "scale": float(scale_w),
-            "zero_point": int(zp_w),
-            "float": weight_float.cpu().numpy().tolist(),
-            "quantized": q_w.cpu().numpy().tolist(),
-        },
-        "bias": {
-            "scale": float(scale_bias),
-            "zero_point": int(zp_bias),
-            "float": bias_float.cpu().numpy().tolist(),
-            "quantized": q_bias.cpu().numpy().tolist(),
-        },
-        "multiplier": {
-            "M0": int(q_M0),
-            "shift": int(shift),
-        },
-        "accumulator": int32_accum.cpu().numpy().tolist(),
-        "output": {
-            "scale": float(scale_out),
-            "zero_point": int(zp_out),
-            "tensor": q_out.cpu().numpy().tolist(),
-        },
-    }
-
-    debug_trace["layers"].append(layer_log)
-
-    return (
-        q_out,
-        scale_out,
-        zp_out,
-        (scale_w, zp_w),
-        (scale_bias, zp_bias),
-        (q_M0, shift),
-    )
+    return q_out, scale_out, zp_out
 
 
 def avg_pool_uint8(q_tensor, name=None):
@@ -462,6 +399,9 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
 
+    if run_integer:
+        load_calibration_ranges(dataset_display)
+
     # Draw one random sample from the correct 10% test partition
     image_tensor, true_label, true_label_text = get_random_sample(
         infer_data,
@@ -475,24 +415,12 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     float_pred = None
     float_output = None
 
-    if run_integer:
-        # Integer inference needs activation calibration ranges from a float forward pass.
-        handles = register_hooks(model)
-        with torch.no_grad():
-            float_output = model(image_tensor)
-        for h in handles:
-            h.remove()
-    elif run_floating_point:
-        with torch.no_grad():
-            float_output = model(image_tensor)
+    if run_floating_point or run_integer:
+        float_output = model(image_tensor)
 
-    if run_floating_point:
-        if cfg["is_multilabel"]:
-            scores = torch.sigmoid(float_output)[0]
-            float_pred = (scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-        else:
-            float_pred = float_output.argmax(dim=1).item()
-        print(f"[2] Floating-Point Inference complete. Prediction: {float_pred}")
+    if run_integer:
+        pass
+
 
     if not run_integer:
         print("\n" + "=" * 40)
@@ -595,11 +523,7 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     # Dequantize final output to get logits (for comparison/analysis)
     int_logits = q_out.to(torch.float32)
     dequantized_logits = final_s * (int_logits - final_z)
-    if cfg["is_multilabel"]:
-        scores = torch.sigmoid(dequantized_logits)[0]
-        int_pred = (scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-    else:
-        int_pred = dequantized_logits.argmax(dim=1).item()
+    int_pred = dequantized_logits.argmax(dim=1).item()
     # -----------------------------
     # 6. Summary Logging
     # -----------------------------
@@ -611,15 +535,6 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     if run_floating_point:
         print(f"Float Model Prediction:   {float_pred}")
     print(f"Integer Model Prediction: {int_pred}")
-
-    if cfg["is_multilabel"]:
-        chest_scores = torch.sigmoid(dequantized_logits)[0]
-        active = (chest_scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-        if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
-            names = [train_mod.chest_label_names[i] for i in active]
-            print(f"Predicted Active Labels:  {names if names else ['None >= 0.5']}")
-        else:
-            print(f"Predicted Active Labels:  {active}")
 
     if run_floating_point:
         if float_pred == int_pred:
@@ -651,7 +566,10 @@ if __name__ == "__main__":
         "--infer",
         type=str,
         default="MNIST",
-        help="Inference data to use",
+        help=(
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, "
+            "OCTMNIST, BloodMNIST, OrganAMNIST"
+        ),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(

@@ -1,0 +1,832 @@
+import kagglehub
+import os
+import argparse
+from collections import Counter
+from bisect import bisect_right
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset, ConcatDataset, Dataset
+from torchvision import datasets, transforms
+from PIL import Image
+from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+DATA_MNIST_DIR = os.path.join(DATA_ROOT, "MNIST")
+DATA_CIFAR10_DIR = os.path.join(DATA_ROOT, "CIFAR10")
+DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain-MRI")
+DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
+DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
+DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
+DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
+
+# -----------------------------
+# Device
+# -----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
+# -----------------------------
+# VGG-19 Architecture
+# -----------------------------
+class VGG19(nn.Module):
+    def __init__(self, num_classes=10, in_channels=3):
+        super(VGG19, self).__init__()
+        self.features = self._make_layers(in_channels)
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, num_classes),
+        )
+
+    def _make_layers(self, in_channels):
+        layers = []
+        # VGG19 Configuration: [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M']
+        cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 
+               512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M']
+        
+        in_c = in_channels
+        for v in cfg:
+            if v == 'M':
+                layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+            else:
+                conv2d = nn.Conv2d(in_c, v, kernel_size=3, padding=1, bias=False)
+                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                in_c = v
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+
+# -----------------------------
+# Globals populated by setup
+# -----------------------------
+train_loader = None
+val_loader = None
+test_loader = None
+model = None
+criterion = None
+optimizer = None
+scheduler = None
+
+
+# Note: MNIST and Brain-MRI resized to 32x32 to prevent spatial collapse 
+# through the 5 MaxPool layers of VGG19.
+PREPROCESS_SPECS = {
+    "MNIST": {"channels": 1, "height": 32, "width": 32},
+    "CIFAR10": {"channels": 3, "height": 32, "width": 32},
+    "BRAIN-MRI": {"channels": 1, "height": 32, "width": 32},
+    "NIH-CHEST": {"channels": 1, "height": 224, "width": 224},
+    "OCTMNIST": {"channels": 1, "height": 32, "width": 32},
+    "BLOODMNIST": {"channels": 3, "height": 32, "width": 32},
+    "ORGANAMNIST": {"channels": 1, "height": 32, "width": 32},
+}
+
+def _normalize_dataset_key(dataset_name: str) -> str:
+    key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
+    if key == "CIFR10":
+        return "CIFAR10"
+    return key
+
+
+def _normalize_classification_labels(labels: torch.Tensor) -> torch.Tensor:
+    if labels.dim() > 1:
+        labels = labels.squeeze(-1)
+        if labels.dim() > 1:
+            labels = labels.argmax(dim=1)
+    return labels.long()
+
+
+def validate_preprocessed_batch(images: torch.Tensor, dataset_name: str, stage: str = "runtime"):
+    key = _normalize_dataset_key(dataset_name)
+    if key not in PREPROCESS_SPECS:
+        return
+
+    spec = PREPROCESS_SPECS[key]
+    if images.dim() != 4:
+        raise RuntimeError(f"[{stage}] Expected NCHW tensor for {dataset_name}, got shape {tuple(images.shape)}")
+
+    _, c, h, w = images.shape
+    if c != spec["channels"] or h != spec["height"] or w != spec["width"]:
+        raise RuntimeError(
+            f"[{stage}] Preprocessing mismatch for {dataset_name}: "
+            f"expected (C,H,W)=({spec['channels']},{spec['height']},{spec['width']}), "
+            f"got ({c},{h},{w})"
+        )
+
+    if not torch.isfinite(images).all():
+        raise RuntimeError(f"[{stage}] Found non-finite values after preprocessing for {dataset_name}")
+
+
+def validate_loader_preprocessing(loader: DataLoader, dataset_name: str, stage: str = "runtime"):
+    images, _ = next(iter(loader))
+    validate_preprocessed_batch(images, dataset_name, stage=stage)
+
+
+def _deterministic_split_indices(total_len: int, train_frac: float = 0.8, val_frac: float = 0.1, seed: int = 42):
+    train_size = int(train_frac * total_len)
+    val_size = int(val_frac * total_len)
+    gen = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(total_len, generator=gen).tolist()
+    train_idx = perm[:train_size]
+    val_idx = perm[train_size : train_size + val_size]
+    test_idx = perm[train_size + val_size :]
+    return train_idx, val_idx, test_idx
+
+
+# -----------------------------
+# Data Setups
+# -----------------------------
+def setup_MNIST(batch_size: int):
+    global train_loader, val_loader, test_loader
+
+    transform = transforms.Compose([
+        transforms.Resize((32, 32)),  # Resized to survive VGG pools
+        transforms.ToTensor(), 
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+
+    train_dataset_full = datasets.MNIST(root=DATA_ROOT, train=True, download=True, transform=transform)
+    test_dataset_full = datasets.MNIST(root=DATA_ROOT, train=False, download=True, transform=transform)
+    full_dataset = ConcatDataset([train_dataset_full, test_dataset_full])
+
+    train_idx, val_idx, test_idx = _deterministic_split_indices(len(full_dataset), train_frac=0.8, val_frac=0.1, seed=42)
+    train_subset = Subset(full_dataset, train_idx)
+    val_subset = Subset(full_dataset, val_idx)
+    test_subset = Subset(full_dataset, test_idx)
+
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False)
+
+    validate_loader_preprocessing(train_loader, "MNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "MNIST", stage="training")
+
+
+def setup_CIFAR10(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    mean = (0.4914, 0.4822, 0.4465)
+    std = (0.2470, 0.2435, 0.2616)
+
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    transform_eval = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    train_base_eval = datasets.CIFAR10(root=DATA_ROOT, train=True, download=True, transform=transform_eval)
+    test_base_eval = datasets.CIFAR10(root=DATA_ROOT, train=False, download=True, transform=transform_eval)
+    full_base_eval = ConcatDataset([train_base_eval, test_base_eval])
+
+    total_len = len(full_base_eval)
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+
+    train_base_tf = datasets.CIFAR10(root=DATA_ROOT, train=True, download=True, transform=transform_train)
+    test_base_tf = datasets.CIFAR10(root=DATA_ROOT, train=False, download=True, transform=transform_train)
+    full_base_tf = ConcatDataset([train_base_tf, test_base_tf])
+
+    train_dataset = Subset(full_base_tf, train_idx)
+    val_dataset = Subset(full_base_eval, val_idx)
+    test_dataset = Subset(full_base_eval, test_idx)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "CIFAR10", stage="training")
+    validate_loader_preprocessing(test_loader, "CIFAR10", stage="training")
+
+
+def setup_OCTMNIST(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_OCTMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+
+    train_dataset = OCTMNIST(root=DATA_OCTMNIST_DIR, split="train", download=True, transform=transform)
+    val_dataset = OCTMNIST(root=DATA_OCTMNIST_DIR, split="val", download=True, transform=transform)
+    test_dataset = OCTMNIST(root=DATA_OCTMNIST_DIR, split="test", download=True, transform=transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "OCTMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "OCTMNIST", stage="training")
+
+
+def setup_BloodMNIST(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_BLOODMNIST_DIR, exist_ok=True)
+
+    mean = (0.76, 0.53, 0.69)
+    std = (0.14, 0.16, 0.11)
+    transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    train_dataset = BloodMNIST(root=DATA_BLOODMNIST_DIR, split="train", download=True, transform=transform, as_rgb=True)
+    val_dataset = BloodMNIST(root=DATA_BLOODMNIST_DIR, split="val", download=True, transform=transform, as_rgb=True)
+    test_dataset = BloodMNIST(root=DATA_BLOODMNIST_DIR, split="test", download=True, transform=transform, as_rgb=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "BloodMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "BloodMNIST", stage="training")
+
+
+def setup_OrganAMNIST(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_ORGANAMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+
+    train_dataset = OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="train", download=True, transform=transform)
+    val_dataset = OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="val", download=True, transform=transform)
+    test_dataset = OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="test", download=True, transform=transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "OrganAMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "OrganAMNIST", stage="training")
+
+
+def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
+    dataset = subset.dataset
+    targets = []
+    if hasattr(dataset, "targets"):
+        base_targets = dataset.targets
+        targets = [base_targets[i] for i in subset.indices]
+    elif isinstance(dataset, ConcatDataset):
+        cumulative_sizes = dataset.cumulative_sizes
+        datasets_list = dataset.datasets
+        for idx in subset.indices:
+            ds_idx = bisect_right(cumulative_sizes, idx)
+            sample_offset = idx if ds_idx == 0 else idx - cumulative_sizes[ds_idx - 1]
+            base_targets = datasets_list[ds_idx].targets
+            targets.append(base_targets[sample_offset])
+    counts = Counter(targets)
+    total = len(targets)
+    weights = []
+    for c in range(num_classes):
+        class_count = counts.get(c, 1)
+        weights.append(total / (num_classes * class_count))
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def setup_Brain_MRI(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    train_root = os.path.join(DATA_BRAIN_MRI_DIR, "Training")
+    test_root = os.path.join(DATA_BRAIN_MRI_DIR, "Testing")
+
+    train_transform = transforms.Compose([
+        transforms.Grayscale(num_output_channels=1),
+        transforms.Resize((32, 32)),  # Resized to survive VGG pools
+        transforms.RandomRotation(10),
+        transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+
+    eval_transform = transforms.Compose([
+        transforms.Grayscale(num_output_channels=1),
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+
+    full_train_base = datasets.ImageFolder(root=train_root, transform=eval_transform)
+    full_test_base = datasets.ImageFolder(root=test_root, transform=eval_transform)
+    full_base_eval = ConcatDataset([full_train_base, full_test_base])
+
+    total_len = len(full_base_eval)
+    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+
+    full_train_tf = datasets.ImageFolder(root=train_root, transform=train_transform)
+    full_test_tf = datasets.ImageFolder(root=test_root, transform=train_transform)
+    full_base_tf = ConcatDataset([full_train_tf, full_test_tf])
+
+    train_dataset = Subset(full_base_tf, train_idx)
+    val_dataset = Subset(full_base_eval, val_idx)
+    test_dataset = Subset(full_base_eval, test_idx)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "Brain-MRI", stage="training")
+    validate_loader_preprocessing(test_loader, "Brain-MRI", stage="training")
+
+    return train_dataset
+
+
+class NIHChestDataset(Dataset):
+    def __init__(self, image_list, data_dir, csv_file, transform=None):
+        self.image_list = image_list
+        self.data_dir = data_dir
+        self.transform = transform
+        self.labels = {}
+        with open(csv_file, "r") as f:
+            lines = f.readlines()[1:]
+            for line in lines:
+                parts = line.strip().split(",")
+                if len(parts) > 1:
+                    img_name = parts[0]
+                    finding_labels = parts[1]
+                    self.labels[img_name] = finding_labels
+
+        self.all_diseases = [
+            "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration", "Mass", "Nodule",
+            "Pneumonia", "Pneumothorax", "Consolidation", "Edema", "Emphysema", "Fibrosis",
+            "Pleural_Thickening", "Hernia", "No Finding"
+        ]
+        self.disease_to_idx = {disease: idx for idx, disease in enumerate(self.all_diseases)}
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def __getitem__(self, idx):
+        img_name = self.image_list[idx]
+        preprocessed_dir = os.path.join(self.data_dir, "preprocessed_224x224")
+        if os.path.exists(preprocessed_dir):
+            preprocessed_path = os.path.join(preprocessed_dir, img_name)
+            if os.path.exists(preprocessed_path):
+                image = Image.open(preprocessed_path).convert("L")
+            else:
+                image_path = self._find_original_image(img_name)
+                image = Image.open(image_path).convert("L")
+                image = image.resize((224, 224), Image.Resampling.LANCZOS)
+        else:
+            image_path = self._find_original_image(img_name)
+            image = Image.open(image_path).convert("L")
+            image = image.resize((224, 224), Image.Resampling.LANCZOS)
+
+        finding_str = self.labels.get(img_name, "No Finding")
+        diseases = [d.strip() for d in finding_str.split("|")]
+
+        label = torch.zeros(len(self.all_diseases), dtype=torch.float32)
+        for disease in diseases:
+            if disease in self.disease_to_idx:
+                label[self.disease_to_idx[disease]] = 1.0
+
+        if self.transform:
+            image = self.transform(image)
+        else:
+            image = transforms.ToTensor()(image)
+
+        return image, label
+
+    def _find_original_image(self, img_name):
+        for i in range(1, 13):
+            potential_path = os.path.join(self.data_dir, f"images_{i:03d}", "images", img_name)
+            if os.path.exists(potential_path):
+                return potential_path
+        raise FileNotFoundError(f"Image {img_name} not found in any images_xxx/images directory")
+
+
+def setup_NIH_Chest(batch_size: int = 16):
+    global train_loader, val_loader, test_loader
+
+    train_val_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "train_val_list.txt")
+    test_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "test_list.txt")
+    csv_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "Data_Entry_2017.csv")
+
+    with open(train_val_file, "r") as f:
+        train_val_images = [line.strip() for line in f.readlines()]
+    with open(test_file, "r") as f:
+        test_images = [line.strip() for line in f.readlines()]
+
+    num_train_val = len(train_val_images)
+    train_size = int(0.8 * num_train_val)
+
+    gen = torch.Generator().manual_seed(42)
+    perm = torch.randperm(num_train_val, generator=gen).tolist()
+
+    train_indices = perm[:train_size]
+    val_indices = perm[train_size:]
+
+    train_images = [train_val_images[i] for i in train_indices]
+    val_images = [train_val_images[i] for i in val_indices]
+
+    train_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomRotation(10),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485,), (0.229,)),
+    ])
+
+    eval_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485,), (0.229,)),
+    ])
+
+    train_dataset = NIHChestDataset(train_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=train_transform)
+    val_dataset = NIHChestDataset(val_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=eval_transform)
+    test_dataset = NIHChestDataset(test_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=eval_transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "NIH-CHEST", stage="training")
+    validate_loader_preprocessing(test_loader, "NIH-CHEST", stage="training")
+
+
+# -----------------------------
+# Evaluation function
+# -----------------------------
+def evaluate(model, dataloader, criterion, is_multilabel=False, is_medmnist=False):
+    model.eval()
+    total_loss = 0.0
+
+    all_targets = []
+    all_outputs = []
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images, labels = images.to(device), labels.to(device)
+            
+            if not is_multilabel and not is_medmnist:
+                labels = _normalize_classification_labels(labels)
+            elif is_medmnist:
+                if labels.dim() == 2 and labels.size(1) == 1:
+                    labels = labels.squeeze(-1)
+                labels = labels.long()
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item() * images.size(0)
+
+            if is_multilabel:
+                all_targets.append(labels.cpu().numpy())
+                all_outputs.append(torch.sigmoid(outputs).cpu().numpy())
+            elif is_medmnist:
+                all_targets.append(labels.cpu().numpy())
+                all_outputs.append(torch.softmax(outputs, dim=1).cpu().numpy())
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+            else:
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+
+    avg_loss = total_loss / len(dataloader.dataset)
+
+    if is_multilabel:
+        all_targets = np.vstack(all_targets)
+        all_outputs = np.vstack(all_outputs)
+        metric_score = roc_auc_score(all_targets, all_outputs, average="macro")
+    elif is_medmnist:
+        all_targets = np.concatenate(all_targets)
+        all_outputs = np.vstack(all_outputs)
+        auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        metric_score = (auc, acc)
+    else:
+        metric_score = 100.0 * correct / max(total, 1)
+
+    return avg_loss, metric_score
+
+
+# -----------------------------
+# Training loop
+# -----------------------------
+def main(args: argparse.Namespace):
+    global model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader
+
+    best_val_metric = 0.0
+    num_epochs = 10
+
+    if args.data_dir == DATA_MNIST_DIR:
+        best_model_path = "best_vgg19_mnist.pth"
+        setup_MNIST(args.batch_size)
+        model = VGG19(num_classes=10, in_channels=args.in_channels).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = False
+
+    elif args.data_dir == DATA_CIFAR10_DIR:
+        best_model_path = "best_vgg19_cifar10.pth"
+        num_epochs = 50
+        setup_CIFAR10(args.batch_size)
+        model = VGG19(num_classes=10, in_channels=3).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = False
+
+    elif args.data_dir == DATA_BRAIN_MRI_DIR:
+        best_model_path = "best_vgg19_brain_mri.pth"
+        num_epochs = 30
+        train_dataset = setup_Brain_MRI(args.batch_size)
+        model = VGG19(num_classes=4, in_channels=args.in_channels).to(device)
+        class_weights = _compute_class_weights_from_subset(train_dataset, num_classes=4)
+        print(f"Using class weights: {class_weights.detach().cpu().tolist()}")
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
+        is_multilabel = False
+        is_medmnist = False
+
+    elif args.data_dir == DATA_OCTMNIST_DIR:
+        best_model_path = "best_vgg19_octmnist.pth"
+        num_epochs = 20
+        setup_OCTMNIST(args.batch_size)
+        model = VGG19(num_classes=4, in_channels=1).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_BLOODMNIST_DIR:
+        best_model_path = "best_vgg19_bloodmnist.pth"
+        num_epochs = 20
+        setup_BloodMNIST(args.batch_size)
+        model = VGG19(num_classes=8, in_channels=3).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_ORGANAMNIST_DIR:
+        best_model_path = "best_vgg19_organamnist.pth"
+        num_epochs = 20
+        setup_OrganAMNIST(args.batch_size)
+        model = VGG19(num_classes=11, in_channels=1).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_NIH_CHEST_XRAY_DIR:
+        best_model_path = "best_vgg19_NIH_Chest_XRay.pth"
+        num_epochs = 30
+        setup_NIH_Chest(args.batch_size) 
+        model = VGG19(num_classes=15, in_channels=args.in_channels).to(device)
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = True
+        is_medmnist = False
+
+    else:
+        print(f"Training using default data directory: {DATA_MNIST_DIR}")
+        best_model_path = "best_vgg19_mnist.pth"
+        setup_MNIST(args.batch_size)
+        model = VGG19(num_classes=10, in_channels=args.in_channels).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+
+        all_targets = []
+        all_outputs = []
+        correct = 0
+        total = 0
+
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            if not is_multilabel:
+                labels = _normalize_classification_labels(labels)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+
+            if is_multilabel:
+                all_targets.append(labels.detach().cpu().numpy())
+                all_outputs.append(torch.sigmoid(outputs).detach().cpu().numpy())
+            else:
+                preds = outputs.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+
+        train_loss = running_loss / len(train_loader.dataset)
+
+        if is_multilabel:
+            all_targets = np.vstack(all_targets)
+            all_outputs = np.vstack(all_outputs)
+            train_metric = roc_auc_score(all_targets, all_outputs, average="macro")
+            metric_name = "Mean AUROC"
+        else:
+            train_metric = 100.0 * correct / total
+            metric_name = "Acc"
+
+        val_loss, val_metric = evaluate(model, val_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
+
+        if scheduler is not None:
+            scheduler.step(val_loss)
+
+        if is_medmnist:
+            val_auc, val_acc = val_metric
+            print(f"Epoch [{epoch+1}/{num_epochs}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val ACC: {val_acc:.2f}%")
+            if val_auc > best_val_metric:
+                best_val_metric = val_auc
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
+        elif is_multilabel:
+            print(f"Epoch [{epoch+1}/{num_epochs}] | Train Loss: {train_loss:.4f}, Train AUROC: {train_metric:.4f} | Val Loss: {val_loss:.4f}, Val AUROC: {val_metric:.4f}")
+            if val_metric > best_val_metric:
+                best_val_metric = val_metric
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
+        else:
+            print(f"Epoch [{epoch+1}/{num_epochs}] | Train Loss: {train_loss:.4f}, Train Acc: {train_metric:.2f}% | Val Loss: {val_loss:.4f}, Val Acc: {val_metric:.2f}%")
+            if val_metric > best_val_metric:
+                best_val_metric = val_metric
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
+
+    # -----------------------------
+    # Load best model and test
+    # -----------------------------
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
+    model.to(device)
+
+    test_loss, test_metric = evaluate(model, test_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
+
+    if is_medmnist:
+        test_auc, test_acc = test_metric
+        print(f"Best Validation AUC: {best_val_metric:.4f}")
+        print(f"Test Loss: {test_loss:.4f}, Test AUC: {test_auc:.4f}, Test ACC: {test_acc:.2f}%")
+    elif is_multilabel:
+        print(f"Best Validation {metric_name}: {best_val_metric:.4f}")
+        print(f"Test Loss: {test_loss:.4f}, Test {metric_name}: {test_metric:.4f}")
+    else:
+        print(f"Best Validation {metric_name}: {best_val_metric:.2f}%")
+        print(f"Test Loss: {test_loss:.4f}, Test {metric_name}: {test_metric:.2f}%")
+
+
+def datasetDownloader(dataset_name: str):
+    if not os.path.exists(DATA_ROOT):
+        os.makedirs(DATA_ROOT)
+
+    if dataset_name == "MNIST":
+        if not os.path.exists(DATA_MNIST_DIR):
+            print("Downloading MNIST dataset...")
+            datasets.MNIST(root=DATA_ROOT, train=True, download=True)
+            datasets.MNIST(root=DATA_ROOT, train=False, download=True)
+
+    if dataset_name == "Brain-MRI":
+        if not os.path.exists(DATA_BRAIN_MRI_DIR):
+            print("Downloading Brain-MRI dataset from Kaggle...")
+            kagglehub.dataset_download(
+                "masoudnickparvar/brain-tumor-mri-dataset",
+                output_dir=DATA_BRAIN_MRI_DIR,
+            )
+
+    if dataset_name == "NIH-CHEST":
+        if not os.path.exists(DATA_NIH_CHEST_XRAY_DIR):
+            print("Downloading NIH Chest X-Ray dataset from Kaggle...")
+            kagglehub.dataset_download(
+                "nih-chest-xrays/data",
+                output_dir=DATA_NIH_CHEST_XRAY_DIR,
+            )
+
+    if dataset_name == "CIFAR10":
+        cifar_root = DATA_ROOT
+        cifar_folder = os.path.join(cifar_root, "cifar-10-batches-py")
+        if not os.path.exists(cifar_folder):
+            print("Downloading CIFAR-10 dataset...")
+            datasets.CIFAR10(root=cifar_root, train=True, download=True)
+            datasets.CIFAR10(root=cifar_root, train=False, download=True)
+
+    if dataset_name == "OCTMNIST":
+        os.makedirs(DATA_OCTMNIST_DIR, exist_ok=True)
+        print("Downloading OCTMNIST dataset...")
+        OCTMNIST(root=DATA_OCTMNIST_DIR, split="train", download=True)
+        OCTMNIST(root=DATA_OCTMNIST_DIR, split="val", download=True)
+        OCTMNIST(root=DATA_OCTMNIST_DIR, split="test", download=True)
+
+    if dataset_name == "BloodMNIST":
+        os.makedirs(DATA_BLOODMNIST_DIR, exist_ok=True)
+        print("Downloading BloodMNIST dataset...")
+        BloodMNIST(root=DATA_BLOODMNIST_DIR, split="train", download=True, as_rgb=True)
+        BloodMNIST(root=DATA_BLOODMNIST_DIR, split="val", download=True, as_rgb=True)
+        BloodMNIST(root=DATA_BLOODMNIST_DIR, split="test", download=True, as_rgb=True)
+
+    if dataset_name == "OrganAMNIST":
+        os.makedirs(DATA_ORGANAMNIST_DIR, exist_ok=True)
+        print("Downloading OrganAMNIST dataset...")
+        OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="train", download=True)
+        OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="val", download=True)
+        OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="test", download=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for training and evaluation",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-4, # Lower default learning rate for VGG compared to ResNet
+        help="Learning rate for optimizer",
+    )
+    parser.add_argument(
+        "--train_data",
+        type=str,
+        default="MNIST",
+        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
+    )
+    parser.add_argument(
+        "--in_channels",
+        type=int,
+        default=1,
+        help="Number of input channels for the model (e.g., 1 for grayscale, 3 for RGB)",
+    )
+
+    args = parser.parse_args()
+
+    train_data_key = args.train_data.strip().upper().replace("_", "-").replace(" ", "-")
+
+    if train_data_key == "MNIST":
+        args.data_dir = DATA_MNIST_DIR
+        datasetDownloader("MNIST")
+    elif train_data_key == "BRAIN-MRI":
+        args.data_dir = DATA_BRAIN_MRI_DIR
+        datasetDownloader("Brain-MRI")
+    elif train_data_key in ("CIFR10", "CIFAR10"):
+        args.data_dir = DATA_CIFAR10_DIR
+        datasetDownloader("CIFAR10")
+    elif train_data_key == "NIH-CHEST":
+        args.data_dir = DATA_NIH_CHEST_XRAY_DIR
+        datasetDownloader("NIH-CHEST")
+    elif train_data_key == "OCTMNIST":
+        args.data_dir = DATA_OCTMNIST_DIR
+        datasetDownloader("OCTMNIST")
+    elif train_data_key == "BLOODMNIST":
+        args.data_dir = DATA_BLOODMNIST_DIR
+        datasetDownloader("BloodMNIST")
+    elif train_data_key == "ORGANAMNIST":
+        args.data_dir = DATA_ORGANAMNIST_DIR
+        datasetDownloader("OrganAMNIST")
+    else:
+        print(f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}")
+        args.data_dir = DATA_MNIST_DIR
+
+    main(args)

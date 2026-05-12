@@ -7,6 +7,7 @@ import time
 
 import torch
 import torch.nn as nn
+from sklearn.metrics import roc_auc_score
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -136,60 +137,6 @@ class ResNet18Inference(nn.Module):
 # -----------------------------
 
 
-def _multi_cancer_infer_map():
-    return {
-        "BRAIN-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Brain,
-            "model_path": "best_resnet18_multi_brain_cancer.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Brain-Cancer",
-        },
-        "BREAST-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Breast,
-            "model_path": "best_resnet18_multi_breast_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Breast-Cancer",
-        },
-        "CERVICAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Cervical,
-            "model_path": "best_resnet18_multi_cervical_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Cervical-Cancer",
-        },
-        "KIDNEY-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Kidney,
-            "model_path": "best_resnet18_multi_kidney_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Kidney-Cancer",
-        },
-        "LUNG-AND-COLON-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lung_Colon,
-            "model_path": "best_resnet18_multi_lung_and_colon_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Lung-And-Colon-Cancer",
-        },
-        "LYMPHOMA-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lymphoma,
-            "model_path": "best_resnet18_multi_lymphoma.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Lymphoma-Cancer",
-        },
-        "ORAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Oral,
-            "model_path": "best_resnet18_multi_oral_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Oral-Cancer",
-        },
-    }
-
-
 def _resolve_infer_config(infer_data: str):
     name = infer_data.upper()
 
@@ -200,6 +147,7 @@ def _resolve_infer_config(infer_data: str):
             "model": ResNet18Inference(num_classes=10, in_channels=1),
             "model_path": "best_resnet18_mnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name in ("CIFR10", "CIFAR10"):
@@ -209,6 +157,7 @@ def _resolve_infer_config(infer_data: str):
             "model": ResNet18Inference(num_classes=10, in_channels=3),
             "model_path": "best_resnet18_cifar10.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name == "BRAIN-MRI":
@@ -218,29 +167,47 @@ def _resolve_infer_config(infer_data: str):
             "model": ResNet18Inference(num_classes=4, in_channels=1),
             "model_path": "best_resnet18_brain_mri.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
-    if name == "CHEST":
+    if name == "OCTMNIST":
         return {
-            "display": "CHEST",
-            "setup_fn": train_mod.setup_CHEST,
-            "model": ResNet18Inference(num_classes=15, in_channels=1),
-            "model_path": "best_resnet18_chest.pth",
-            "is_multilabel": True,
-        }
-
-    multi_map = _multi_cancer_infer_map()
-    if name in multi_map:
-        cfg = multi_map[name]
-        return {
-            "display": cfg["display"],
-            "setup_fn": cfg["setup_fn"],
-            "model": ResNet18Inference(
-                num_classes=cfg["num_classes"],
-                in_channels=cfg["in_channels"],
-            ),
-            "model_path": cfg["model_path"],
+            "display": "OCTMNIST",
+            "setup_fn": train_mod.setup_OCTMNIST,
+            "model": ResNet18Inference(num_classes=4, in_channels=1),
+            "model_path": "best_resnet18_octmnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "BLOODMNIST":
+        return {
+            "display": "BloodMNIST",
+            "setup_fn": train_mod.setup_BloodMNIST,
+            "model": ResNet18Inference(num_classes=8, in_channels=3),
+            "model_path": "best_resnet18_bloodmnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "ORGANAMNIST":
+        return {
+            "display": "OrganAMNIST",
+            "setup_fn": train_mod.setup_OrganAMNIST,
+            "model": ResNet18Inference(num_classes=11, in_channels=1),
+            "model_path": "best_resnet18_organamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "NIH-CHEST":
+        return {
+            "display": "NIH-CHEST",
+            "setup_fn": train_mod.setup_NIH_Chest,
+            "model": ResNet18Inference(num_classes=15, in_channels=1),
+            "model_path": "best_resnet18_NIH_Chest_XRay.pth",
+            "is_multilabel": True,
+            "eval_batch_size": 8,
         }
 
     raise ValueError(f"Unknown dataset: {infer_data}")
@@ -256,8 +223,7 @@ def get_random_sample(dataset_name: str, setup_fn):
 
     setup_result = setup_fn(batch_size=1)
 
-    # Some setup functions populate train_mod.test_loader globals, while others
-    # (e.g. per-cancer Multi-Cancer helpers) return loaders directly.
+    # Standard loaders from setup functions
     test_dataset = None
     if (
         isinstance(setup_result, tuple)
@@ -285,13 +251,121 @@ def get_random_sample(dataset_name: str, setup_fn):
             label_text = str(int(label.item()))
         else:
             active_idx = torch.where(label > 0.5)[0].tolist()
-            if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
-                names = [train_mod.chest_label_names[i] for i in active_idx]
-                label_text = "|".join(names) if names else "No active label"
-            else:
-                label_text = str(active_idx)
+            label_text = str(active_idx)
 
     return image_tensor.unsqueeze(0), label, label_text
+
+
+def _resolve_test_loader(setup_fn, batch_size: int):
+    train_mod.train_loader = None
+    train_mod.val_loader = None
+    train_mod.test_loader = None
+
+    setup_result = setup_fn(batch_size=batch_size)
+
+    if (
+        isinstance(setup_result, tuple)
+        and len(setup_result) >= 3
+        and hasattr(setup_result[2], "dataset")
+    ):
+        return setup_result[2]
+
+    if train_mod.test_loader is not None:
+        return train_mod.test_loader
+
+    raise RuntimeError("Could not resolve test loader for the selected dataset")
+
+
+def _evaluate_float_mean_auroc(model, loader, dataset_name: str):
+    all_targets = []
+    all_outputs = []
+    is_medmnist = "MNIST" in dataset_name.upper() and dataset_name.upper() != "MNIST"
+
+    with torch.no_grad():
+        for images, labels in loader:
+            outputs = model(images)
+            all_targets.append(labels.detach().cpu())
+            
+            if is_medmnist:
+                all_outputs.append(torch.softmax(outputs, dim=1).detach().cpu())
+            else:
+                all_outputs.append(torch.sigmoid(outputs).detach().cpu())
+
+    targets = torch.cat(all_targets, dim=0).numpy()
+    outputs = torch.cat(all_outputs, dim=0).numpy()
+    
+    if is_medmnist:
+        score = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+    else:
+        score = roc_auc_score(targets, outputs, average="macro")
+        
+    print(f"[AUROC][{dataset_name}][floating-point] Mean AUROC: {score:.4f}")
+    return score
+
+
+def _evaluate_integer_mean_auroc(model, loader, dataset_name: str):
+    # 1. Load the offline compiled integer dictionary
+    cfg = _resolve_infer_config(dataset_name)
+    int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
+    if not os.path.exists(int8_model_path):
+        raise FileNotFoundError(f"Missing compiled model: {int8_model_path}")
+    
+    int8_state = torch.load(int8_model_path, map_location="cpu")
+
+    all_targets = []
+    all_outputs = []
+    is_medmnist = "MNIST" in dataset_name.upper() and dataset_name.upper() != "MNIST"
+
+    scale_in = int8_state["meta"]["in_scale"]
+    zp_in = int8_state["meta"]["in_zp"]
+
+    for images, labels in loader:
+        # Quantize input
+        q_x = quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
+
+        # Traverse Conv1
+        q_x, s_out, z_out = run_integer_conv_block(
+            q_x, int8_state["conv1"], zp_in, apply_relu=True
+        )
+
+        # Traverse Residual Blocks
+        for layer_idx in range(1, 5):
+            for block_idx in range(2):
+                prefix = f"layer{layer_idx}_block{block_idx}"
+                q_x, s_out, z_out = run_integer_basic_block(
+                    q_x, int8_state[prefix], z_out, s_out
+                )
+
+        # Global Average Pool
+        fc_in_scale = int8_state["fc"]["scale_in"]
+        fc_in_zp = int8_state["fc"]["zp_in"]
+
+        q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+        q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+
+        # Final FC
+        q_out, final_s, final_z = run_integer_fc(q_fc_in, int8_state["fc"], fc_in_zp)
+
+        # Dequantize & format probabilities
+        int_logits = q_out.to(torch.float32)
+        logits = final_s * (int_logits - final_z)
+        
+        all_targets.append(labels.detach().cpu())
+        if is_medmnist:
+            all_outputs.append(torch.softmax(logits, dim=1).detach().cpu())
+        else:
+            all_outputs.append(torch.sigmoid(logits).detach().cpu())
+
+    targets = torch.cat(all_targets, dim=0).numpy()
+    outputs = torch.cat(all_outputs, dim=0).numpy()
+    
+    if is_medmnist:
+        score = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+    else:
+        score = roc_auc_score(targets, outputs, average="macro")
+        
+    print(f"[AUROC][{dataset_name}][int] Mean AUROC: {score:.4f}")
+    return score
 
 
 # -----------------------------
@@ -429,142 +503,63 @@ def fold_conv_bn_eval(conv, bn):
     
     return w_folded, b_folded
 
-# -----------------------------
-# 4. Core Integer Inference Engine
-# -----------------------------
-def run_integer_conv_block(q_input, conv, bn, layer_name, scale_in, zp_in, apply_relu=True):
-    # Mathematically fold BN into Conv before quantizing
-    w_folded, b_folded = fold_conv_bn_eval(conv, bn)
-    
-    scale_w, zp_w = get_quantization_params(w_folded, num_bits=8)
-    q_w = quantize_tensor(w_folded, scale_w, zp_w, dtype=torch.uint8)
+def run_integer_conv_block(q_input, layer_data, zp_in, apply_relu=True):
+    # Load statically compiled integer params
+    q_w = layer_data["q_weight"].to(q_input.device)
+    zp_w = layer_data["zp_w"]
+    q_bias = layer_data["q_bias"].to(q_input.device)
+    q_M0 = layer_data["q_M0"]
+    shift = layer_data["shift"]
+    zp_out = layer_data["zp_out"]
+    stride = layer_data["stride"]
+    padding = layer_data["padding"]
 
-    out_range = activation_ranges[layer_name]
-    scale_out = out_range["out_scale"]
-    zp_out = out_range["out_zero_point"]
-
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(b_folded, scale_bias, zp_bias, dtype=torch.int32)
-
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    int32_accum = integer_conv2d(
-        q_input, q_w, zp_in, zp_w, stride=conv.stride[0], padding=conv.padding[0]
-    )
+    # Pure Integer Math
+    int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=stride, padding=padding)
     int32_accum = add_bias(int32_accum, q_bias)
-
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
     
     if apply_relu:
         q_out = quantized_relu(q_out, zp_out)
 
-    debug_trace["layers"].append({
-        "layer_name": layer_name,
-        "type": "conv",
-        "input_scale": float(scale_in),
-        "input_zero_point": int(zp_in),
-        "weight_scale": float(scale_w),
-        "weight_zero_point": int(zp_w),
-        "output_scale": float(scale_out),
-        "output_zero_point": int(zp_out),
-    })
-
-    # Optional MNIST integer-only trace: store quantized output tensor
-    if INT_TRACE_ENABLED:
-        int_trace["layers"].append(
-            {
-                "layer_name": layer_name,
-                "output_tensor": q_out.cpu().numpy().tolist(),
-            }
-        )
-
-    return q_out, scale_out, zp_out
+    return q_out, layer_data["scale_out"], zp_out
 
 
-def run_integer_fc(q_input, fc, layer_name, scale_in, zp_in):
-    weight_float = fc.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
-
-    out_range = activation_ranges[layer_name]
-    scale_out = out_range["out_scale"]
-    zp_out = out_range["out_zero_point"]
-
-    bias_float = fc.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
-
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
+def run_integer_fc(q_input, fc_data, zp_in):
+    q_w = fc_data["q_weight"].to(q_input.device)
+    zp_w = fc_data["zp_w"]
+    q_bias = fc_data["q_bias"].to(q_input.device)
+    q_M0 = fc_data["q_M0"]
+    shift = fc_data["shift"]
+    zp_out = fc_data["zp_out"]
 
     int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
     int32_accum = add_bias(int32_accum, q_bias)
-
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
-    # For final FC, activation (softmax) is applied in float domain, so no ReLU here
 
-    debug_trace["layers"].append(
-        {
-            "layer_name": layer_name,
-            "type": "linear",
-            "input_scale": float(scale_in),
-            "input_zero_point": int(zp_in),
-            "weight_scale": float(scale_w),
-            "weight_zero_point": int(zp_w),
-            "output_scale": float(scale_out),
-            "output_zero_point": int(zp_out),
-        }
-    )
+    return q_out, fc_data["scale_out"], zp_out
 
-    # Optional MNIST integer-only trace: store final FC quantized output
-    if INT_TRACE_ENABLED:
-        int_trace["layers"].append(
-            {
-                "layer_name": layer_name,
-                "output_tensor": q_out.cpu().numpy().tolist(),
-            }
-        )
 
-    return q_out, scale_out, zp_out, (scale_w, zp_w), (scale_bias, zp_bias), (
-        q_M0,
-        shift,
-    )
-
-def run_integer_basic_block(q_x, block, prefix, scale_in, zp_in):
-    # 1. First convolution (Fold BN + ReLU)
+def run_integer_basic_block(q_x, block_data, zp_in, s_in):
     q_out1, s_out1, z_out1 = run_integer_conv_block(
-        q_x, block.conv1, block.bn1, f"{prefix}_conv1_relu", scale_in, zp_in, apply_relu=True
+        q_x, block_data["conv1"], zp_in, apply_relu=True
     )
 
-    # 2. Second convolution (Fold BN + NO ReLU yet)
     q_out2, s_out2, z_out2 = run_integer_conv_block(
-        q_out1, block.conv2, block.bn2, f"{prefix}_conv2_out", s_out1, z_out1, apply_relu=False
+        q_out1, block_data["conv2"], z_out1, apply_relu=False
     )
 
-    # 3. Shortcut connection
-    if isinstance(block.shortcut, nn.Identity):
-        # Pass-through: Just pass the quantized inputs directly!
-        q_short, s_short, z_short = q_x, scale_in, zp_in
+    if "shortcut" not in block_data:
+        q_short, s_short, z_short = q_x, s_in, zp_in
     else:
-        # Downsample conv: Fold BN + NO ReLU
-        short_conv = block.shortcut[0]
-        short_bn = block.shortcut[1]
         q_short, s_short, z_short = run_integer_conv_block(
-            q_x, short_conv, short_bn, f"{prefix}_shortcut_out", scale_in, zp_in, apply_relu=False
+            q_x, block_data["shortcut"], zp_in, apply_relu=False
         )
 
-    # 4. Pre-fetch target calibration ranges for the addition output
-    out_range = activation_ranges[f"{prefix}_out"]
-    s_final = out_range["out_scale"]
-    z_final = out_range["out_zero_point"]
+    s_final = block_data["add"]["scale_out"]
+    z_final = block_data["add"]["zp_out"]
 
-    # 5. STRICT INTEGER ADDITION
-    q_added = integer_add(
-        q_out2, z_out2, s_out2,
-        q_short, z_short, s_short,
-        z_final, s_final
-    )
-
-    # 6. Apply final ReLU in integer domain
+    q_added = integer_add(q_out2, z_out2, s_out2, q_short, z_short, s_short, z_final, s_final)
     q_final = quantized_relu(q_added, z_final)
 
     return q_final, s_final, z_final
@@ -584,7 +579,6 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     global INT_TRACE_ENABLED, int_trace
     INT_TRACE_ENABLED = name == "MNIST"
     if INT_TRACE_ENABLED:
-        # reset trace for this run
         int_trace = {"input": {}, "layers": []}
 
     print(f"[0] Inference target: {dataset_display}")
@@ -594,38 +588,63 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
         print(f"Error: '{model_path}' not found. Please train the model first.")
         return
 
-    # Safe State Loading (Strips 'module.' prefix if saved via DataParallel)
+    # Load Float Model
     state = torch.load(model_path, map_location="cpu")
     if list(state.keys())[0].startswith('module.'):
         state = {k[7:]: v for k, v in state.items()}
-        
     model.load_state_dict(state)
     model.eval()
+
+    # --- NEW: Load Offline Int8 Model ---
+    int8_model_path = model_path.replace(".pth", "_int8.pth")
+    int8_state = None
+    if run_integer:
+        if not os.path.exists(int8_model_path):
+            print(f"\n[!] Missing {int8_model_path}. Please run export_int8_model.py first.")
+            return
+        int8_state = torch.load(int8_model_path, map_location="cpu")
+
+    if cfg["is_multilabel"]:
+        loader = _resolve_test_loader(cfg["setup_fn"], cfg["eval_batch_size"])
+        train_mod.validate_loader_preprocessing(loader, dataset_display, stage="inference")
+
+        float_auroc = None
+        int_auroc = None
+
+        if run_floating_point:
+            float_auroc = _evaluate_float_mean_auroc(model, loader, dataset_display)
+
+        if run_integer:
+            # Note: If evaluating CHEST in integer mode, _evaluate_integer_mean_auroc 
+            # will need to be updated to use int8_state exactly like the single-pass below.
+            int_auroc = _evaluate_integer_mean_auroc(model, loader, dataset_display)
+
+        print("\n" + "=" * 40)
+        print(" RESNET18 INFERENCE SUMMARY ")
+        print("=" * 40)
+        print(f"Dataset:                  {dataset_display}")
+        if run_floating_point:
+            print(f"Float Mean AUROC:         {float_auroc:.4f}")
+        if run_integer:
+            print(f"Integer Mean AUROC:       {int_auroc:.4f}")
+        print("=" * 40)
+        return
 
     image_tensor, true_label, true_label_text = get_random_sample(
         infer_data,
         cfg["setup_fn"],
     )
-    print(
-        f"\n[1] Extracted random {dataset_display} sample from test split (True Label: {true_label_text})."
-    )
+    print(f"\n[1] Extracted random {dataset_display} sample from test split (True Label: {true_label_text}).")
 
     float_output = None
     float_pred = None
     float_inference_time = None
     integer_inference_time = None
 
-    if run_integer:
-        load_calibration_ranges(dataset_display)
-
     if run_floating_point:
         float_start = time.perf_counter()
         with torch.no_grad():
             float_output = model(image_tensor)
-        if cfg["is_multilabel"]:
-            scores = torch.sigmoid(float_output)[0]
-            float_pred = (scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-        else:
             float_pred = float_output.argmax(dim=1).item()
         float_inference_time = time.perf_counter() - float_start
         print(f"[2] Floating-Point Inference complete. Prediction: {float_pred}")
@@ -641,61 +660,49 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
         print("=" * 40)
         return
 
-    # Quantize Input
+    # ----------------------------------------------------
+    # TRUE INTEGER-ONLY INFERENCE (Offline Compiled Mode)
+    # ----------------------------------------------------
     integer_start = time.perf_counter()
-    in_range = activation_ranges["conv1"]
-    scale_in = in_range["in_scale"]
-    zp_in = in_range["in_zero_point"]
+    
+    # 1. Quantize Input using Offline Meta Config
+    scale_in = int8_state["meta"]["in_scale"]
+    zp_in = int8_state["meta"]["in_zp"]
     q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
 
-    # Log quantized input for MNIST-only integer trace
     if INT_TRACE_ENABLED:
-        int_trace["input"] = {
-            "tensor": q_x.cpu().numpy().tolist(),
-        }
+        int_trace["input"] = {"tensor": q_x.cpu().numpy().tolist()}
 
-    print("\n[3] Executing Integer-Only Inference for ResNet18...")
+    print("\n[3] Executing TRUE Integer-Only Inference...")
 
-    # Initial conv1
-    q_x, s_out, z_out = run_integer_conv_block(
-        q_x, model.conv1, model.bn1, "conv1_relu", scale_in, zp_in, apply_relu=True
-    )
+    # 2. Traverse Conv1
+    q_x, s_out, z_out = run_integer_conv_block(q_x, int8_state["conv1"], zp_in, apply_relu=True)
 
-    # Traverse all residual blocks properly
-    for layer_idx, stage in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
-        for block_idx, block in enumerate(stage):
+    # 3. Traverse Residual Blocks
+    for layer_idx in range(1, 5):
+        for block_idx in range(2):
             prefix = f"layer{layer_idx}_block{block_idx}"
-            q_x, s_out, z_out = run_integer_basic_block(
-                q_x, block, prefix, s_out, z_out
-            )
+            q_x, s_out, z_out = run_integer_basic_block(q_x, int8_state[prefix], z_out, s_out)
 
-    # -----------------------------
-    # Integer Global Average Pooling
-    # -----------------------------
+    # 4. Global Average Pooling (Using IN_SCALE, not OUT_SCALE)
+    fc_in_scale = int8_state["fc"]["scale_in"]
+    fc_in_zp = int8_state["fc"]["zp_in"]
     
-    # 1. First, fetch the target ranges for the inputs to the FC layer 
-    # (Since pooling feeds directly into FC, they share the same range/scale)
-    fc_in_range = activation_ranges["fc"]
-    s_fc_in = fc_in_range["in_scale"]
-    z_fc_in = fc_in_range["in_zero_point"]
-
-    # 2. STRICT INTEGER POOLING
     q_pooled = integer_global_avg_pool2d(
-        q_x, z_out, s_out, z_fc_in, s_fc_in
+        q_x, z_out, s_out, fc_in_zp, fc_in_scale
     )
-    
-    # 3. Flatten for linear layer
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
-    # Run Final FC Layer
-    q_out, final_s, final_z, final_w, final_b, final_M = run_integer_fc(
-        q_fc_in, model.fc, "fc", s_fc_in, z_fc_in
+    # 5. Final Fully Connected Layer
+    q_out, final_s, final_z = run_integer_fc(
+        q_fc_in, int8_state["fc"], fc_in_zp
     )
 
-    # Dequantize final logits and get prediction
+    # 6. Dequantize final logits
     int_logits = q_out.to(torch.float32)
     dequantized_logits = final_s * (int_logits - final_z)
     int_pred = dequantized_logits.argmax(dim=1).item()
+    
     integer_inference_time = time.perf_counter() - integer_start
 
     print("\n" + "=" * 40)
@@ -705,32 +712,16 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     print(f"True Label:               {true_label_text}")
     if run_floating_point:
         print(f"Float Model Prediction:   {float_pred}")
-        print(f"Float Inference Time:      {float_inference_time:.4f}s")
+        print(f"Float Inference Time:     {float_inference_time:.4f}s")
     print ("-" * 40)
     print(f"Integer Model Prediction: {int_pred}")
-    print(f"Integer Inference Time:    {integer_inference_time:.4f}s")
-
-    if cfg["is_multilabel"]:
-        chest_scores = torch.sigmoid(dequantized_logits)[0]
-        active = (chest_scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-        if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
-            names = [train_mod.chest_label_names[i] for i in active]
-            print(f"Predicted Active Labels:  {names if names else ['None >= 0.5']}")
-        else:
-            print(f"Predicted Active Labels:  {active}")
+    print(f"Integer Inference Time:   {integer_inference_time:.4f}s")
 
     if run_floating_point:
         if float_pred == int_pred:
             print("\nSuccess! The integer-quantized model matches the floating-point prediction.")
         else:
             print("\nNote: Predictions differ slightly. Standard 8-bit precision loss observed.")
-
-    print("\n--- Final Layer Quantization Stats ---")
-    print(f"Weight Scale:      {final_w[0]:.6f}  | Zero-Point: {final_w[1]}")
-    print(f"Bias Scale:        {final_b[0]:.6f}  | Zero-Point: {final_b[1]}")
-    print(f"Multiplier (M):    {final_M}")
-    print(f"Output Scale:      {final_s:.6f}  | Zero-Point: {final_z}")
-    print("=" * 40)
 
     # Save MNIST integer-only layer outputs (no floats) if enabled
     # if INT_TRACE_ENABLED:
@@ -743,13 +734,17 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--NIH-CHEST",
+        dest="nih_chest",
+        action="store_true",
+        help="Run inference on the NIH-CHEST model using the custom test split",
+    )
+    parser.add_argument(
         "--infer",
         type=str,
         default="CIFAR10",
         help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, CHEST, "
-            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
-            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     mode_group = parser.add_mutually_exclusive_group()
@@ -764,6 +759,9 @@ if __name__ == "__main__":
         help="Run floating-point inference only",
     )
     args = parser.parse_args()
+
+    if args.nih_chest:
+        args.infer = "NIH-CHEST"
 
     run_floating_point = True
     run_integer = True

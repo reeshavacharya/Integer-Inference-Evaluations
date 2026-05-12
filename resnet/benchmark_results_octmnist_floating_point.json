@@ -1,0 +1,8 @@
+{
+  "OCTMNIST": {
+    "floating-point": {
+      "AUC": 0.949454,
+      "ACC": 75.9
+    }
+  }
+}

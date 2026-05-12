@@ -68,60 +68,6 @@ class LeNet5(nn.Module):
 # -----------------------------
 # 2. Dataset/Model Resolution
 # -----------------------------
-def _multi_cancer_infer_map():
-    return {
-        "BRAIN-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Brain,
-            "model_path": "best_lenet5_multi_brain_cancer.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Brain-Cancer",
-        },
-        "BREAST-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Breast,
-            "model_path": "best_lenet5_multi_breast_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Breast-Cancer",
-        },
-        "CERVICAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Cervical,
-            "model_path": "best_lenet5_multi_cervical_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Cervical-Cancer",
-        },
-        "KIDNEY-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Kidney,
-            "model_path": "best_lenet5_multi_kidney_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Kidney-Cancer",
-        },
-        "LUNG-AND-COLON-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lung_Colon,
-            "model_path": "best_lenet5_multi_lung_and_colon_cancer.pth",
-            "num_classes": 5,
-            "in_channels": 3,
-            "display": "Lung-And-Colon-Cancer",
-        },
-        "LYMPHOMA-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Lymphoma,
-            "model_path": "best_lenet5_multi_lymphoma.pth",
-            "num_classes": 3,
-            "in_channels": 3,
-            "display": "Lymphoma-Cancer",
-        },
-        "ORAL-CANCER": {
-            "setup_fn": train_mod.setup_Multi_Cancer_Oral,
-            "model_path": "best_lenet5_multi_oral_cancer.pth",
-            "num_classes": 2,
-            "in_channels": 3,
-            "display": "Oral-Cancer",
-        },
-    }
-
-
 def _resolve_infer_config(infer_data: str):
     name = infer_data.upper()
 
@@ -132,6 +78,7 @@ def _resolve_infer_config(infer_data: str):
             "model": LeNet5(num_classes=10, in_channels=1),
             "model_path": "best_lenet5_mnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name in ("CIFR10", "CIFAR10"):
@@ -141,6 +88,7 @@ def _resolve_infer_config(infer_data: str):
             "model": LeNet5(num_classes=10, in_channels=3),
             "model_path": "best_lenet5_cifar10.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     if name == "BRAIN-MRI":
@@ -150,29 +98,47 @@ def _resolve_infer_config(infer_data: str):
             "model": MedicalLeNet(num_classes=4, in_channels=1),
             "model_path": "best_lenet5_brain_mri.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
-    if name == "CHEST":
+    if name == "NIH-CHEST":
         return {
-            "display": "CHEST",
-            "setup_fn": train_mod.setup_CHEST,
-            "model": MedicalLeNet(num_classes=15, in_channels=1),
-            "model_path": "best_lenet5_chest.pth",
+            "display": "NIH-CHEST",
+            "setup_fn": train_mod.setup_NIH_Chest,
+            "model": LeNet5(num_classes=15, in_channels=1),
+            "model_path": "best_lenet5_NIH_Chest_XRay.pth",
             "is_multilabel": True,
+            "eval_batch_size": 8,
         }
 
-    multi_map = _multi_cancer_infer_map()
-    if name in multi_map:
-        cfg = multi_map[name]
+    if name == "OCTMNIST":
         return {
-            "display": cfg["display"],
-            "setup_fn": cfg["setup_fn"],
-            "model": MedicalLeNet(
-                num_classes=cfg["num_classes"],
-                in_channels=cfg["in_channels"],
-            ),
-            "model_path": cfg["model_path"],
+            "display": "OCTMNIST",
+            "setup_fn": train_mod.setup_OCTMNIST,
+            "model": LeNet5(num_classes=4, in_channels=1),
+            "model_path": "best_lenet5_octmnist.pth",
             "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "BLOODMNIST":
+        return {
+            "display": "BloodMNIST",
+            "setup_fn": train_mod.setup_BloodMNIST,
+            "model": LeNet5(num_classes=8, in_channels=3),
+            "model_path": "best_lenet5_bloodmnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "ORGANAMNIST":
+        return {
+            "display": "OrganAMNIST",
+            "setup_fn": train_mod.setup_OrganAMNIST,
+            "model": LeNet5(num_classes=11, in_channels=1),
+            "model_path": "best_lenet5_organamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
         }
 
     raise ValueError(f"Unknown dataset: {infer_data}")
@@ -213,12 +179,7 @@ def get_random_sample(dataset_name: str, setup_fn):
         if label.dim() == 0:
             label_text = str(int(label.item()))
         else:
-            active_idx = torch.where(label > 0.5)[0].tolist()
-            if hasattr(train_mod, "chest_label_names") and train_mod.chest_label_names:
-                names = [train_mod.chest_label_names[i] for i in active_idx]
-                label_text = "|".join(names) if names else "No active label"
-            else:
-                label_text = str(active_idx)
+            label_text = str(label.detach().cpu().view(-1).tolist())
 
     return image_tensor.unsqueeze(0), label, label_text
 
@@ -227,40 +188,63 @@ def get_random_sample(dataset_name: str, setup_fn):
 # 3. Static 64-bit Fixed-Point Helpers
 # -----------------------------
 def _get_layer_config(model):
-    """Return the conv/fc modules for static fixed-point inference."""
+    """Return the (conv_layer, bn_layer) or (fc_layer, None) for inference."""
     if isinstance(model, MedicalLeNet):
         return {
-            "conv1": model.features[0],
-            "conv2": model.features[4],
-            "fc1": model.classifier[1],
-            "fc2": model.classifier[4],
-            "fc3": model.classifier[7],
+            "conv1": (model.features[0], model.features[1]), # Conv + BN
+            "conv2": (model.features[4], model.features[5]), # Conv + BN
+            "fc1": (model.classifier[1], None),
+            "fc2": (model.classifier[4], None),
+            "fc3": (model.classifier[7], None),
         }
     return {
-        "conv1": model.features[0],
-        "conv2": model.features[3],
-        "fc1": model.classifier[1],
-        "fc2": model.classifier[3],
-        "fc3": model.classifier[5],
+        "conv1": (model.features[0], None),
+        "conv2": (model.features[3], None),
+        "fc1": (model.classifier[1], None),
+        "fc2": (model.classifier[3], None),
+        "fc3": (model.classifier[5], None),
     }
 
+def fold_conv_bn_eval(conv, bn):
+    """Mathematically folds BatchNorm parameters into Conv2d weights and biases."""
+    w = conv.weight.detach()
+    b = conv.bias.detach() if conv.bias is not None else torch.zeros(conv.out_channels, device=w.device)
+    
+    if bn is None:
+        return w, b
+        
+    gamma = bn.weight.detach()
+    beta = bn.bias.detach()
+    mean = bn.running_mean.detach()
+    var = bn.running_var.detach()
+    eps = bn.eps
+    
+    multiplier = gamma / torch.sqrt(var + eps)
+    w_folded = w * multiplier.view(-1, 1, 1, 1)
+    b_folded = beta + (b - mean) * multiplier
+    
+    return w_folded, b_folded
 
-def run_static_fixed_point_layer(q_input, layer, apply_relu=True, is_conv=False):
-    q_w = quantize_fixed_point(layer.weight.detach())
+def run_static_fixed_point_layer(q_input, layer_tuple, apply_relu=True, is_conv=False):
+    layer, bn = layer_tuple
 
-    if layer.bias is not None:
-        q_bias = quantize_fixed_point(layer.bias.detach())
+    # 1. Extract and Fold FP32 Weights
+    if is_conv:
+        w_float, b_float = fold_conv_bn_eval(layer, bn)
+        stride = layer.stride[0]
+        padding = layer.padding[0]
     else:
-        q_bias = torch.zeros(layer.out_channels, dtype=torch.int64)
+        w_float = layer.weight.detach()
+        b_float = layer.bias.detach() if layer.bias is not None else torch.zeros(layer.out_features, device=w_float.device)
 
+    # 2. Quantize to 64-bit Fixed Point
+    q_w = quantize_fixed_point(w_float)
+    q_bias = quantize_fixed_point(b_float)
+
+    # 3. Execute Math
     max_bits, max_rem = 0, 0
     if is_conv:
-        q_accum = execute_and_shift_conv2d(
-            q_input,
-            q_w,
-            stride=layer.stride[0],
-            padding=layer.padding[0],
-        )
+        q_accum = execute_and_shift_conv2d(q_input, q_w, stride=stride, padding=padding)
     else:
         q_accum, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
 
@@ -318,11 +302,7 @@ def main(infer_data, run_floating_point=True, run_fixed_point=True, log=False):
     if run_floating_point:
         with torch.no_grad():
             float_logits = model(image_tensor)
-            if cfg["is_multilabel"]:
-                float_scores = torch.sigmoid(float_logits)[0]
-                float_pred = (float_scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-            else:
-                float_pred = float_logits.argmax(dim=1).item()
+            float_pred = float_logits.argmax(dim=1).item()
 
         print(f"[2] Float Inference complete. Prediction: {float_pred}")
 
@@ -382,11 +362,7 @@ def main(infer_data, run_floating_point=True, run_fixed_point=True, log=False):
     )
 
     dequantized_logits = dequantize_fixed_point(q_out)
-    if cfg["is_multilabel"]:
-        fixed_scores = torch.sigmoid(dequantized_logits)[0]
-        int_pred = (fixed_scores >= 0.5).nonzero(as_tuple=True)[0].tolist()
-    else:
-        int_pred = dequantized_logits.argmax(dim=1).item()
+    int_pred = dequantized_logits.argmax(dim=1).item()
 
     print("\n" + "=" * 40)
     print(" INFERENCE SUMMARY ")
@@ -436,9 +412,8 @@ if __name__ == "__main__":
         type=str,
         default="MNIST",
         help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, CHEST, "
-            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
-            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, "
+            "OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     mode_group = parser.add_mutually_exclusive_group()

@@ -1,0 +1,8 @@
+{
+  "OCTMNIST": {
+    "fixed-point": {
+      "AUC": 0.94946,
+      "ACC": 75.9
+    }
+  }
+}

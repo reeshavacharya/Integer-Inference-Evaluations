@@ -18,6 +18,7 @@ import sys
 from typing import Optional
 
 import torch
+from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 
@@ -63,28 +64,14 @@ fp64_inference = _load_module(
 )
 
 
-BENCHMARK_DATASETS = [
+BENCHMARK_DATASETS = {
     "MNIST",
     "CIFAR10",
     "Brain-MRI",
-    "CHEST",
-    "Brain-Cancer",
-    "Breast-Cancer",
-    "Cervical-Cancer",
-    "Kidney-Cancer",
-    "Lung-And-Colon-Cancer",
-    "Lymphoma-Cancer",
-    "Oral-Cancer",
-]
-
-MULTI_CANCER_DATASETS = {
-    "Brain-Cancer",
-    "Breast-Cancer",
-    "Cervical-Cancer",
-    "Kidney-Cancer",
-    "Lung-And-Colon-Cancer",
-    "Lymphoma-Cancer",
-    "Oral-Cancer",
+    "NIH-CHEST",
+    "OCTMNIST",
+    "BloodMNIST",
+    "OrganAMNIST",
 }
 
 
@@ -111,36 +98,23 @@ def _normalize_bench_name(name: str) -> str:
         return "CIFAR10"
     if name_upper == "BRAIN-MRI":
         return "Brain-MRI"
-    if name_upper == "BRAIN-CANCER":
-        return "Brain-Cancer"
-    if name_upper == "BREAST-CANCER":
-        return "Breast-Cancer"
-    if name_upper == "CERVICAL-CANCER":
-        return "Cervical-Cancer"
-    if name_upper == "KIDNEY-CANCER":
-        return "Kidney-Cancer"
-    if name_upper == "LUNG-AND-COLON-CANCER":
-        return "Lung-And-Colon-Cancer"
-    if name_upper == "LYMPHOMA-CANCER":
-        return "Lymphoma-Cancer"
-    if name_upper == "ORAL-CANCER":
-        return "Oral-Cancer"
+    if name_upper == "NIH-CHEST":
+        return "NIH-CHEST"
     if name_upper == "MNIST":
         return "MNIST"
     if name_upper == "CIFAR10":
         return "CIFAR10"
-    if name_upper == "CHEST":
-        return "CHEST"
+    if name_upper == "OCTMNIST":
+        return "OCTMNIST"
+    if name_upper == "BLOODMNIST":
+        return "BloodMNIST"
+    if name_upper == "ORGANAMNIST":
+        return "OrganAMNIST"
     raise ValueError(f"Unknown benchmark dataset: {name}")
 
 
-def _train_dataset_for_checkpoint(dataset_name: str, multi_trained: bool) -> bool:
-    if dataset_name in MULTI_CANCER_DATASETS:
-        if multi_trained:
-            return multi_trained
-        train_data_flag = "Multi-Cancer"
-    else:
-        train_data_flag = dataset_name
+def _train_dataset_for_checkpoint(dataset_name: str) -> None:
+    train_data_flag = dataset_name
 
     print(
         f"[train] Missing checkpoint for {dataset_name}. Training with --train_data {train_data_flag}."
@@ -151,50 +125,53 @@ def _train_dataset_for_checkpoint(dataset_name: str, multi_trained: bool) -> boo
         learning_rate=1e-3,
         train_data=train_data_flag,
         data_dir="",
+        in_channels=1,
     )
 
     if train_data_flag == "MNIST":
         args.data_dir = train_mod.DATA_MNIST_DIR
     elif train_data_flag == "Brain-MRI":
         args.data_dir = train_mod.DATA_BRAIN_MRI_DIR
+    elif train_data_flag == "NIH-CHEST":
+        args.data_dir = train_mod.DATA_NIH_CHEST_XRAY_DIR
+    elif train_data_flag == "OCTMNIST":
+        args.data_dir = train_mod.DATA_OCTMNIST_DIR
+    elif train_data_flag == "BloodMNIST":
+        args.data_dir = train_mod.DATA_BLOODMNIST_DIR
+    elif train_data_flag == "OrganAMNIST":
+        args.data_dir = train_mod.DATA_ORGANAMNIST_DIR
     elif train_data_flag in ("CIFR10", "CIFAR10"):
         args.data_dir = train_mod.DATA_CIFAR10_DIR
-    elif train_data_flag == "CHEST":
-        args.data_dir = train_mod.DATA_CHEST_DIR
-    elif train_data_flag == "Multi-Cancer":
-        args.data_dir = train_mod.DATA_MULTI_CANCER_DIR
     else:
         raise ValueError(f"Unsupported train_data flag: {train_data_flag}")
 
     train_mod.datasetDownloader(train_data_flag)
     train_mod.main(args)
 
-    return train_data_flag == "Multi-Cancer" or multi_trained
 
-
-def _ensure_checkpoint(dataset_name: str, multi_trained: bool) -> bool:
+def _ensure_checkpoint(dataset_name: str) -> None:
     cfg = int8_inference._resolve_infer_config(dataset_name)
     model_path = cfg["model_path"]
 
     if os.path.exists(model_path):
-        return multi_trained
+        return
 
-    multi_trained = _train_dataset_for_checkpoint(dataset_name, multi_trained)
+    _train_dataset_for_checkpoint(dataset_name)
 
     if not os.path.exists(model_path):
         raise RuntimeError(
             f"Checkpoint still missing after training for {dataset_name}: {model_path}"
         )
-    return multi_trained
 
 
-def _get_test_loader(dataset_name: str, batch_size: int = 64) -> DataLoader:
+def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> DataLoader:
     cfg = int8_inference._resolve_infer_config(dataset_name)
+    effective_batch_size = batch_size if batch_size is not None else cfg.get("eval_batch_size", 64)
 
     train_mod.train_loader = None
     train_mod.val_loader = None
     train_mod.test_loader = None
-    setup_result = cfg["setup_fn"](batch_size=batch_size)
+    setup_result = cfg["setup_fn"](batch_size=effective_batch_size)
 
     if (
         isinstance(setup_result, tuple)
@@ -224,6 +201,14 @@ def _build_model(dataset_name: str) -> torch.nn.Module:
 
 
 def _compute_batch_metrics(outputs: torch.Tensor, labels: torch.Tensor):
+    # Fix MedMNIST [N, 1] shape by squeezing it to [N]
+    if labels.dim() == 2 and labels.size(1) == 1:
+        labels = labels.squeeze(-1)
+        
+    # Ensure it's evaluated as integer indices
+    labels = labels.long()
+
+    # Now it properly separates Multi-label (NIH) from Multi-class (MedMNIST)
     if labels.dim() > 1:
         preds = (torch.sigmoid(outputs) >= 0.5).float()
         correct = (preds == labels).sum().item()
@@ -235,22 +220,39 @@ def _compute_batch_metrics(outputs: torch.Tensor, labels: torch.Tensor):
     return correct, total
 
 
+def _is_multilabel(dataset_name: str) -> bool:
+    return bool(int8_inference._resolve_infer_config(dataset_name)["is_multilabel"])
+
+
+def _is_medmnist(dataset_name: str) -> bool:
+    name = dataset_name.upper()
+    return name in ["OCTMNIST", "BLOODMNIST", "ORGANAMNIST"]
+
+
+def _format_metric_value(dataset_name: str, value) -> str:
+    if isinstance(value, dict):
+        return f"AUC={value['AUC']:.4f}, ACC={value['ACC']:.2f}%"
+    if _is_multilabel(dataset_name):
+        return f"{value:.4f}"
+    return f"{value:.2f}%"
+
+
 def _float_accuracy(
     model: torch.nn.Module,
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
 ) -> float:
+    is_multi = _is_multilabel(dataset_name)
+    is_medmnist = _is_medmnist(dataset_name)
+    
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
-    print(
-        f"[bench][{dataset_name}][floating-point] Starting benchmark over {target_images}/{total_images} images."
-    )
+    print(f"[bench][{dataset_name}][floating-point] Starting benchmark over {target_images}/{total_images} images.")
 
-    correct = 0.0
-    total = 0
-    processed_images = 0
+    all_targets, all_outputs = [], []
+    correct, total, processed_images = 0.0, 0, 0
 
     with torch.no_grad():
         for batch_idx, (images, labels) in enumerate(loader, 1):
@@ -263,17 +265,37 @@ def _float_accuracy(
                 labels = labels[:remaining]
 
             outputs = model(images)
-            c, t = _compute_batch_metrics(outputs, labels)
-            correct += c
-            total += t
+            
+            if is_multi:
+                all_targets.append(labels.detach().cpu())
+                all_outputs.append(torch.sigmoid(outputs).detach().cpu())
+            elif is_medmnist:
+                all_targets.append(labels.detach().cpu())
+                all_outputs.append(torch.softmax(outputs, dim=1).detach().cpu())
+                c, t = _compute_batch_metrics(outputs, labels)
+                correct += c
+                total += t
+            else:
+                c, t = _compute_batch_metrics(outputs, labels)
+                correct += c
+                total += t
+
             processed_images += images.size(0)
-
             left = max(target_images - processed_images, 0)
-            print(
-                f"[bench][{dataset_name}][floating-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}."
-            )
+            print(f"[bench][{dataset_name}][floating-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
-    return 100.0 * correct / max(total, 1)
+    if is_multi:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        return roc_auc_score(targets, outputs, average="macro")
+    elif is_medmnist:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        return {"AUC": auc, "ACC": acc}
+    else:
+        return 100.0 * correct / max(total, 1)
 
 
 def _integer_accuracy(
@@ -281,15 +303,33 @@ def _integer_accuracy(
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
-) -> float:
+):
+    is_multi = _is_multilabel(dataset_name)
+    is_medmnist = _is_medmnist(dataset_name)
+    
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
     print(f"[bench][{dataset_name}][int] Starting benchmark over {target_images}/{total_images} images.")
 
-    correct = 0.0
-    total = 0
-    processed_images = 0
+    # Load configuration and the offline compiled integer dictionary
+    cfg = int8_inference._resolve_infer_config(dataset_name)
+    int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
+    
+    if not os.path.exists(int8_model_path):
+        raise FileNotFoundError(
+            f"Missing compiled model: {int8_model_path}. "
+            f"Please run export_int8_model.py first."
+        )
+    
+    int8_state = torch.load(int8_model_path, map_location="cpu")
+
+    all_targets, all_outputs = [], []
+    correct, total, processed_images = 0.0, 0, 0
+
+    # Extract global input boundaries
+    scale_in = int8_state["meta"]["in_scale"]
+    zp_in = int8_state["meta"]["in_zp"]
 
     for batch_idx, (images, labels) in enumerate(loader, 1):
         if processed_images >= target_images:
@@ -300,57 +340,82 @@ def _integer_accuracy(
             images = images[:remaining]
             labels = labels[:remaining]
 
-        int8_inference.activation_ranges.clear()
-        handles = int8_inference.register_hooks(model)
-        with torch.no_grad():
-            _ = model(images)
-        for h in handles:
-            h.remove()
-
-        in_range = int8_inference.activation_ranges["conv1"]
-        pseudo_in = torch.tensor([in_range["in_min"], in_range["in_max"]], dtype=torch.float32)
-        scale_in, zp_in = int8_utils.get_quantization_params(pseudo_in, num_bits=8)
+        # 1. Quantize Input Image
         q_x = int8_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
 
-        cfg = int8_inference._get_layer_config(model)
-
-        q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-            q_x, cfg["conv1"], "conv1", scale_in, zp_in, apply_relu=True, is_conv=True
+        # ---------------------------------------------------------
+        # 2. Execute Convs using int8_state (Offline Dictionary)
+        # ---------------------------------------------------------
+        q_x, s_out, z_out = int8_inference.run_integer_layer(
+            q_x, int8_state["conv1"], "conv1", zp_in, apply_relu=True, is_conv=True
         )
         q_x = int8_inference.avg_pool_uint8(q_x, name="bench_pool_after_conv1")
 
-        q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-            q_x, cfg["conv2"], "conv2", s_out, z_out, apply_relu=True, is_conv=True
+        q_x, s_out, z_out = int8_inference.run_integer_layer(
+            q_x, int8_state["conv2"], "conv2", z_out, apply_relu=True, is_conv=True
         )
         q_x = int8_inference.avg_pool_uint8(q_x, name="bench_pool_after_conv2")
 
+        # Flatten for Dense Layers
         q_x = q_x.view(q_x.size(0), -1)
 
-        q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-            q_x, cfg["fc1"], "fc1", s_out, z_out, apply_relu=True, is_conv=False
+        # ---------------------------------------------------------
+        # 3. Execute FCs using int8_state (Offline Dictionary)
+        # ---------------------------------------------------------
+        q_x, s_out, z_out = int8_inference.run_integer_layer(
+            q_x, int8_state["fc1"], "fc1", z_out, apply_relu=True, is_conv=False
         )
-        q_x, s_out, z_out, _, _, _ = int8_inference.run_integer_layer(
-            q_x, cfg["fc2"], "fc2", s_out, z_out, apply_relu=True, is_conv=False
+        q_x, s_out, z_out = int8_inference.run_integer_layer(
+            q_x, int8_state["fc2"], "fc2", z_out, apply_relu=True, is_conv=False
         )
 
-        q_out, final_s, final_z, _, _, _ = int8_inference.run_integer_layer(
-            q_x, cfg["fc3"], "fc3", s_out, z_out, apply_relu=False, is_conv=False
+        q_out, final_s, final_z = int8_inference.run_integer_layer(
+            q_x, int8_state["fc3"], "fc3", z_out, apply_relu=False, is_conv=False
         )
 
+        # ---------------------------------------------------------
+        # 4. Output Dequantization & Metric Evaluation
+        # ---------------------------------------------------------
         int_logits = q_out.to(torch.float32)
         dequantized_logits = final_s * (int_logits - final_z)
 
-        c, t = _compute_batch_metrics(dequantized_logits, labels)
-        correct += c
-        total += t
+        # Route evaluation based on dataset type
+        if is_multi:
+            # NIH-CHEST (Sigmoid AUROC)
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.sigmoid(dequantized_logits).detach().cpu())
+        elif is_medmnist:
+            # MedMNIST (Softmax OVR AUROC + Accuracy)
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.softmax(dequantized_logits, dim=1).detach().cpu())
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+        else:
+            # Standard Datasets (Accuracy Only)
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+
         processed_images += images.size(0)
-
         left = max(target_images - processed_images, 0)
-        print(
-            f"[bench][{dataset_name}][int] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}."
-        )
+        print(f"[bench][{dataset_name}][int] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
-    return 100.0 * correct / max(total, 1)
+    # ---------------------------------------------------------
+    # 5. Final Metric Aggregation
+    # ---------------------------------------------------------
+    if is_multi:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        return roc_auc_score(targets, outputs, average="macro")
+    elif is_medmnist:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        return {"AUC": auc, "ACC": acc}
+    else:
+        return 100.0 * correct / max(total, 1)
 
 
 def _fixed_point_accuracy(
@@ -358,17 +423,17 @@ def _fixed_point_accuracy(
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
-) -> float:
+):
+    is_multi = _is_multilabel(dataset_name)
+    is_medmnist = _is_medmnist(dataset_name)
+    
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
-    print(
-        f"[bench][{dataset_name}][fixed-point] Starting benchmark over {target_images}/{total_images} images."
-    )
+    print(f"[bench][{dataset_name}][fixed-point] Starting benchmark over {target_images}/{total_images} images.")
 
-    correct = 0.0
-    total = 0
-    processed_images = 0
+    all_targets, all_outputs = [], []
+    correct, total, processed_images = 0.0, 0, 0
 
     for batch_idx, (images, labels) in enumerate(loader, 1):
         if processed_images >= target_images:
@@ -379,9 +444,15 @@ def _fixed_point_accuracy(
             images = images[:remaining]
             labels = labels[:remaining]
 
+        # 1. Quantize input to 64-bit Fixed Point
         q_x = fp64_utils.quantize_fixed_point(images)
+        
+        # 2. Extract configuration (This now returns tuples of (layer, bn_layer))
         cfg = fp64_inference._get_layer_config(model)
 
+        # ---------------------------------------------------------
+        # Execute Convs (The tuple natively folds BN if it exists)
+        # ---------------------------------------------------------
         q_x, _, _ = fp64_inference.run_static_fixed_point_layer(
             q_x, cfg["conv1"], apply_relu=True, is_conv=True
         )
@@ -392,8 +463,12 @@ def _fixed_point_accuracy(
         )
         q_x = fp64_inference.avg_pool_fixed_point(q_x)
 
+        # Flatten for Dense Layers
         q_x = q_x.view(q_x.size(0), -1)
 
+        # ---------------------------------------------------------
+        # Execute FCs (The tuple passes (linear_layer, None))
+        # ---------------------------------------------------------
         q_x, _, _ = fp64_inference.run_static_fixed_point_layer(
             q_x, cfg["fc1"], apply_relu=True, is_conv=False
         )
@@ -405,19 +480,39 @@ def _fixed_point_accuracy(
             q_x, cfg["fc3"], apply_relu=False, is_conv=False
         )
 
+        # 3. Dequantize and evaluate
         dequantized_logits = fp64_utils.dequantize_fixed_point(q_out)
 
-        c, t = _compute_batch_metrics(dequantized_logits, labels)
-        correct += c
-        total += t
+        if is_multi:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.sigmoid(dequantized_logits).detach().cpu())
+        elif is_medmnist:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.softmax(dequantized_logits, dim=1).detach().cpu())
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+        else:
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+
         processed_images += images.size(0)
-
         left = max(target_images - processed_images, 0)
-        print(
-            f"[bench][{dataset_name}][fixed-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}."
-        )
+        print(f"[bench][{dataset_name}][fixed-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
-    return 100.0 * correct / max(total, 1)
+    if is_multi:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        return roc_auc_score(targets, outputs, average="macro")
+    elif is_medmnist:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        return {"AUC": auc, "ACC": acc}
+    else:
+        return 100.0 * correct / max(total, 1)
 
 
 def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None):
@@ -427,11 +522,9 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
     selected_modes = [mode] if mode is not None else ["floating-point", "int", "fixed-point"]
 
     results = {}
-    multi_trained = False
-
     for name in targets:
         print(f"\n[bench] Dataset: {name}")
-        multi_trained = _ensure_checkpoint(name, multi_trained)
+        _ensure_checkpoint(name)
 
         loader = _get_test_loader(name)
         model = _build_model(name)
@@ -448,7 +541,7 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
             per_dataset["fixed-point"] = fxp_acc
 
         results[name] = per_dataset
-        stats = " | ".join([f"{k}={v:.2f}%" for k, v in per_dataset.items()])
+        stats = " | ".join([f"{k}={_format_metric_value(name, v)}" for k, v in per_dataset.items()])
         print(f"[bench] {name}: {stats}")
 
     return results
@@ -475,9 +568,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help=(
-            "Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, CHEST, "
-            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
-            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
+            "Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     parser.add_argument(
@@ -509,5 +600,5 @@ if __name__ == "__main__":
 
     print(f"\nSaved {results_file} with:")
     for ds, vals in metrics.items():
-        stats = " | ".join([f"{k}={v:.2f}%" for k, v in vals.items()])
+        stats = " | ".join([f"{k}={_format_metric_value(ds, v)}" for k, v in vals.items()])
         print(f"  {ds}: {stats}")

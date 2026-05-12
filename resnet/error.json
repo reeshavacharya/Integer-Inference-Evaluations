@@ -1,6 +1,6 @@
 {
   "meta": {
-    "dataset": "Oral-Cancer",
+    "dataset": "MNIST",
     "true_label": "0",
     "fp32_prediction": 0,
     "int8_prediction": 0

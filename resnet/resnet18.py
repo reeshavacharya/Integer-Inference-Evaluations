@@ -1,29 +1,28 @@
 import kagglehub
 import os
 import argparse
-import csv
 import subprocess
-import shutil
 from collections import Counter
 from bisect import bisect_right
-from PIL import Image
+from sklearn.metrics import roc_auc_score
+import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset, Dataset
 from torchvision import datasets, transforms
-
+from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
 DATA_MNIST_DIR = os.path.join(DATA_ROOT, "MNIST")
 DATA_CIFAR10_DIR = os.path.join(DATA_ROOT, "CIFAR10")
 DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain-MRI")
-DATA_CHEST_DIR = os.path.join(DATA_ROOT, "CHEST")
-DATA_MULTI_CANCER_DIR = os.path.join(DATA_ROOT, "Multi-Cancer")
-CHEST_IMAGE_SIZE = 128
-
+DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
+DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
+DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
+DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
 
 # -----------------------------
 # Device
@@ -149,20 +148,16 @@ model = None
 criterion = None
 optimizer = None
 scheduler = None
-is_multilabel = False
-chest_label_names = None
 
 
 PREPROCESS_SPECS = {
     "MNIST": {"channels": 1, "height": 28, "width": 28},
     "CIFAR10": {"channels": 3, "height": 32, "width": 32},
     "BRAIN-MRI": {"channels": 1, "height": 28, "width": 28},
-    "CHEST": {
-        "channels": 1,
-        "height": CHEST_IMAGE_SIZE,
-        "width": CHEST_IMAGE_SIZE,
-    },
-    "MULTI-CANCER": {"channels": 3, "height": 224, "width": 224},
+    "NIH-CHEST": {"channels": 1, "height": 224, "width": 224},
+    "OCTMNIST": {"channels": 1, "height": 28, "width": 28},
+    "BLOODMNIST": {"channels": 3, "height": 28, "width": 28},
+    "ORGANAMNIST": {"channels": 1, "height": 28, "width": 28},
 }
 
 
@@ -170,12 +165,12 @@ def _normalize_dataset_key(dataset_name: str) -> str:
     key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
     if key == "CIFR10":
         return "CIFAR10"
-    if "CANCER" in key and key not in ("BRAIN-MRI",):
-        return "MULTI-CANCER"
     return key
 
 
-def validate_preprocessed_batch(images: torch.Tensor, dataset_name: str, stage: str = "runtime"):
+def validate_preprocessed_batch(
+    images: torch.Tensor, dataset_name: str, stage: str = "runtime"
+):
     key = _normalize_dataset_key(dataset_name)
     if key not in PREPROCESS_SPECS:
         return
@@ -195,23 +190,29 @@ def validate_preprocessed_batch(images: torch.Tensor, dataset_name: str, stage: 
         )
 
     if not torch.isfinite(images).all():
-        raise RuntimeError(f"[{stage}] Found non-finite values after preprocessing for {dataset_name}")
+        raise RuntimeError(
+            f"[{stage}] Found non-finite values after preprocessing for {dataset_name}"
+        )
 
 
-def validate_loader_preprocessing(loader: DataLoader, dataset_name: str, stage: str = "runtime"):
+def validate_loader_preprocessing(
+    loader: DataLoader, dataset_name: str, stage: str = "runtime"
+):
     images, _ = next(iter(loader))
     validate_preprocessed_batch(images, dataset_name, stage=stage)
 
 
-def _deterministic_split_indices(total_len: int, train_frac: float = 0.8, val_frac: float = 0.1, seed: int = 42):
+def _deterministic_split_indices(
+    total_len: int, train_frac: float = 0.8, val_frac: float = 0.1, seed: int = 42
+):
     train_size = int(train_frac * total_len)
     val_size = int(val_frac * total_len)
     test_size = total_len - train_size - val_size
     gen = torch.Generator().manual_seed(seed)
     perm = torch.randperm(total_len, generator=gen).tolist()
     train_idx = perm[:train_size]
-    val_idx = perm[train_size: train_size + val_size]
-    test_idx = perm[train_size + val_size:]
+    val_idx = perm[train_size : train_size + val_size]
+    test_idx = perm[train_size + val_size :]
     return train_idx, val_idx, test_idx
 
 
@@ -242,7 +243,9 @@ def setup_MNIST(batch_size: int):
     val_size = int(0.1 * total_len)
     test_size = total_len - train_size - val_size
 
-    train_idx, val_idx, test_idx = _deterministic_split_indices(len(full_dataset), train_frac=0.8, val_frac=0.1, seed=42)
+    train_idx, val_idx, test_idx = _deterministic_split_indices(
+        len(full_dataset), train_frac=0.8, val_frac=0.1, seed=42
+    )
     train_subset = Subset(full_dataset, train_idx)
     val_subset = Subset(full_dataset, val_idx)
     test_subset = Subset(full_dataset, test_idx)
@@ -295,7 +298,9 @@ def setup_CIFAR10(batch_size: int = 64):
     full_base_eval = ConcatDataset([train_base_eval, test_base_eval])
 
     total_len = len(full_base_eval)
-    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+    train_idx, val_idx, test_idx = _deterministic_split_indices(
+        total_len, train_frac=0.8, val_frac=0.1, seed=42
+    )
 
     # Parallel dataset with training augmentations, indexed by the same split
     train_base_tf = datasets.CIFAR10(
@@ -334,6 +339,79 @@ def setup_CIFAR10(batch_size: int = 64):
 
     validate_loader_preprocessing(train_loader, "CIFAR10", stage="training")
     validate_loader_preprocessing(test_loader, "CIFAR10", stage="training")
+
+
+# MedMNIST Dataset Setup Functions
+def setup_OCTMNIST(batch_size: int):
+    """Setup OCTMNIST data with built-in train/val/test splits."""
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_OCTMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),  # Using MNIST normalization for grayscale
+    ])
+
+    # MedMNIST has built-in splits: train, val, test
+    train_dataset = OCTMNIST(split="train", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
+    val_dataset = OCTMNIST(split="val", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
+    test_dataset = OCTMNIST(split="test", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "OCTMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "OCTMNIST", stage="training")
+
+
+def setup_BloodMNIST(batch_size: int):
+    """Setup BloodMNIST data with built-in train/val/test splits."""
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_BLOODMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+
+    # MedMNIST has built-in splits: train, val, test
+    train_dataset = BloodMNIST(split="train", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+    val_dataset = BloodMNIST(split="val", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+    test_dataset = BloodMNIST(split="test", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "BloodMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "BloodMNIST", stage="training")
+
+
+def setup_OrganAMNIST(batch_size: int):
+    """Setup OrganAMNIST data with built-in train/val/test splits."""
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_ORGANAMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),  # Using MNIST normalization for grayscale
+    ])
+
+    # MedMNIST has built-in splits: train, val, test
+    train_dataset = OrganAMNIST(split="train", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
+    val_dataset = OrganAMNIST(split="val", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
+    test_dataset = OrganAMNIST(split="test", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "OrganAMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "OrganAMNIST", stage="training")
 
 
 def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
@@ -423,7 +501,9 @@ def setup_Brain_MRI(batch_size: int = 64):
     full_base_eval = ConcatDataset([full_train_base, full_test_base])
 
     total_len = len(full_base_eval)
-    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+    train_idx, val_idx, test_idx = _deterministic_split_indices(
+        total_len, train_frac=0.8, val_frac=0.1, seed=42
+    )
 
     # Parallel dataset with training augmentations, indexed by the same split
     full_train_tf = datasets.ImageFolder(
@@ -468,126 +548,153 @@ def setup_Brain_MRI(batch_size: int = 64):
     return train_dataset
 
 
-def setup_CHEST(batch_size: int = 64):
-    global train_loader, val_loader, test_loader, chest_label_names
+class NIHChestDataset(Dataset):
+    """
+    Custom dataset for NIH Chest X-ray data.
+    Loads images from images_xxx/images/ directories and labels from Data_Entry_2017.csv.
+    """
 
-    chest_root = DATA_CHEST_DIR
-    images_dir = os.path.join(chest_root, "sample", "images")
-    labels_csv = os.path.join(chest_root, "sample", "sample_labels.csv")
+    def __init__(self, image_list, data_dir, csv_file, transform=None):
+        """
+        Args:
+            image_list: List of image filenames (e.g., ['00000001_000.png', ...])
+            data_dir: Path to data directory containing images_001, images_002, etc.
+            csv_file: Path to Data_Entry_2017.csv
+            transform: Optional image transformations
+        """
+        self.image_list = image_list
+        self.data_dir = data_dir
+        self.transform = transform
 
-    if not os.path.exists(images_dir):
-        raise RuntimeError(f"CHEST images directory not found: {images_dir}")
-    if not os.path.exists(labels_csv):
-        raise RuntimeError(f"CHEST labels CSV not found: {labels_csv}")
+        # Load all labels from CSV
+        self.labels = {}
+        with open(csv_file, "r") as f:
+            lines = f.readlines()[1:]  # Skip header
+            for line in lines:
+                parts = line.strip().split(",")
+                if len(parts) > 1:
+                    img_name = parts[0]
+                    finding_labels = parts[1]
+                    self.labels[img_name] = finding_labels
 
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((CHEST_IMAGE_SIZE, CHEST_IMAGE_SIZE)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
+        # All possible disease classes
+        self.all_diseases = [
+            "Atelectasis",
+            "Cardiomegaly",
+            "Effusion",
+            "Infiltration",
+            "Mass",
+            "Nodule",
+            "Pneumonia",
+            "Pneumothorax",
+            "Consolidation",
+            "Edema",
+            "Emphysema",
+            "Fibrosis",
+            "Pleural_Thickening",
+            "Hernia",
+            "No Finding",
         ]
-    )
+        self.disease_to_idx = {disease: idx for idx, disease in enumerate(self.all_diseases)}
 
-    eval_transform = transforms.Compose(
-        [
-            transforms.Resize((CHEST_IMAGE_SIZE, CHEST_IMAGE_SIZE)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ]
-    )
+    def __len__(self):
+        return len(self.image_list)
 
-    records = []
-    label_set = set()
-    with open(labels_csv, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            image_name = row["Image Index"].strip()
-            finding_labels = [
-                x.strip() for x in row["Finding Labels"].split("|") if x.strip()
-            ]
-            image_path = os.path.join(images_dir, image_name)
-            if not os.path.exists(image_path):
-                continue
-            records.append((image_path, finding_labels))
-            label_set.update(finding_labels)
+    def __getitem__(self, idx):
+        img_name = self.image_list[idx]
 
-    if len(records) == 0:
-        raise RuntimeError("No valid CHEST samples found from sample_labels.csv")
+        # Prefer the offline preprocessed images when they are available.
+        from PIL import Image
 
-    chest_label_names = sorted(label_set)
-    label_to_idx = {name: i for i, name in enumerate(chest_label_names)}
-    print(f"CHEST labels ({len(chest_label_names)}): {chest_label_names}")
-
-    class ChestMultiLabelDataset(Dataset):
-        def __init__(self, samples, transform):
-            self.samples = samples
-            self.transform = transform
-
-        def __len__(self):
-            return len(self.samples)
-
-        def __getitem__(self, idx):
-            image_path, labels = self.samples[idx]
+        preprocessed_dir = os.path.join(self.data_dir, "preprocessed_224x224")
+        if os.path.exists(preprocessed_dir):
+            preprocessed_path = os.path.join(preprocessed_dir, img_name)
+            if os.path.exists(preprocessed_path):
+                image = Image.open(preprocessed_path).convert("L")
+            else:
+                image_path = self._find_original_image(img_name)
+                image = Image.open(image_path).convert("L")
+                image = image.resize((224, 224), Image.Resampling.LANCZOS)
+        else:
+            image_path = self._find_original_image(img_name)
             image = Image.open(image_path).convert("L")
-            if self.transform is not None:
-                image = self.transform(image)
-            target = torch.zeros(len(label_to_idx), dtype=torch.float32)
-            for label_name in labels:
-                target[label_to_idx[label_name]] = 1.0
-            return image, target
+            image = image.resize((224, 224), Image.Resampling.LANCZOS)
 
-    eval_dataset = ChestMultiLabelDataset(records, transform=eval_transform)
-    train_dataset = ChestMultiLabelDataset(records, transform=train_transform)
+        # Get labels
+        finding_str = self.labels.get(img_name, "No Finding")
+        diseases = [d.strip() for d in finding_str.split("|")]
 
-    total_len = len(eval_dataset)
-    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+        # Create multi-hot label vector
+        label = torch.zeros(len(self.all_diseases), dtype=torch.float32)
+        for disease in diseases:
+            if disease in self.disease_to_idx:
+                label[self.disease_to_idx[disease]] = 1.0
 
-    train_subset = Subset(train_dataset, train_idx)
-    val_subset = Subset(eval_dataset, val_idx)
-    test_subset = Subset(eval_dataset, test_idx)
+        # Apply transforms
+        if self.transform:
+            image = self.transform(image)
+        else:
+            image = transforms.ToTensor()(image)
 
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-    val_loader = DataLoader(
-        val_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-    test_loader = DataLoader(
-        test_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
+        return image, label
 
-    validate_loader_preprocessing(train_loader, "CHEST", stage="training")
-    validate_loader_preprocessing(test_loader, "CHEST", stage="training")
-
-    return train_loader, val_loader, test_loader, len(chest_label_names), 1
+    def _find_original_image(self, img_name):
+        for i in range(1, 13):
+            potential_path = os.path.join(self.data_dir, f"images_{i:03d}", "images", img_name)
+            if os.path.exists(potential_path):
+                return potential_path
+        raise FileNotFoundError(f"Image {img_name} not found in any images_xxx/images directory")
 
 
-def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
-    base_root = os.path.join(DATA_MULTI_CANCER_DIR, "Multi Cancer", "Multi Cancer")
-    cancer_root = os.path.join(base_root, cancer_folder)
+def setup_NIH_Chest(batch_size: int = 16):
+    """
+    Prepare NIH Chest X-ray loaders from the provided train_val_list.txt and test_list.txt.
 
-    if not os.path.exists(cancer_root):
-        raise RuntimeError(f"Multi-Cancer folder not found: {cancer_root}")
+    Expected layout:
+        <project_root>/data/NIH-CHEST/images_001/images/...
+        <project_root>/data/NIH-CHEST/images_002/images/...
+        ...
+        <project_root>/data/NIH-CHEST/images_012/images/...
+        <project_root>/data/NIH-CHEST/train_val_list.txt
+        <project_root>/data/NIH-CHEST/test_list.txt
+        <project_root>/data/NIH-CHEST/Data_Entry_2017.csv
+    """
 
+    global train_loader, val_loader, test_loader
+
+    # Read split lists
+    train_val_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "train_val_list.txt")
+    test_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "test_list.txt")
+    csv_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "Data_Entry_2017.csv")
+
+    with open(train_val_file, "r") as f:
+        train_val_images = [line.strip() for line in f.readlines()]
+
+    with open(test_file, "r") as f:
+        test_images = [line.strip() for line in f.readlines()]
+
+    # Split train_val into train and validation (80/10 split)
+    num_train_val = len(train_val_images)
+    train_size = int(0.8 * num_train_val)
+
+    gen = torch.Generator().manual_seed(42)
+    perm = torch.randperm(num_train_val, generator=gen).tolist()
+
+    train_indices = perm[:train_size]
+    val_indices = perm[train_size:]
+
+    train_images = [train_val_images[i] for i in train_indices]
+    val_images = [train_val_images[i] for i in val_indices]
+
+    # Define transforms
     train_transform = transforms.Compose(
         [
             transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(10),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            transforms.Normalize((0.485,), (0.229,)),
         ]
     )
 
@@ -595,112 +702,59 @@ def _setup_multi_cancer_folder(cancer_folder: str, batch_size: int = 64):
         [
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            transforms.Normalize((0.485,), (0.229,)),
         ]
     )
 
-    eval_dataset = datasets.ImageFolder(root=cancer_root, transform=eval_transform)
-    train_dataset = datasets.ImageFolder(root=cancer_root, transform=train_transform)
+    # Create datasets
+    train_dataset = NIHChestDataset(
+        train_images,
+        DATA_NIH_CHEST_XRAY_DIR,
+        csv_file,
+        transform=train_transform,
+    )
 
-    total_len = len(eval_dataset)
-    train_idx, val_idx, test_idx = _deterministic_split_indices(total_len, train_frac=0.8, val_frac=0.1, seed=42)
+    val_dataset = NIHChestDataset(
+        val_images,
+        DATA_NIH_CHEST_XRAY_DIR,
+        csv_file,
+        transform=eval_transform,
+    )
 
-    train_subset = Subset(train_dataset, train_idx)
-    val_subset = Subset(eval_dataset, val_idx)
-    test_subset = Subset(eval_dataset, test_idx)
+    test_dataset = NIHChestDataset(
+        test_images,
+        DATA_NIH_CHEST_XRAY_DIR,
+        csv_file,
+        transform=eval_transform,
+    )
 
+    # Create loaders
     train_loader = DataLoader(
-        train_subset,
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
     )
+
     val_loader = DataLoader(
-        val_subset,
+        val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
     )
+
     test_loader = DataLoader(
-        test_subset,
+        test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
     )
 
-    validate_loader_preprocessing(train_loader, "Multi-Cancer", stage="training")
-    validate_loader_preprocessing(test_loader, "Multi-Cancer", stage="training")
-
-    return (
-        train_loader,
-        val_loader,
-        test_loader,
-        len(eval_dataset.classes),
-        3,
-        eval_dataset.classes,
-    )
-
-
-def setup_Multi_Cancer_Brain(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Brain Cancer", batch_size)
-
-
-def setup_Multi_Cancer_Breast(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Breast Cancer", batch_size)
-
-
-def setup_Multi_Cancer_Cervical(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Cervical Cancer", batch_size)
-
-
-def setup_Multi_Cancer_Kidney(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Kidney Cancer", batch_size)
-
-
-def setup_Multi_Cancer_Lung_Colon(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Lung and Colon Cancer", batch_size)
-
-
-def setup_Multi_Cancer_Lymphoma(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Lymphoma", batch_size)
-
-
-def setup_Multi_Cancer_Oral(batch_size: int = 64):
-    return _setup_multi_cancer_folder("Oral Cancer", batch_size)
-
-
-def setup_Multi_Cancer(batch_size: int = 64):
-    return [
-        ("Brain Cancer", setup_Multi_Cancer_Brain(batch_size)),
-        ("Breast Cancer", setup_Multi_Cancer_Breast(batch_size)),
-        ("Cervical Cancer", setup_Multi_Cancer_Cervical(batch_size)),
-        ("Kidney Cancer", setup_Multi_Cancer_Kidney(batch_size)),
-        ("Lung and Colon Cancer", setup_Multi_Cancer_Lung_Colon(batch_size)),
-        ("Lymphoma", setup_Multi_Cancer_Lymphoma(batch_size)),
-        ("Oral Cancer", setup_Multi_Cancer_Oral(batch_size)),
-    ]
-
-
-def _resolve_multi_cancer_target(train_data: str):
-    """Map CLI train_data to a single Multi-Cancer setup target."""
-
-    key = train_data.strip().upper().replace("_", "-").replace(" ", "-")
-    target_map = {
-        "BRAIN-CANCER": ("Brain Cancer", setup_Multi_Cancer_Brain),
-        "BREAST-CANCER": ("Breast Cancer", setup_Multi_Cancer_Breast),
-        "CERVICAL-CANCER": ("Cervical Cancer", setup_Multi_Cancer_Cervical),
-        "KIDNEY-CANCER": ("Kidney Cancer", setup_Multi_Cancer_Kidney),
-        "LUNG-AND-COLON-CANCER": (
-            "Lung and Colon Cancer",
-            setup_Multi_Cancer_Lung_Colon,
-        ),
-        "LYMPHOMA-CANCER": ("Lymphoma", setup_Multi_Cancer_Lymphoma),
-        "ORAL-CANCER": ("Oral Cancer", setup_Multi_Cancer_Oral),
-    }
-    return target_map.get(key)
+    validate_loader_preprocessing(train_loader, "NIH-CHEST", stage="training")
+    validate_loader_preprocessing(test_loader, "NIH-CHEST", stage="training")
 
 
 def _train_current_dataset(num_epochs: int, best_model_path: str):
@@ -771,43 +825,70 @@ def _train_current_dataset(num_epochs: int, best_model_path: str):
 # -----------------------------
 # Evaluation function
 # -----------------------------
-def evaluate(model, dataloader, criterion):
+def evaluate(model, dataloader, criterion, is_multilabel=False, is_medmnist=False):
     model.eval()
     total_loss = 0.0
-    correct = 0
-    total = 0
+    all_targets, all_outputs = [], []
+    correct, total = 0, 0
 
     with torch.no_grad():
         for images, labels in dataloader:
             images, labels = images.to(device), labels.to(device)
 
+            if not is_multilabel:
+                if labels.dim() > 1:
+                    labels = labels.squeeze(-1)
+                    if labels.dim() > 1:
+                        labels = labels.argmax(dim=1)
+                labels = labels.long()
+
             outputs = model(images)
             loss = criterion(outputs, labels)
-
             total_loss += loss.item() * images.size(0)
-            if labels.dim() > 1:
-                preds = (torch.sigmoid(outputs) >= 0.5).float()
+
+            if is_multilabel:
+                all_targets.append(labels.cpu().numpy())
+                all_outputs.append(torch.sigmoid(outputs).cpu().numpy())
+            elif is_medmnist:
+                # 1. MedMNIST: Capture Softmax for Multi-class AUC
+                all_targets.append(labels.cpu().numpy())
+                all_outputs.append(torch.softmax(outputs, dim=1).cpu().numpy())
+                # 2. MedMNIST: Capture Argmax for Accuracy
+                preds = outputs.argmax(dim=1)
                 correct += (preds == labels).sum().item()
-                total += labels.numel()
+                total += labels.size(0)
             else:
                 preds = outputs.argmax(dim=1)
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
 
-    avg_loss = total_loss / total
-    acc = 100.0 * correct / total
-    return avg_loss, acc
+    avg_loss = total_loss / len(dataloader.dataset)
+
+    if is_multilabel:
+        all_targets = np.vstack(all_targets)
+        all_outputs = np.vstack(all_outputs)
+        metric_score = roc_auc_score(all_targets, all_outputs, average="macro")
+    elif is_medmnist:
+        all_targets = np.concatenate(all_targets)
+        all_outputs = np.vstack(all_outputs)
+        # MUST use multi_class="ovr" for single-label multi-class AUC
+        auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / total
+        metric_score = (auc, acc) # Return a tuple of both metrics
+    else:
+        metric_score = 100.0 * correct / total
+
+    return avg_loss, metric_score
 
 
 # -----------------------------
 # Training loop with best model saving
 # -----------------------------
 def main(args: argparse.Namespace):
-    global model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader, is_multilabel
+    global model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader
 
     best_val_acc = 0.0
     num_epochs = 10
-    is_multilabel = False
 
     if args.data_dir == DATA_MNIST_DIR:
         best_model_path = "best_resnet18_mnist.pth"
@@ -818,6 +899,8 @@ def main(args: argparse.Namespace):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
+        is_multilabel = False
+        is_medmnist = False
 
     elif args.data_dir == DATA_CIFAR10_DIR:
         best_model_path = "best_resnet18_cifar10.pth"
@@ -829,10 +912,12 @@ def main(args: argparse.Namespace):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
+        is_multilabel = False
+        is_medmnist = False
 
     elif args.data_dir == DATA_BRAIN_MRI_DIR:
         best_model_path = "best_resnet18_brain_mri.pth"
-        num_epochs = 50
+        num_epochs = 30
 
         train_dataset = setup_Brain_MRI(args.batch_size)
 
@@ -854,134 +939,54 @@ def main(args: argparse.Namespace):
             factor=0.5,
             patience=3,
         )
+        is_multilabel = False
+        is_medmnist = False
 
-    elif args.data_dir == DATA_CHEST_DIR:
-        best_model_path = "best_resnet18_chest.pth"
-        num_epochs = 50
+    elif args.data_dir == DATA_NIH_CHEST_XRAY_DIR:
+        best_model_path = "best_resnet18_NIH_Chest_XRay.pth"
+        num_epochs = 30
+        train_dataset = setup_NIH_Chest(args.batch_size) 
+        model = ResNet18(num_classes=15, in_channels=args.in_channels).to(device)
 
-        # CHEST can still trigger CUDA launch failures on smaller GPUs with large batches.
-        chest_batch_size = args.batch_size
-        if torch.cuda.is_available() and chest_batch_size > 4:
-            print(
-                f"Reducing CHEST batch size from {chest_batch_size} to 4 to avoid CUDA launch failures."
-            )
-            chest_batch_size = 4
-
-        train_loader, val_loader, test_loader, num_classes, in_channels = setup_CHEST(
-            chest_batch_size
-        )
-
-        model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
+        # Multi-label uses BCEWithLogitsLoss, not CrossEntropy
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=args.learning_rate,
-            weight_decay=1e-4,
-        )
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=0.5,
-            patience=3,
-        )
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
         is_multilabel = True
+        is_medmnist = False
 
-    elif args.data_dir == DATA_MULTI_CANCER_DIR:
-        num_epochs = 50
-        # Multi-Cancer uses 224x224 RGB images; large batches often OOM on 6GB GPUs.
-        multi_cancer_batch_size = args.batch_size
-        if torch.cuda.is_available() and multi_cancer_batch_size > 4:
-            print(
-                f"Reducing Multi-Cancer batch size from {multi_cancer_batch_size} to 4 to avoid CUDA OOM."
-            )
-            multi_cancer_batch_size = 4
+    elif args.data_dir == DATA_OCTMNIST_DIR:
+        best_model_path = "best_resnet18_octmnist.pth"
+        num_epochs = 30
+        setup_OCTMNIST(args.batch_size)
+        model = ResNet18(num_classes=4, in_channels=args.in_channels).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
 
-        single_multi_target = getattr(args, "multi_cancer_target", None)
-        if single_multi_target:
-            resolved = _resolve_multi_cancer_target(single_multi_target)
-            if resolved is None:
-                raise ValueError(
-                    f"Unknown Multi-Cancer target: {single_multi_target}"
-                )
+    elif args.data_dir == DATA_BLOODMNIST_DIR:
+        best_model_path = "best_resnet18_bloodmnist.pth"
+        num_epochs = 30
+        setup_BloodMNIST(args.batch_size)
+        model = ResNet18(num_classes=8, in_channels=3).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
 
-            cancer_name, setup_fn = resolved
-            print(f"\n=== Training Multi-Cancer dataset: {cancer_name} ===")
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            (
-                train_loader,
-                val_loader,
-                test_loader,
-                num_classes,
-                in_channels,
-                class_names,
-            ) = setup_fn(multi_cancer_batch_size)
-
-            print(f"Classes ({num_classes}): {class_names}")
-
-            model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(device)
-            criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode="min",
-                factor=0.5,
-                patience=3,
-            )
-
-            safe_name = cancer_name.lower().replace(" ", "_").replace("&", "and")
-            safe_name = safe_name.replace("__", "_")
-            best_model_path = f"best_resnet18_multi_{safe_name}.pth"
-
-            _train_current_dataset(num_epochs, best_model_path)
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            return
-
-        multi_cancer_runs = setup_Multi_Cancer(multi_cancer_batch_size)
-
-        for cancer_name, cancer_setup in multi_cancer_runs:
-            print(f"\n=== Training Multi-Cancer dataset: {cancer_name} ===")
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            (
-                train_loader,
-                val_loader,
-                test_loader,
-                num_classes,
-                in_channels,
-                class_names,
-            ) = cancer_setup
-
-            print(f"Classes ({num_classes}): {class_names}")
-
-            model = ResNet18(num_classes=num_classes, in_channels=in_channels).to(
-                device
-            )
-            criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode="min",
-                factor=0.5,
-                patience=3,
-            )
-
-            safe_name = cancer_name.lower().replace(" ", "_").replace("&", "and")
-            safe_name = safe_name.replace("__", "_")
-            best_model_path = f"best_resnet18_multi_{safe_name}.pth"
-
-            _train_current_dataset(num_epochs, best_model_path)
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        return
+    elif args.data_dir == DATA_ORGANAMNIST_DIR:
+        best_model_path = "best_resnet18_organamnist.pth"
+        num_epochs = 30
+        setup_OrganAMNIST(args.batch_size)
+        model = ResNet18(num_classes=11, in_channels=args.in_channels).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
 
     else:
         print(f"Training using default data directory: {DATA_MNIST_DIR}")
@@ -992,15 +997,26 @@ def main(args: argparse.Namespace):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
+        is_multilabel = False
 
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
+
+        all_targets = []
+        all_outputs = []
         correct = 0
         total = 0
 
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
+
+            if not is_multilabel:
+                if labels.dim() > 1:
+                    labels = labels.squeeze(-1)
+                    if labels.dim() > 1:
+                        labels = labels.argmax(dim=1)
+                labels = labels.long()
 
             optimizer.zero_grad()
             outputs = model(images)
@@ -1009,41 +1025,64 @@ def main(args: argparse.Namespace):
             optimizer.step()
 
             running_loss += loss.item() * images.size(0)
-            if labels.dim() > 1:
-                preds = (torch.sigmoid(outputs) >= 0.5).float()
-                correct += (preds == labels).sum().item()
-                total += labels.numel()
+
+            if is_multilabel:
+                all_targets.append(labels.detach().cpu().numpy())
+                all_outputs.append(torch.sigmoid(outputs).detach().cpu().numpy())
             else:
                 preds = outputs.argmax(dim=1)
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
 
-        train_loss = running_loss / total
-        train_acc = 100.0 * correct / total
+        train_loss = running_loss / len(train_loader.dataset)
 
-        val_loss, val_acc = evaluate(model, val_loader, criterion)
-
-        if scheduler is not None:
-            scheduler.step(val_loss)
-            current_lr = optimizer.param_groups[0]["lr"]
-            lr_msg = f" | LR: {current_lr:.6f}"
+        if is_multilabel:
+            all_targets = np.vstack(all_targets)
+            all_outputs = np.vstack(all_outputs)
+            train_metric = roc_auc_score(all_targets, all_outputs, average="macro")
+            metric_name = "Mean AUROC"
         else:
-            lr_msg = ""
+            train_metric = 100.0 * correct / total
+            metric_name = "Acc"
 
-        print(
-            f"Epoch [{epoch+1}/{num_epochs}] | "
-            f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
-            f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%"
-            f"{lr_msg}"
-        )
+        # 1. Pass BOTH flags to evaluate
+        val_loss, val_metric = evaluate(model, val_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), best_model_path)
-            print(f"Saved best model to {best_model_path}")
-
-        if torch.cuda.is_available() and args.data_dir == DATA_CHEST_DIR:
-            torch.cuda.empty_cache()
+        # 2. Dynamic Print & Save Logic
+        if is_medmnist:
+            val_auc, val_acc = val_metric
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}] | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val ACC: {val_acc:.2f}%"
+            )
+            # Save based on AUROC for MedMNIST
+            if val_auc > best_val_acc:
+                best_val_acc = val_auc
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
+                
+        elif is_multilabel:
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}] | "
+                f"Train Loss: {train_loss:.4f}, Train AUROC: {train_metric:.4f} | "
+                f"Val Loss: {val_loss:.4f}, Val AUROC: {val_metric:.4f}"
+            )
+            if val_metric > best_val_acc:
+                best_val_acc = val_metric
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
+                
+        else:
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}] | "
+                f"Train Loss: {train_loss:.4f}, Train Acc: {train_metric:.2f}% | "
+                f"Val Loss: {val_loss:.4f}, Val Acc: {val_metric:.2f}%"
+            )
+            if val_metric > best_val_acc:
+                best_val_acc = val_metric
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved best model to {best_model_path}")
 
     # -----------------------------
     # Load best model and test
@@ -1051,21 +1090,23 @@ def main(args: argparse.Namespace):
     model.load_state_dict(torch.load(best_model_path, map_location=device))
     model.to(device)
 
-    test_loss, test_acc = evaluate(model, test_loader, criterion)
-    print(f"Best Validation Accuracy: {best_val_acc:.2f}%")
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+    # 1. Pass both flags to the final test evaluation
+    test_loss, test_metric = evaluate(model, test_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
+
+    # 2. Dynamically format the print statements
+    if is_medmnist:
+        test_auc, test_acc = test_metric
+        print(f"Best Validation AUC: {best_val_acc:.4f}")
+        print(f"Test Loss: {test_loss:.4f}, Test AUC: {test_auc:.4f}, Test ACC: {test_acc:.2f}%")
+    elif is_multilabel:
+        print(f"Best Validation {metric_name}: {best_val_acc:.4f}")
+        print(f"Test Loss: {test_loss:.4f}, Test {metric_name}: {test_metric:.4f}")
+    else:
+        print(f"Best Validation {metric_name}: {best_val_acc:.2f}%")
+        print(f"Test Loss: {test_loss:.4f}, Test {metric_name}: {test_metric:.2f}%")
 
 
 def datasetDownloader(dataset_name: str):
-    def cleanup_chest_duplicates(chest_root: str):
-        primary_images = os.path.join(chest_root, "sample", "images")
-        duplicate_root = os.path.join(chest_root, "sample", "sample")
-        duplicate_images = os.path.join(duplicate_root, "images")
-
-        if os.path.exists(primary_images) and os.path.exists(duplicate_images):
-            print(f"Removing duplicated CHEST folder: {duplicate_root}")
-            shutil.rmtree(duplicate_root)
-
     if not os.path.exists(DATA_ROOT):
         os.makedirs(DATA_ROOT)
 
@@ -1083,6 +1124,14 @@ def datasetDownloader(dataset_name: str):
                 output_dir=DATA_BRAIN_MRI_DIR,
             )
 
+    if dataset_name == "NIH-CHEST":
+        if not os.path.exists(DATA_NIH_CHEST_XRAY_DIR):
+            print("Downloading NIH Chest X-Ray dataset from Kaggle...")
+            kagglehub.dataset_download(
+                "nih-chest-xrays/data",
+                output_dir=DATA_NIH_CHEST_XRAY_DIR,
+            )
+
     if dataset_name == "CIFAR10":
         cifar_root = DATA_ROOT
         cifar_folder = os.path.join(cifar_root, "cifar-10-batches-py")
@@ -1091,22 +1140,26 @@ def datasetDownloader(dataset_name: str):
             datasets.CIFAR10(root=cifar_root, train=True, download=True)
             datasets.CIFAR10(root=cifar_root, train=False, download=True)
 
-    if dataset_name == "CHEST":
-        chest_root = DATA_CHEST_DIR
-        if not os.path.exists(chest_root):
-            print("Downloading NIH Chest X-ray sample dataset...")
-            kagglehub.dataset_download("nih-chest-xrays/sample", output_dir=chest_root)
-            subprocess.run(f'cd "{DATA_CHEST_DIR}" && unzip "*.zip"', shell=True)
-        cleanup_chest_duplicates(chest_root)
+    if dataset_name == "OCTMNIST":
+        print("Downloading OCTMNIST dataset (MedMNIST)...")
+        os.makedirs(DATA_OCTMNIST_DIR, exist_ok=True)
+        OCTMNIST(split="train", download=True, root=DATA_OCTMNIST_DIR)
+        OCTMNIST(split="val", download=True, root=DATA_OCTMNIST_DIR)
+        OCTMNIST(split="test", download=True, root=DATA_OCTMNIST_DIR)
 
-    if dataset_name == "Multi-Cancer":
-        if not os.path.exists(DATA_MULTI_CANCER_DIR):
-            print("Downloading Multi-Cancer dataset...")
-            kagglehub.dataset_download(
-                "obulisainaren/multi-cancer",
-                output_dir=DATA_MULTI_CANCER_DIR,
-            )
-            subprocess.run(f'cd "{DATA_MULTI_CANCER_DIR}" && unzip "*.zip"', shell=True)
+    if dataset_name == "BloodMNIST":
+        print("Downloading BloodMNIST dataset (MedMNIST)...")
+        os.makedirs(DATA_BLOODMNIST_DIR, exist_ok=True)
+        BloodMNIST(split="train", download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+        BloodMNIST(split="val", download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+        BloodMNIST(split="test", download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+
+    if dataset_name == "OrganAMNIST":
+        print("Downloading OrganAMNIST dataset (MedMNIST)...")
+        os.makedirs(DATA_ORGANAMNIST_DIR, exist_ok=True)
+        OrganAMNIST(split="train", download=True, root=DATA_ORGANAMNIST_DIR)
+        OrganAMNIST(split="val", download=True, root=DATA_ORGANAMNIST_DIR)
+        OrganAMNIST(split="test", download=True, root=DATA_ORGANAMNIST_DIR)
 
 
 if __name__ == "__main__":
@@ -1127,11 +1180,7 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help=(
-            "Training data to use: MNIST, CIFAR10, Brain-MRI, CHEST, Multi-Cancer, "
-            "Brain-Cancer, Breast-Cancer, Cervical-Cancer, Kidney-Cancer, "
-            "Lung-And-Colon-Cancer, Lymphoma-Cancer, Oral-Cancer"
-        ),
+        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
     )
     parser.add_argument(
         "--in_channels",
@@ -1141,7 +1190,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    args.multi_cancer_target = None
 
     train_data_key = args.train_data.strip().upper().replace("_", "-").replace(" ", "-")
 
@@ -1154,18 +1202,22 @@ if __name__ == "__main__":
     elif train_data_key in ("CIFR10", "CIFAR10"):
         args.data_dir = DATA_CIFAR10_DIR
         datasetDownloader("CIFAR10")
-    elif train_data_key == "CHEST":
-        args.data_dir = DATA_CHEST_DIR
-        datasetDownloader("CHEST")
-    elif train_data_key == "MULTI-CANCER":
-        args.data_dir = DATA_MULTI_CANCER_DIR
-        datasetDownloader("Multi-Cancer")
-    elif _resolve_multi_cancer_target(args.train_data) is not None:
-        args.data_dir = DATA_MULTI_CANCER_DIR
-        args.multi_cancer_target = args.train_data
-        datasetDownloader("Multi-Cancer")
+    elif train_data_key == "NIH-CHEST":
+        args.data_dir = DATA_NIH_CHEST_XRAY_DIR
+        datasetDownloader("NIH-CHEST")
+    elif train_data_key == "OCTMNIST":
+        args.data_dir = DATA_OCTMNIST_DIR
+        datasetDownloader("OCTMNIST")
+    elif train_data_key == "BLOODMNIST":
+        args.data_dir = DATA_BLOODMNIST_DIR
+        datasetDownloader("BloodMNIST")
+    elif train_data_key == "ORGANAMNIST":
+        args.data_dir = DATA_ORGANAMNIST_DIR
+        datasetDownloader("OrganAMNIST")
     else:
-        print(f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}")
+        print(
+            f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}"
+        )
         args.data_dir = DATA_MNIST_DIR
 
     main(args)

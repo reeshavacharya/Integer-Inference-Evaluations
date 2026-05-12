@@ -10,14 +10,14 @@ from sklearn.metrics import roc_auc_score
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-RESNET_DIR = os.path.dirname(THIS_DIR)
+VGG_DIR = os.path.dirname(THIS_DIR)
 if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
-if RESNET_DIR not in sys.path:
-    sys.path.insert(1, RESNET_DIR)
+if VGG_DIR not in sys.path:
+    sys.path.insert(1, VGG_DIR)
 
-import resnet18 as train_mod
-from resnet18 import ResNet18
+import vgg19 as train_mod
+from vgg19 import VGG19
 
 from utils import (
     quantize_fixed_point,
@@ -26,7 +26,8 @@ from utils import (
     execute_and_shift_conv2d,
     execute_and_shift_linear,
     add_bias,
-    fixed_point_global_avg_pool2d,
+    fixed_point_adaptive_avg_pool2d,
+    fixed_point_max_pool2d,
 )
 
 
@@ -35,114 +36,10 @@ from utils import (
 # -----------------------------
 debug_trace = {"input": {}, "layers": [], "pooling": []}
 
-# MNIST-only integer trace (no floats) for inspecting quantized path
-INT_TRACE_ENABLED = False
-int_trace = {"input": {}, "layers": []}
-
 
 # -----------------------------
-# 1. Model Definition (mirror training ResNet18)
+# Helper Functions
 # -----------------------------
-
-
-class FloatAdd(nn.Module):
-    """A dummy module to make addition visible to calibration hooks."""
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x, y):
-        return x + y
-
-
-class BasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=False,
-        )
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu1 = nn.ReLU(inplace=True)
-
-        self.conv2 = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.bn2 = nn.BatchNorm2d(out_channels)
-
-        self.add = FloatAdd()
-        self.relu2 = nn.ReLU(inplace=True)
-
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=stride, bias=False
-                ),
-                nn.BatchNorm2d(out_channels),
-            )
-        else:
-            self.shortcut = nn.Identity()
-
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu1(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        skip = self.shortcut(x)
-        out = self.add(out, skip)
-
-        out = self.relu2(out)
-        return out
-
-
-class ResNet18Inference(nn.Module):
-    def __init__(self, num_classes=10, in_channels=3):
-        super(ResNet18Inference, self).__init__()
-        self.in_channels = 64
-        self.conv1 = nn.Conv2d(
-            in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-
-        self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1)
-        self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2)
-        self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
-        self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512, num_classes)
-
-    def _make_layer(self, block, out_channels, num_blocks, stride):
-        strides = [stride] + [1] * (num_blocks - 1)
-        layers = []
-        for stride in strides:
-            layers.append(block(self.in_channels, out_channels, stride))
-            self.in_channels = out_channels
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)
-
-        out = self.avgpool(out)
-        out = out.view(out.size(0), -1)
-        out = self.fc(out)
-        return out
-
 
 def _resolve_infer_config(infer_data: str):
     name = infer_data.upper()
@@ -151,8 +48,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "MNIST",
             "setup_fn": train_mod.setup_MNIST,
-            "model": ResNet18Inference(num_classes=10, in_channels=1),
-            "model_path": "best_resnet18_mnist.pth",
+            "model": VGG19(num_classes=10, in_channels=1),
+            "model_path": "best_vgg19_mnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -161,8 +58,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "CIFAR10",
             "setup_fn": train_mod.setup_CIFAR10,
-            "model": ResNet18Inference(num_classes=10, in_channels=3),
-            "model_path": "best_resnet18_cifar10.pth",
+            "model": VGG19(num_classes=10, in_channels=3),
+            "model_path": "best_vgg19_cifar10.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -171,8 +68,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "Brain-MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
-            "model": ResNet18Inference(num_classes=4, in_channels=1),
-            "model_path": "best_resnet18_brain_mri.pth",
+            "model": VGG19(num_classes=4, in_channels=1),
+            "model_path": "best_vgg19_brain_mri.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -181,8 +78,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "NIH-CHEST",
             "setup_fn": train_mod.setup_NIH_Chest,
-            "model": ResNet18Inference(num_classes=15, in_channels=1),
-            "model_path": "best_resnet18_NIH_Chest_XRay.pth",
+            "model": VGG19(num_classes=15, in_channels=1),
+            "model_path": "best_vgg19_NIH_Chest_XRay.pth",
             "is_multilabel": True,
             "eval_batch_size": 8,
         }
@@ -191,8 +88,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OCTMNIST",
             "setup_fn": train_mod.setup_OCTMNIST,
-            "model": ResNet18Inference(num_classes=4, in_channels=1),
-            "model_path": "best_resnet18_octmnist.pth",
+            "model": VGG19(num_classes=4, in_channels=1),
+            "model_path": "best_vgg19_octmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -201,8 +98,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "BloodMNIST",
             "setup_fn": train_mod.setup_BloodMNIST,
-            "model": ResNet18Inference(num_classes=8, in_channels=3),
-            "model_path": "best_resnet18_bloodmnist.pth",
+            "model": VGG19(num_classes=8, in_channels=3),
+            "model_path": "best_vgg19_bloodmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -211,8 +108,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OrganAMNIST",
             "setup_fn": train_mod.setup_OrganAMNIST,
-            "model": ResNet18Inference(num_classes=11, in_channels=1),
-            "model_path": "best_resnet18_organamnist.pth",
+            "model": VGG19(num_classes=11, in_channels=1),
+            "model_path": "best_vgg19_organamnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -300,24 +197,16 @@ def _evaluate_float_mean_auroc(model, loader, dataset_name: str):
 def _evaluate_fixed_point_mean_auroc(model, loader, dataset_name: str):
     all_targets = []
     all_outputs = []
+    
     # Identify single-label, multi-class MedMNIST datasets
     is_medmnist = "MNIST" in dataset_name.upper() and dataset_name.upper() != "MNIST"
 
     for images, labels in loader:
         q_x = quantize_fixed_point(images)
-
-        q_x = run_static_fixed_point_conv_block(
-            q_x, model.conv1, model.bn1, apply_relu=True
-        )
-
-        for stage in [model.layer1, model.layer2, model.layer3, model.layer4]:
-            for block in stage:
-                q_x = run_static_fixed_point_basic_block(q_x, block)
-
-        q_pooled = fixed_point_global_avg_pool2d(q_x)
+        q_x = run_fixed_point_features(q_x, model.features)
+        q_pooled = fixed_point_adaptive_avg_pool2d(q_x, output_size=(7, 7))
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
-
-        q_out, _, _ = run_static_fixed_point_fc(q_fc_in, model.fc)
+        q_out = run_fixed_point_classifier(q_fc_in, model.classifier)
         logits = dequantize_fixed_point(q_out)
 
         all_targets.append(labels.detach().cpu())
@@ -339,6 +228,7 @@ def _evaluate_fixed_point_mean_auroc(model, loader, dataset_name: str):
         
     print(f"[AUROC][{dataset_name}][fixed-point] Mean AUROC: {score:.4f}")
     return score
+
 
 def fold_conv_bn_eval(conv, bn):
     """Folds BatchNorm parameters into Conv2d weights and biases."""
@@ -367,39 +257,16 @@ def fold_conv_bn_eval(conv, bn):
 
 
 # -----------------------------
-# 4. Core Fixed-Point Inference Engine
+# Fixed-Point Inference Engine for VGG
 # -----------------------------
 
-
-def _get_layer_config(model: ResNet18Inference):
-    """Return conv/fc modules for calibration and integer inference.
-
-    We focus on top-level conv1 and the four residual stages plus the
-    final fully-connected layer.
-    """
-
-    return {
-        "conv1": model.conv1,
-        "layer1": model.layer1,
-        "layer2": model.layer2,
-        "layer3": model.layer3,
-        "layer4": model.layer4,
-        "fc": model.fc,
-    }
-
-
-def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
-    # Fold BN into Conv
+def run_fixed_point_conv_bn_relu(q_input, conv, bn, apply_relu=True):
+    """Run a Conv2d layer with folded BatchNorm in fixed-point."""
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
-
-    # Quantize Weights and Biases statically
     q_w = quantize_fixed_point(w_folded)
     q_bias = quantize_fixed_point(b_folded)
 
-    # Math
-    q_accum = execute_and_shift_conv2d(
-        q_input, q_w, stride=conv.stride[0], padding=conv.padding[0]
-    )
+    q_accum = execute_and_shift_conv2d(q_input, q_w, stride=1, padding=1)
     q_out = add_bias(q_accum, q_bias)
 
     if apply_relu:
@@ -408,32 +275,55 @@ def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
     return q_out
 
 
-def run_static_fixed_point_basic_block(q_x, block):
-    # 1. Main Branch
-    q_out1 = run_static_fixed_point_conv_block(
-        q_x, block.conv1, block.bn1, apply_relu=True
-    )
-    q_out2 = run_static_fixed_point_conv_block(
-        q_out1, block.conv2, block.bn2, apply_relu=False
-    )
+def run_fixed_point_features(q_x, features):
+    """Process VGG19 features (sequential conv, bn, relu, maxpool layers)."""
+    layers = list(features)
+    i = 0
+    
+    while i < len(layers):
+        layer = layers[i]
+    
+        if isinstance(layer, nn.Conv2d):
+            # Next layers are BN and ReLU
+            if i + 1 < len(layers) and isinstance(layers[i + 1], nn.BatchNorm2d):
+                bn_layer = layers[i + 1]
+                q_x = run_fixed_point_conv_bn_relu(q_x, layer, bn_layer, apply_relu=True)
+                i += 3  # Skip Conv, BN, and ReLU
+            else:
+                i += 1
+        elif isinstance(layer, nn.MaxPool2d):
+            q_x = fixed_point_max_pool2d(q_x, kernel_size=2, stride=2)
+            i += 1
+        else:
+            i += 1
+    
+    return q_x
 
-    # 2. Shortcut Branch
-    if isinstance(block.shortcut, nn.Identity):
-        q_short = q_x
-    else:
-        short_conv, short_bn = block.shortcut[0], block.shortcut[1]
-        q_short = run_static_fixed_point_conv_block(
-            q_x, short_conv, short_bn, apply_relu=False
-        )
 
-    # 3. Direct Addition (No alignment shifts required!)
-    q_added = torch.clamp(q_out2 + q_short, -9223372036854775808, 9223372036854775807)
+def run_fixed_point_classifier(q_x, classifier):
+    """Process VGG19 classifier (3 FC layers with dropout). Return output of last layer."""
+    # Extract the three FC layers from classifier
+    # classifier is: Linear, ReLU, Dropout, Linear, ReLU, Dropout, Linear
+    fc1 = classifier[0]
+    fc2 = classifier[3]
+    fc3 = classifier[6]
 
-    # 4. Final ReLU
-    return fixed_point_relu(q_added)
+    # First FC layer
+    q_x, _, _ = run_fixed_point_fc(q_x, fc1)
+    q_x = fixed_point_relu(q_x)
+
+    # Second FC layer
+    q_x, _, _ = run_fixed_point_fc(q_x, fc2)
+    q_x = fixed_point_relu(q_x)
+
+    # Third FC layer (output layer, no ReLU)
+    q_out, max_bits, max_rem = run_fixed_point_fc(q_x, fc3)
+
+    return q_out
 
 
-def run_static_fixed_point_fc(q_input, fc):
+def run_fixed_point_fc(q_input, fc):
+    """Run a fully-connected layer in fixed-point."""
     q_w = quantize_fixed_point(fc.weight.detach())
     q_bias = quantize_fixed_point(fc.bias.detach())
 
@@ -447,19 +337,13 @@ def run_static_fixed_point_fc(q_input, fc):
 # 5. Main Execution
 # -----------------------------
 def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool = True):
-    print("--- Starting ResNet18 Quantized Inference Pipeline ---")
+    print("--- Starting VGG19 Quantized Inference Pipeline ---")
 
     cfg = _resolve_infer_config(infer_data)
     name = infer_data.upper()
     dataset_display = cfg["display"]
     model = cfg["model"]
     model_path = cfg["model_path"]
-
-    global INT_TRACE_ENABLED, int_trace
-    INT_TRACE_ENABLED = name == "MNIST"
-    if INT_TRACE_ENABLED:
-        # reset trace for this run
-        int_trace = {"input": {}, "layers": []}
 
     print(f"[0] Inference target: {dataset_display}")
     print(f"[0] Loading model weights from: {model_path}")
@@ -492,7 +376,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool
             )
 
         print("\n" + "=" * 40)
-        print(" RESNET18 INFERENCE SUMMARY ")
+        print(" VGG19 INFERENCE SUMMARY ")
         print("=" * 40)
         print(f"Dataset:                  {dataset_display}")
         if run_floating_point:
@@ -520,7 +404,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool
 
     if not run_fixed_point:
         print("\n" + "=" * 40)
-        print(" RESNET18 INFERENCE SUMMARY ")
+        print(" VGG19 INFERENCE SUMMARY ")
         print("=" * 40)
         print(f"Dataset:                  {dataset_display}")
         print(f"True Label:               {true_label_text}")
@@ -533,32 +417,23 @@ def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool
 
     print("\n[3] Executing Static 64-Bit Fixed-Point Inference...")
 
-    # Initial conv1
-    q_x = run_static_fixed_point_conv_block(
-        q_x, model.conv1, model.bn1, apply_relu=True
-    )
+    # Process VGG features (Conv, BN, ReLU, MaxPool)
+    q_x = run_fixed_point_features(q_x, model.features)
 
-    # Traverse all residual blocks
-    for layer_idx, stage in enumerate(
-        [model.layer1, model.layer2, model.layer3, model.layer4], 1
-    ):
-        for block_idx, block in enumerate(stage):
-            q_x = run_static_fixed_point_basic_block(q_x, block)
-
-    # Global Average Pooling
-    q_pooled = fixed_point_global_avg_pool2d(q_x)
+    # Adaptive Average Pooling to (7, 7)
+    q_pooled = fixed_point_adaptive_avg_pool2d(q_x, output_size=(7, 7))
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
-    # Run Final FC Layer
-    q_out, max_bits_used, max_remainder = run_static_fixed_point_fc(q_fc_in, model.fc)
+    # Process classifier (3 FC layers)
+    q_out = run_fixed_point_classifier(q_fc_in, model.classifier)
 
-    # Dequantize final output
+    # Dequantize output
     dequantized_logits = dequantize_fixed_point(q_out)
     int_pred = dequantized_logits.argmax(dim=1).item()
 
     # Logging
     print("\n" + "=" * 40)
-    print(" RESNET18 INFERENCE SUMMARY ")
+    print(" VGG19 INFERENCE SUMMARY ")
     print("=" * 40)
     print(f"Dataset:                      {dataset_display}")
     print(f"True Label:                   {true_label_text}")
@@ -577,46 +452,23 @@ def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool
             )
 
     # ZK Logging Block
-    print("\n--- ZK Cryptographic Fixed-Point Stats (Final Layer) ---")
+    print("\n--- ZK Cryptographic Fixed-Point Stats ---")
     print(f"Architecture Format:         Q31.32 (64-bit Static Container)")
-    print(
-        f"Accumulator Max Bit-Length:  {max_bits_used} bits (Threshold: 63 for PyTorch, ~254 for ZK Field)"
-    )
-
-    headroom_used = (max_bits_used / 63.0) * 100 if max_bits_used else 0
-    print(f"PyTorch Container Headroom:  {headroom_used:.1f}% Capacity Reached")
-    print(
-        f"Max Truncation Remainder:    {max_remainder:.0f} (Precision dropped during >> 32 shift)"
-    )
+    print(f"Model:                       VGG19")
 
     print("\n--- Final Logit Sanity Check ---")
     print(f"Raw 64-bit Integer Max:      {q_out.max().item()}")
     print(f"Dequantized Float Max:       {dequantized_logits.max().item():.4f}")
     print("=" * 56)
 
-    # Save MNIST integer-only layer outputs (no floats) if enabled
-    # if INT_TRACE_ENABLED:
-    #     trace_path = f"mnist_integer_inference_trace.json"
-    #     with open(trace_path, "w") as f:
-    #         json.dump(int_trace, f, indent=2)
-    #     print(f"Saved MNIST integer trace to {trace_path}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--NIH-CHEST",
-        dest="nih_chest",
-        action="store_true",
-        help="Run inference on the NIH-CHEST model using the custom test split",
-    )
-    parser.add_argument(
         "--infer",
         type=str,
         default="CIFAR10",
-        help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
-        ),
+        help=("Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -630,9 +482,6 @@ if __name__ == "__main__":
         help="Run floating-point inference only",
     )
     args = parser.parse_args()
-
-    if args.nih_chest:
-        args.infer = "NIH-CHEST"
 
     run_floating_point = True
     run_fixed_point = True
