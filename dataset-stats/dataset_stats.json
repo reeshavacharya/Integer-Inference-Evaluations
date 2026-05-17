@@ -1,0 +1,37 @@
+{
+  "MNIST": {
+    "kurtosis": 3.5189950466156006,
+    "shannon_entropy": 1.6432012629884523,
+    "laplacian_variance": 10688.153091908322
+  },
+  "CIFAR10": {
+    "kurtosis": -0.27541908621788025,
+    "shannon_entropy": 8.554744820352933,
+    "laplacian_variance": 2890.6981538066866
+  },
+  "Brain-MRI": {
+    "kurtosis": -0.9979940056800842,
+    "shannon_entropy": 5.670265294397362,
+    "laplacian_variance": 7404.798897588244
+  },
+  "NIH-CHEST": {
+    "kurtosis": -0.2530662715435028,
+    "shannon_entropy": 7.382657702739165,
+    "laplacian_variance": 266.1766320892836
+  },
+  "OCTMNIST": {
+    "kurtosis": 2.9642343521118164,
+    "shannon_entropy": 6.09069400891141,
+    "laplacian_variance": 3997.2842804625675
+  },
+  "OrganAMNIST": {
+    "kurtosis": -0.4397108256816864,
+    "shannon_entropy": 6.310451260317958,
+    "laplacian_variance": 17644.665592487505
+  },
+  "BloodMNIST": {
+    "kurtosis": 0.38641461730003357,
+    "shannon_entropy": 7.168531204748632,
+    "laplacian_variance": 1814.1864282362817
+  }
+}

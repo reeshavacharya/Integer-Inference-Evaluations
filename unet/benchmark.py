@@ -120,7 +120,7 @@ def _ensure_checkpoint(dataset_name: str):
         )
 
 
-def _get_test_loader(dataset_name: str, batch_size: int = 4):
+def _get_test_loader(dataset_name: str, batch_size: int = 64):
     _, _, test_loader = train_mod.setup_data(
         train_data=dataset_name,
         batch_size=batch_size,
