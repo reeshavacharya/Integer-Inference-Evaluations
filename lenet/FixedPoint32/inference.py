@@ -1,0 +1,453 @@
+import argparse
+import json
+import os
+import random
+import sys
+
+import torch
+import torch.nn as nn
+
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+LENET_DIR = os.path.dirname(THIS_DIR)
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
+if LENET_DIR not in sys.path:
+    sys.path.insert(0, LENET_DIR)
+
+import lenet5 as train_mod
+from lenet5 import MedicalLeNet
+from utils import (
+    add_bias,
+    dequantize_fixed_point,
+    execute_and_shift_conv2d,
+    execute_and_shift_linear,
+    fixed_point_relu,
+    quantize_fixed_point,
+)
+
+
+# -----------------------------
+# Debug / logging storage
+# -----------------------------
+debug_trace = {"input": {}, "layers": [], "pooling": []}
+fixed_point_log = {"input": {}, "layers": []}
+
+
+# -----------------------------
+# 1. Model Definition
+# -----------------------------
+class LeNet5(nn.Module):
+    def __init__(self, num_classes: int = 10, in_channels: int = 1):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 6, kernel_size=5, stride=1),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5, stride=1),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(16 * 4 * 4, 120),
+            nn.ReLU(),
+            nn.Linear(120, 84),
+            nn.ReLU(),
+            nn.Linear(84, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+# -----------------------------
+# 2. Dataset/Model Resolution
+# -----------------------------
+def _resolve_infer_config(infer_data: str):
+    name = infer_data.upper()
+
+    if name == "MNIST":
+        return {
+            "display": "MNIST",
+            "setup_fn": train_mod.setup_MNIST,
+            "model": LeNet5(num_classes=10, in_channels=1),
+            "model_path": "best_lenet5_mnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name in ("CIFR10", "CIFAR10"):
+        return {
+            "display": "CIFAR10",
+            "setup_fn": train_mod.setup_CIFAR10,
+            "model": LeNet5(num_classes=10, in_channels=3),
+            "model_path": "best_lenet5_cifar10.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "BRAIN-MRI":
+        return {
+            "display": "Brain-MRI",
+            "setup_fn": train_mod.setup_Brain_MRI,
+            "model": MedicalLeNet(num_classes=4, in_channels=1),
+            "model_path": "best_lenet5_brain_mri.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "NIH-CHEST":
+        return {
+            "display": "NIH-CHEST",
+            "setup_fn": train_mod.setup_NIH_Chest,
+            "model": LeNet5(num_classes=15, in_channels=1),
+            "model_path": "best_lenet5_NIH_Chest_XRay.pth",
+            "is_multilabel": True,
+            "eval_batch_size": 8,
+        }
+
+    if name == "OCTMNIST":
+        return {
+            "display": "OCTMNIST",
+            "setup_fn": train_mod.setup_OCTMNIST,
+            "model": LeNet5(num_classes=4, in_channels=1),
+            "model_path": "best_lenet5_octmnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "BLOODMNIST":
+        return {
+            "display": "BloodMNIST",
+            "setup_fn": train_mod.setup_BloodMNIST,
+            "model": LeNet5(num_classes=8, in_channels=3),
+            "model_path": "best_lenet5_bloodmnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "ORGANAMNIST":
+        return {
+            "display": "OrganAMNIST",
+            "setup_fn": train_mod.setup_OrganAMNIST,
+            "model": LeNet5(num_classes=11, in_channels=1),
+            "model_path": "best_lenet5_organamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    raise ValueError(f"Unknown dataset: {infer_data}")
+
+
+def get_random_sample(dataset_name: str, setup_fn):
+    """Return a random sample from the deterministic 10% test split."""
+
+    train_mod.train_loader = None
+    train_mod.val_loader = None
+    train_mod.test_loader = None
+
+    setup_result = setup_fn(batch_size=1)
+
+    test_dataset = None
+    if train_mod.test_loader is not None:
+        test_dataset = train_mod.test_loader.dataset
+    elif (
+        isinstance(setup_result, tuple)
+        and len(setup_result) >= 3
+        and hasattr(setup_result[2], "dataset")
+    ):
+        test_dataset = setup_result[2].dataset
+
+    if test_dataset is None:
+        raise RuntimeError(
+            f"Could not resolve test split dataset for inference target: {dataset_name}"
+        )
+
+    idx = random.randint(0, len(test_dataset) - 1)
+    image_tensor, label = test_dataset[idx]
+    train_mod.validate_preprocessed_batch(
+        image_tensor.unsqueeze(0), dataset_name, stage="inference"
+    )
+
+    label_text = str(label)
+    if isinstance(label, torch.Tensor):
+        if label.dim() == 0:
+            label_text = str(int(label.item()))
+        else:
+            label_text = str(label.detach().cpu().view(-1).tolist())
+
+    return image_tensor.unsqueeze(0), label, label_text
+
+
+# -----------------------------
+# 3. Static 64-bit Fixed-Point Helpers
+# -----------------------------
+def _get_layer_config(model):
+    """Return the (conv_layer, bn_layer) or (fc_layer, None) for inference."""
+    if isinstance(model, MedicalLeNet):
+        return {
+            "conv1": (model.features[0], model.features[1]), # Conv + BN
+            "conv2": (model.features[4], model.features[5]), # Conv + BN
+            "fc1": (model.classifier[1], None),
+            "fc2": (model.classifier[4], None),
+            "fc3": (model.classifier[7], None),
+        }
+    return {
+        "conv1": (model.features[0], None),
+        "conv2": (model.features[3], None),
+        "fc1": (model.classifier[1], None),
+        "fc2": (model.classifier[3], None),
+        "fc3": (model.classifier[5], None),
+    }
+
+def fold_conv_bn_eval(conv, bn):
+    """Mathematically folds BatchNorm parameters into Conv2d weights and biases."""
+    w = conv.weight.detach()
+    b = conv.bias.detach() if conv.bias is not None else torch.zeros(conv.out_channels, device=w.device)
+    
+    if bn is None:
+        return w, b
+        
+    gamma = bn.weight.detach()
+    beta = bn.bias.detach()
+    mean = bn.running_mean.detach()
+    var = bn.running_var.detach()
+    eps = bn.eps
+    
+    multiplier = gamma / torch.sqrt(var + eps)
+    w_folded = w * multiplier.view(-1, 1, 1, 1)
+    b_folded = beta + (b - mean) * multiplier
+    
+    return w_folded, b_folded
+
+def run_static_fixed_point_layer(q_input, layer_tuple, apply_relu=True, is_conv=False):
+    layer, bn = layer_tuple
+
+    # 1. Extract and Fold FP32 Weights
+    if is_conv:
+        w_float, b_float = fold_conv_bn_eval(layer, bn)
+        stride = layer.stride[0]
+        padding = layer.padding[0]
+    else:
+        w_float = layer.weight.detach()
+        b_float = layer.bias.detach() if layer.bias is not None else torch.zeros(layer.out_features, device=w_float.device)
+
+    # 2. Quantize to 64-bit Fixed Point
+    q_w = quantize_fixed_point(w_float)
+    q_bias = quantize_fixed_point(b_float)
+
+    # 3. Execute Math
+    max_bits, max_rem = 0, 0
+    if is_conv:
+        q_accum = execute_and_shift_conv2d(q_input, q_w, stride=stride, padding=padding)
+    else:
+        q_accum, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
+
+    q_out = add_bias(q_accum, q_bias)
+
+    if apply_relu:
+        q_out = fixed_point_relu(q_out)
+
+    return q_out, max_bits, max_rem
+
+
+def avg_pool_fixed_point(q_tensor):
+    """Pure integer 2x2 average pooling with stride 2 for 32-bit."""
+    # Use int64 strictly for the summation to prevent overflow
+    q_int64 = q_tensor.to(torch.int64)
+    bsz, channels, height, width = q_int64.shape
+
+    windows = q_int64.view(bsz, channels, height // 2, 2, width // 2, 2)
+    window_sums = windows.sum(dim=(3, 5))
+    rounded_avg = (window_sums + 2) >> 2
+
+    # Return as int32
+    return rounded_avg.to(torch.int32)
+
+
+# -----------------------------
+# 4. Main Execution
+# -----------------------------
+def main(infer_data, run_floating_point=True, run_fixed_point=True, log=False):
+    print("--- Starting Static 64-bit ZK Inference Pipeline ---")
+
+    cfg = _resolve_infer_config(infer_data)
+    model = cfg["model"]
+    model_path = cfg["model_path"]
+    dataset_display = cfg["display"]
+
+    print(f"[0] Inference target: {dataset_display}")
+    print(f"[0] Loading model weights from: {model_path}")
+
+    if not os.path.exists(model_path):
+        print(f"Error: '{model_path}' not found. Please train the model first.")
+        return
+
+    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    model.eval()
+
+    image_tensor, true_label, true_label_text = get_random_sample(
+        infer_data,
+        cfg["setup_fn"],
+    )
+
+    print(
+        f"\n[1] Extracted random {dataset_display} sample from test split (True Label: {true_label_text})."
+    )
+
+    float_pred = None
+    if run_floating_point:
+        with torch.no_grad():
+            float_logits = model(image_tensor)
+            float_pred = float_logits.argmax(dim=1).item()
+
+        print(f"[2] Float Inference complete. Prediction: {float_pred}")
+
+    if not run_fixed_point:
+        print("\nFixed-point path disabled for this run.")
+        if run_floating_point:
+            print("\n" + "=" * 40)
+            print(" INFERENCE SUMMARY ")
+            print("=" * 40)
+            print(f"Dataset:                      {dataset_display}")
+            print(f"True Label:                   {true_label_text}")
+            print(f"Float Model Prediction:       {float_pred}")
+            print("=" * 40)
+        return
+
+    print("\n[3] Executing Static 64-bit Fixed-Point Inference...")
+
+    q_x = quantize_fixed_point(image_tensor)
+    layer_cfg = _get_layer_config(model)
+
+    q_x, _, _ = run_static_fixed_point_layer(
+        q_x,
+        layer_cfg["conv1"],
+        apply_relu=True,
+        is_conv=True,
+    )
+    q_x = avg_pool_fixed_point(q_x)
+
+    q_x, _, _ = run_static_fixed_point_layer(
+        q_x,
+        layer_cfg["conv2"],
+        apply_relu=True,
+        is_conv=True,
+    )
+    q_x = avg_pool_fixed_point(q_x)
+
+    q_x = q_x.view(q_x.size(0), -1)
+
+    q_x, _, _ = run_static_fixed_point_layer(
+        q_x,
+        layer_cfg["fc1"],
+        apply_relu=True,
+        is_conv=False,
+    )
+    q_x, _, _ = run_static_fixed_point_layer(
+        q_x,
+        layer_cfg["fc2"],
+        apply_relu=True,
+        is_conv=False,
+    )
+
+    q_out, max_bits_used, max_remainder = run_static_fixed_point_layer(
+        q_x,
+        layer_cfg["fc3"],
+        apply_relu=False,
+        is_conv=False,
+    )
+
+    dequantized_logits = dequantize_fixed_point(q_out)
+    int_pred = dequantized_logits.argmax(dim=1).item()
+
+    print("\n" + "=" * 40)
+    print(" INFERENCE SUMMARY ")
+    print("=" * 40)
+    print(f"Dataset:                      {dataset_display}")
+    print(f"True Label:                   {true_label_text}")
+    if run_floating_point:
+        print(f"Float Model Prediction:       {float_pred}")
+    print(f"Static 64-bit Prediction:     {int_pred}")
+
+    if run_floating_point:
+        if float_pred == int_pred:
+            print("\nSuccess! The 64-bit static model exactly matches the floating-point prediction.")
+        else:
+            print("\nNote: Predictions differ. This can happen due to fixed-point precision effects.")
+
+    print("\n--- ZK Cryptographic Fixed-Point Stats (Final Layer) ---")
+    print("Architecture Format:         Q15.16 (32-bit Static Container)")
+    print(f"Internal MAC Bit-Length:     {max_bits_used} bits (Hardware Threshold: 63)")
+
+    headroom_used = (max_bits_used / 63.0) * 100 if max_bits_used else 0
+    print(f"Hardware MAC Capacity:       {headroom_used:.1f}% Capacity Reached")
+    print(f"Max Truncation Remainder:    {max_remainder:.0f} (Precision dropped during truncation)")
+
+    print("\n--- Final Logit Sanity Check ---")
+    print(f"Raw 32-bit Integer Max:      {q_out.max().item()}")
+    print(f"Dequantized Float Max:       {dequantized_logits.max().item():.4f}")
+    print("=" * 56)
+
+    if log:
+        fixed_point_log["meta"] = {
+            "dataset": infer_data,
+            "true_label": true_label_text,
+            "float_prediction": float_pred,
+            "fixed_point_prediction": int_pred,
+        }
+        log_path = "inference.json"
+        with open(log_path, "w") as f:
+            json.dump(fixed_point_log, f, indent=2)
+        print(f"\nSaved detailed fixed-point log to {log_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--infer",
+        type=str,
+        default="MNIST",
+        help=(
+            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, "
+            "OCTMNIST, BloodMNIST, OrganAMNIST"
+        ),
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--fixed-point",
+        action="store_true",
+        help="Run fixed-point inference only",
+    )
+    mode_group.add_argument(
+        "--floating-point",
+        action="store_true",
+        help="Run floating-point inference only",
+    )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Log fixed-point summary to inference.json",
+    )
+    args = parser.parse_args()
+
+    run_floating_point = True
+    run_fixed_point = True
+    if args.fixed_point:
+        run_floating_point = False
+        run_fixed_point = True
+    elif args.floating_point:
+        run_floating_point = True
+        run_fixed_point = False
+
+    main(
+        args.infer,
+        run_floating_point=run_floating_point,
+        run_fixed_point=run_fixed_point,
+        log=args.log,
+    )

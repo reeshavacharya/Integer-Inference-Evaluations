@@ -2,36 +2,64 @@
   "MNIST": {
     "kurtosis": 3.5189950466156006,
     "shannon_entropy": 1.6432012629884523,
-    "laplacian_variance": 10688.153091908322
+    "laplacian_variance": 10688.153091908322,
+    "edge_density": 0.11059438775510205,
+    "compactness": 78.19253286432202,
+    "turns": 9.464,
+    "skeleton_complexity": 0.3437048550351919
   },
   "CIFAR10": {
     "kurtosis": -0.27541908621788025,
     "shannon_entropy": 8.554744820352933,
-    "laplacian_variance": 2890.6981538066866
+    "laplacian_variance": 2890.6981538066866,
+    "edge_density": 0.259513671875,
+    "compactness": 64.9635095213801,
+    "turns": 9.616,
+    "skeleton_complexity": 0.2431538593280088
   },
   "Brain-MRI": {
     "kurtosis": -0.9979940056800842,
     "shannon_entropy": 5.670265294397362,
-    "laplacian_variance": 7404.798897588244
+    "laplacian_variance": 7404.798897588244,
+    "edge_density": 0.24137755102040817,
+    "compactness": 20.568582418533893,
+    "turns": 8.932,
+    "skeleton_complexity": 0.1539612521750495
   },
   "NIH-CHEST": {
     "kurtosis": -0.2530662715435028,
     "shannon_entropy": 7.382657702739165,
-    "laplacian_variance": 266.1766320892836
+    "laplacian_variance": 266.1766320892836,
+    "edge_density": 0.07642514349489796,
+    "compactness": 64.29390026582041,
+    "turns": 7.676,
+    "skeleton_complexity": 0.06259011044834573
   },
   "OCTMNIST": {
     "kurtosis": 2.9642343521118164,
     "shannon_entropy": 6.09069400891141,
-    "laplacian_variance": 3997.2842804625675
+    "laplacian_variance": 3997.2842804625675,
+    "edge_density": 0.16284438775510204,
+    "compactness": 66.63855053164158,
+    "turns": 5.268,
+    "skeleton_complexity": 0.3772465648884962
   },
   "OrganAMNIST": {
     "kurtosis": -0.4397108256816864,
     "shannon_entropy": 6.310451260317958,
-    "laplacian_variance": 17644.665592487505
+    "laplacian_variance": 17644.665592487505,
+    "edge_density": 0.3117295918367347,
+    "compactness": 68.75841114343964,
+    "turns": 10.448,
+    "skeleton_complexity": 0.3179366762423365
   },
   "BloodMNIST": {
     "kurtosis": 0.38641461730003357,
     "shannon_entropy": 7.168531204748632,
-    "laplacian_variance": 1814.1864282362817
+    "laplacian_variance": 1814.1864282362817,
+    "edge_density": 0.23418367346938776,
+    "compactness": 27.030357896591237,
+    "turns": 5.652,
+    "skeleton_complexity": 0.1645268171845624
   }
 }

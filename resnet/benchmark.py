@@ -6,8 +6,8 @@ splits created by resnet18.py.
 Supported flags:
 - --bench: benchmark one dataset (defaults to all datasets)
 - --num_data: number of test images to benchmark (defaults to full 10% split)
-- --mode {int,fixed-point,floating-point}: benchmark one inference mode
-  (defaults to all 3 modes)
+- --mode {fp32,int8,int32,fxp32,fxp64}: benchmark one inference mode
+    (defaults to all 5 modes)
 """
 
 import argparse
@@ -25,6 +25,8 @@ from torch.utils.data import DataLoader
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 INT8_DIR = os.path.join(THIS_DIR, "INT8")
 FP64_DIR = os.path.join(THIS_DIR, "FixedPoint64")
+INT32_DIR = os.path.join(THIS_DIR, "INT32")
+FP32_DIR = os.path.join(THIS_DIR, "FixedPoint32")
 for p in (THIS_DIR,):
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -65,6 +67,16 @@ fp64_utils = _load_module(
 fp64_inference = _load_module(
     "resnet_fp64_inference", os.path.join(FP64_DIR, "inference.py"), FP64_DIR
 )
+int32_utils = _load_module("resnet_int32_utils", os.path.join(INT32_DIR, "utils.py"), INT32_DIR)
+int32_inference = _load_module(
+    "resnet_int32_inference", os.path.join(INT32_DIR, "inference.py"), INT32_DIR
+)
+fp32_utils = _load_module(
+    "resnet_fp32_utils", os.path.join(FP32_DIR, "utils.py"), FP32_DIR
+)
+fp32_inference = _load_module(
+    "resnet_fp32_inference", os.path.join(FP32_DIR, "inference.py"), FP32_DIR
+)
 
 
 BENCHMARK_DATASETS = [
@@ -89,6 +101,16 @@ def _disable_heavy_debug_logs():
         "pooling": _NoOpList(),
     }
     fp64_inference.debug_trace = {
+        "input": None,
+        "layers": _NoOpList(),
+        "pooling": _NoOpList(),
+    }
+    int32_inference.debug_trace = {
+        "input": None,
+        "layers": _NoOpList(),
+        "pooling": _NoOpList(),
+    }
+    fp32_inference.debug_trace = {
         "input": None,
         "layers": _NoOpList(),
         "pooling": _NoOpList(),
@@ -247,7 +269,7 @@ def _float_accuracy(
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
-    print(f"[bench][{dataset_name}][floating-point] Starting benchmark over {target_images}/{total_images} images.")
+    print(f"[bench][{dataset_name}][fp32] Starting benchmark over {target_images}/{total_images} images.")
 
     all_targets, all_outputs = [], []
     correct, total, processed_images = 0.0, 0, 0
@@ -279,7 +301,7 @@ def _float_accuracy(
 
             processed_images += images.size(0)
             left = max(target_images - processed_images, 0)
-            print(f"[bench][{dataset_name}][floating-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
+            print(f"[bench][{dataset_name}][fp32] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
     if is_multi:
         targets = torch.cat(all_targets, dim=0).numpy()
@@ -295,7 +317,7 @@ def _float_accuracy(
         return 100.0 * correct / max(total, 1)
 
 
-def _integer_accuracy(
+def _int8_accuracy(
     model: torch.nn.Module,
     loader: DataLoader,
     dataset_name: str,
@@ -307,7 +329,7 @@ def _integer_accuracy(
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
-    print(f"[bench][{dataset_name}][int] Starting benchmark over {target_images}/{total_images} images.")
+    print(f"[bench][{dataset_name}][int8] Starting benchmark over {target_images}/{total_images} images.")
 
     cfg = int8_inference._resolve_infer_config(dataset_name)
     int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
@@ -366,7 +388,7 @@ def _integer_accuracy(
 
         processed_images += images.size(0)
         left = max(target_images - processed_images, 0)
-        print(f"[bench][{dataset_name}][int] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
+        print(f"[bench][{dataset_name}][int8] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
     if is_multi:
         targets = torch.cat(all_targets, dim=0).numpy()
@@ -382,7 +404,7 @@ def _integer_accuracy(
         return 100.0 * correct / max(total, 1)
 
 
-def _fixed_point_accuracy(
+def _fxp64_accuracy(
     model: torch.nn.Module,
     loader: DataLoader,
     dataset_name: str,
@@ -394,7 +416,7 @@ def _fixed_point_accuracy(
     total_images = len(loader.dataset)
     target_images = total_images if num_data is None else min(num_data, total_images)
 
-    print(f"[bench][{dataset_name}][fixed-point] Starting benchmark over {target_images}/{total_images} images.")
+    print(f"[bench][{dataset_name}][fxp64] Starting benchmark over {target_images}/{total_images} images.")
 
     all_targets, all_outputs = [], []
     correct, total, processed_images = 0.0, 0, 0
@@ -437,7 +459,167 @@ def _fixed_point_accuracy(
 
         processed_images += images.size(0)
         left = max(target_images - processed_images, 0)
-        print(f"[bench][{dataset_name}][fixed-point] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
+        print(f"[bench][{dataset_name}][fxp64] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
+
+    if is_multi:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        return roc_auc_score(targets, outputs, average="macro")
+    elif is_medmnist:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        return {"AUC": auc, "ACC": acc}
+    else:
+        return 100.0 * correct / max(total, 1)
+
+
+def _int32_accuracy(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    dataset_name: str,
+    num_data: Optional[int],
+):
+    is_multi = _is_multilabel(dataset_name)
+    is_medmnist = _is_medmnist(dataset_name)
+
+    total_images = len(loader.dataset)
+    target_images = total_images if num_data is None else min(num_data, total_images)
+
+    print(f"[bench][{dataset_name}][int32] Starting benchmark over {target_images}/{total_images} images.")
+
+    cfg = int32_inference._resolve_infer_config(dataset_name)
+    int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
+
+    if not os.path.exists(int32_model_path):
+        raise FileNotFoundError(
+            f"Missing compiled model: {int32_model_path}. Please run INT32/export_int32_model.py first."
+        )
+
+    int32_state = torch.load(int32_model_path, map_location="cpu")
+
+    all_targets, all_outputs = [], []
+    correct, total, processed_images = 0.0, 0, 0
+
+    scale_in = int32_state["meta"]["in_scale"]
+    zp_in = int32_state["meta"]["in_zp"]
+
+    for batch_idx, (images, labels) in enumerate(loader, 1):
+        if processed_images >= target_images:
+            break
+
+        remaining = target_images - processed_images
+        if images.size(0) > remaining:
+            images, labels = images[:remaining], labels[:remaining]
+
+        q_x = int32_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint32)
+        q_x, s_out, z_out = int32_inference.run_integer_conv_block(q_x, int32_state["conv1"], zp_in, apply_relu=True)
+
+        for layer_idx in range(1, 5):
+            for block_idx in range(2):
+                prefix = f"layer{layer_idx}_block{block_idx}"
+                q_x, s_out, z_out = int32_inference.run_integer_basic_block(q_x, int32_state[prefix], z_out, s_out)
+
+        fc_in_scale = int32_state["fc"]["scale_in"]
+        fc_in_zp = int32_state["fc"]["zp_in"]
+
+        q_pooled = int32_utils.integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+        q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+
+        q_out, final_s, final_z = int32_inference.run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
+
+        int_logits = q_out.to(torch.float64)
+        dequantized_logits = final_s * (int_logits - final_z)
+
+        if is_multi:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.sigmoid(dequantized_logits).detach().cpu())
+        elif is_medmnist:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.softmax(dequantized_logits, dim=1).detach().cpu())
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+        else:
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+
+        processed_images += images.size(0)
+        left = max(target_images - processed_images, 0)
+        print(f"[bench][{dataset_name}][int32] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
+
+    if is_multi:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        return roc_auc_score(targets, outputs, average="macro")
+    elif is_medmnist:
+        targets = torch.cat(all_targets, dim=0).numpy()
+        outputs = torch.cat(all_outputs, dim=0).numpy()
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        acc = 100.0 * correct / max(total, 1)
+        return {"AUC": auc, "ACC": acc}
+    else:
+        return 100.0 * correct / max(total, 1)
+
+
+def _fxp32_accuracy(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    dataset_name: str,
+    num_data: Optional[int],
+):
+    is_multi = _is_multilabel(dataset_name)
+    is_medmnist = _is_medmnist(dataset_name)
+
+    total_images = len(loader.dataset)
+    target_images = total_images if num_data is None else min(num_data, total_images)
+
+    print(f"[bench][{dataset_name}][fxp32] Starting benchmark over {target_images}/{total_images} images.")
+
+    all_targets, all_outputs = [], []
+    correct, total, processed_images = 0.0, 0, 0
+
+    for batch_idx, (images, labels) in enumerate(loader, 1):
+        if processed_images >= target_images:
+            break
+
+        remaining = target_images - processed_images
+        if images.size(0) > remaining:
+            images, labels = images[:remaining], labels[:remaining]
+
+        q_x = fp32_utils.quantize_fixed_point(images)
+
+        q_x = fp32_inference.run_static_fixed_point_conv_block(q_x, model.conv1, model.bn1, apply_relu=True)
+
+        for stage in [model.layer1, model.layer2, model.layer3, model.layer4]:
+            for block in stage:
+                q_x = fp32_inference.run_static_fixed_point_basic_block(q_x, block)
+
+        q_pooled = fp32_utils.fixed_point_global_avg_pool2d(q_x)
+        q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+
+        q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc)
+        dequantized_logits = fp32_utils.dequantize_fixed_point(q_out)
+
+        if is_multi:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.sigmoid(dequantized_logits).detach().cpu())
+        elif is_medmnist:
+            all_targets.append(labels.detach().cpu())
+            all_outputs.append(torch.softmax(dequantized_logits, dim=1).detach().cpu())
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+        else:
+            c, t = _compute_batch_metrics(dequantized_logits, labels)
+            correct += c
+            total += t
+
+        processed_images += images.size(0)
+        left = max(target_images - processed_images, 0)
+        print(f"[bench][{dataset_name}][fxp32] Batch {batch_idx}: processed {processed_images}/{target_images} images, remaining {left}.")
 
     if is_multi:
         targets = torch.cat(all_targets, dim=0).numpy()
@@ -457,7 +639,7 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
     _disable_heavy_debug_logs()
 
     targets = dataset_names or BENCHMARK_DATASETS
-    selected_modes = [mode] if mode is not None else ["floating-point", "int", "fixed-point"]
+    selected_modes = [mode] if mode is not None else ["fp32", "int8", "int32", "fxp32", "fxp64"]
 
     results = {}
     for name in targets:
@@ -468,15 +650,21 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
         model = _build_model(name)
 
         per_dataset = {}
-        if "floating-point" in selected_modes:
+        if "fp32" in selected_modes:
             fp_acc = _float_accuracy(model, loader, name, num_data)
-            per_dataset["floating-point"] = fp_acc
-        if "int" in selected_modes:
-            int_acc = _integer_accuracy(model, loader, name, num_data)
-            per_dataset["int"] = int_acc
-        if "fixed-point" in selected_modes:
-            fxp_acc = _fixed_point_accuracy(model, loader, name, num_data)
-            per_dataset["fixed-point"] = fxp_acc
+            per_dataset["fp32"] = fp_acc
+        if "int8" in selected_modes:
+            int8_acc = _int8_accuracy(model, loader, name, num_data)
+            per_dataset["int8"] = int8_acc
+        if "int32" in selected_modes:
+            int32_acc = _int32_accuracy(model, loader, name, num_data)
+            per_dataset["int32"] = int32_acc
+        if "fxp32" in selected_modes:
+            fxp32_acc = _fxp32_accuracy(model, loader, name, num_data)
+            per_dataset["fxp32"] = fxp32_acc
+        if "fxp64" in selected_modes:
+            fxp64_acc = _fxp64_accuracy(model, loader, name, num_data)
+            per_dataset["fxp64"] = fxp64_acc
 
         results[name] = per_dataset
         stats = " | ".join(
@@ -526,9 +714,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["int", "fixed-point", "floating-point"],
+        choices=["fp32", "int8", "int32", "fxp32", "fxp64"],
         default=None,
-        help="Benchmark a specific mode. If omitted, benchmarks all 3 modes.",
+        help="Benchmark a specific mode. If omitted, benchmarks all 5 modes.",
     )
     args = parser.parse_args()
 

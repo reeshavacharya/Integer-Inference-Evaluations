@@ -339,33 +339,19 @@ def run_integer_layer(
     return q_out, scale_out, zp_out
 
 
-def avg_pool_uint8(q_tensor, name=None):
-    """Pure integer 2x2 average pooling with stride 2.
+def avg_pool_uint32(q_tensor, name=None):
+    # Cast to int64 to prevent overflow when summing four uint32 max values
+    q_int64 = q_tensor.to(torch.int64)
 
-    Also logs input and output activations for debugging.
-    """
-    # 1. Cast to int32 to prevent overflow when summing the 4 pixels
-    # (Max sum of four uint8s is 1020, so int16 would also work, but int32 is safe)
-    q_int32 = q_tensor.to(torch.int32)
-
-    B, C, H, W = q_int32.shape
-
-    # 2. Reshape the tensor to isolate the 2x2 spatial windows
-    # Shape becomes: [Batch, Channels, Height/2, 2, Width/2, 2]
-    windows = q_int32.view(B, C, H // 2, 2, W // 2, 2)
-
-    # 3. Sum over the 2x2 window dimensions (dim 3 and 5)
-    # Shape becomes: [Batch, Channels, Height/2, Width/2]
+    B, C, H, W = q_int64.shape
+    windows = q_int64.view(B, C, H // 2, 2, W // 2, 2)
     window_sums = windows.sum(dim=(3, 5))
 
-    # 4. Divide by 4 using a right bit-shift by 2.
-    # We add 2 before shifting to achieve "round-to-nearest" behavior.
     rounded_avg = (window_sums + 2) >> 2
 
-    # 5. Cast securely back to uint8
-    pooled = rounded_avg.to(torch.uint8)
+    # Secure cast back to uint32
+    pooled = rounded_avg.to(torch.uint32)
 
-    # Log pooling activations
     pool_log = {
         "name": name or "pool",
         "kernel_size": [2, 2],
@@ -432,12 +418,13 @@ def main(infer_data, run_floating_point=True, run_integer=True):
         print("=" * 40)
         return
 
-    # Quantize Input Image
+    # Quantize Input Image to 32-bit
     in_range = activation_ranges["conv1"]
     pseudo_in_tensor = torch.tensor([in_range["in_min"], in_range["in_max"]])
-    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=8)
+    scale_in, zp_in = get_quantization_params(pseudo_in_tensor, num_bits=32)
 
-    q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
+    q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint32, num_bits=32)
+
     # save the image from q_x for visualization (do not dequantize) save it as quantized_sample.png
     # q_x has shape [1, 1, 28, 28] and dtype uint8; save directly as an 8-bit grayscale image.
     sample_path_key = dataset_display.lower().replace("-", "_").replace(" ", "_")
@@ -465,7 +452,7 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     # Network Forward Pass (Indexing according to architecture config)
     layer_cfg = _get_layer_config(model)
 
-    q_x, s_out, z_out = run_integer_layer(
+    q_x, s_out, z_out= run_integer_layer(
         q_x,
         layer_cfg["conv1"],
         "conv1",
@@ -474,8 +461,7 @@ def main(infer_data, run_floating_point=True, run_integer=True):
         apply_relu=True,
         is_conv=True,
     )
-    print("M: ", M)
-    q_x = avg_pool_uint8(q_x, name="pool_after_conv1")
+    q_x = avg_pool_uint32(q_x, name="pool_after_conv1")
 
     q_x, s_out, z_out = run_integer_layer(
         q_x,
@@ -486,7 +472,7 @@ def main(infer_data, run_floating_point=True, run_integer=True):
         apply_relu=True,
         is_conv=True,
     )
-    q_x = avg_pool_uint8(q_x, name="pool_after_conv2")
+    q_x = avg_pool_uint32(q_x, name="pool_after_conv2")
 
     q_x = q_x.view(q_x.size(0), -1)  # Flatten
 

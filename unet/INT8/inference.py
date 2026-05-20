@@ -219,203 +219,45 @@ def get_random_sample(dataset_name: str):
 activation_ranges = {}
 
 
-def calibration_hook(module, input, output, name):
-    """Hook to capture the min and max of activations during the forward pass."""
-    in_tensor = input[0].detach()
-    out_tensor = output.detach()
-
-    activation_ranges[name] = {
-        "in_min": in_tensor.min().item(),
-        "in_max": in_tensor.max().item(),
-        "out_min": out_tensor.min().item(),
-        "out_max": out_tensor.max().item(),
-    }
-
-def get_concat_quantization_params(range_dict, layer1_name, layer2_name):
-    """
-    Finds the absolute minimum and maximum across two branches 
-    and calculates a shared 8-bit scale and zero-point.
-    """
-    min1, max1 = range_dict[layer1_name]["out_min"], range_dict[layer1_name]["out_max"]
-    min2, max2 = range_dict[layer2_name]["out_min"], range_dict[layer2_name]["out_max"]
-    
-    # The shared range must encompass both tensors
-    shared_min = min(min1, min2)
-    shared_max = max(max1, max2)
-    
-    # Force the minimum to be <= 0.0 to protect padding zero-points
-    shared_min = min(shared_min, 0.0)
-    
-    # Standard 8-bit uint8 quantization math
-    scale_cat = (shared_max - shared_min) / 255.0
-    zp_cat = int(round(0.0 - (shared_min / scale_cat)))
-    zp_cat = max(0, min(255, zp_cat))
-    
-    return scale_cat, zp_cat
-
-def _get_layer_config(model):
-    """Return the conv/fc modules for calibration and integer inference.
-
-    UNet architecture needs to be mapped accordingly
-    """
-    return {
-        # Encoder convolutions
-        "conv1": model.e11,
-        "conv2": model.e12,
-        "conv3": model.e21,
-        "conv4": model.e22,
-        "conv5": model.e31,
-        "conv6": model.e32,
-        "conv7": model.e41,
-        "conv8": model.e42,
-        "conv9": model.e51,
-        "conv10": model.e52,
-
-        # Decoder up-convolutions and convolutions
-        "upconv1": model.upconv1,
-        "conv11": model.d11,
-        "conv12": model.d12,
-
-        "upconv2": model.upconv2,
-        "conv13": model.d21,
-        "conv14": model.d22,
-
-        "upconv3": model.upconv3,
-        "conv15": model.d31,
-        "conv16": model.d32,
-
-        "upconv4": model.upconv4,
-        "conv17": model.d41,
-        "conv18": model.d42,
-
-        # Output layer
-        "outconv": model.outconv,
-    }
-
-
-def register_hooks(model):
-    handles = []
-    cfg = _get_layer_config(model)
-
-    # Register calibration hooks for each layer in the configuration
-    def make_hook(layer_name):
-        def hook(m, inp, out):
-            calibration_hook(m, inp, out, layer_name)
-        return hook
-
-    for name, module in cfg.items():
-        handle = module.register_forward_hook(make_hook(name))
-        handles.append(handle)
-
-    return handles
-
-
 # -----------------------------
 # 4. Core Integer Inference Engine
 # -----------------------------
-def run_integer_layer(
-    q_input, layer, layer_name, scale_in, zp_in, apply_relu=True
-):
+def run_integer_layer(q_input, layer_data, zp_in, apply_relu=True):
     """
-    Executes a single layer entirely in integer arithmetic.
-    Dynamically routes nn.Conv2d, nn.ConvTranspose2d, and nn.Linear.
+    Executes a single layer using pre-compiled offline integer data.
     """
-    # 1. Get float weights and calculate their quantization params
-    weight_float = layer.weight.detach()
-    scale_w, zp_w = get_quantization_params(weight_float, num_bits=8)
-    q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint8)
+    device = q_input.device
     
-    # 2. Calculate output activation params from calibration data
-    out_range = activation_ranges[layer_name]
-    pseudo_out_tensor = torch.tensor([out_range["out_min"], out_range["out_max"]])
-    scale_out, zp_out = get_quantization_params(pseudo_out_tensor, num_bits=8)
+    # 1. Unpack offline parameters
+    q_w = layer_data["q_weight"].to(device)
+    q_bias = layer_data["q_bias"].to(device)
+    zp_w = layer_data["zp_w"]
+    q_M0 = layer_data["q_M0"]
+    shift = layer_data["shift"]
+    zp_out = layer_data["zp_out"]
+    scale_out = layer_data["scale_out"]
+    stride = layer_data["stride"]
+    padding = layer_data["padding"]
+    is_transpose = layer_data.get("is_transpose", False)
 
-    # 3. Quantize Bias to int32
-    bias_float = layer.bias.detach()
-    scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
-
-    # 4. Calculate Downscale Multiplier (Offline Simulation)
-    q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
-
-    # --- Execute Integer Math (Online Simulation) ---
-    
-    # ROUTE 1: Standard Convolution (Encoder)
-    if isinstance(layer, nn.Conv2d):
-        stride = getattr(layer, "stride", (1, 1))
-        padding = getattr(layer, "padding", (0, 0))
+    # 2. Execute Integer Math
+    if not is_transpose:
         int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=stride, padding=padding)
-        layer_type_str = "conv2d"
-
-    # ROUTE 2: Transposed Convolution (Decoder)
-    elif isinstance(layer, nn.ConvTranspose2d):
-        stride = getattr(layer, "stride", (1, 1))
-        padding = getattr(layer, "padding", (0, 0))
-        output_padding = getattr(layer, "output_padding", (0, 0))
+    else:
+        out_padding = layer_data["output_padding"]
         int32_accum = integer_conv_transpose2d(
             q_input, q_w, zp_in, zp_w, 
-            stride=stride, padding=padding, output_padding=output_padding
+            stride=stride, padding=padding, output_padding=out_padding
         )
-        layer_type_str = "conv_transpose2d"
 
-    # ROUTE 3: Linear / Dense Layer (Not used in standard UNet, but kept for compatibility)
-    elif isinstance(layer, nn.Linear):
-        int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
-        layer_type_str = "linear"
-        
-    else:
-        raise ValueError(f"Unsupported layer type: {type(layer)}")
-
-    # Finish the integer pipeline
+    # 3. Finish Pipeline
     int32_accum = add_bias(int32_accum, q_bias)
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
 
     if apply_relu:
         q_out = quantized_relu(q_out, zp_out)
 
-    # Log layer details for debugging/analysis
-    layer_log = {
-        "layer_name": layer_name,
-        "type": layer_type_str,
-        "input": {
-            "scale": float(scale_in),
-            "zero_point": int(zp_in),
-            "tensor": q_input.cpu().numpy().tolist(),
-        },
-        "weights": {
-            "scale": float(scale_w),
-            "zero_point": int(zp_w),
-            "float": weight_float.cpu().numpy().tolist(),
-            "quantized": q_w.cpu().numpy().tolist(),
-        },
-        "bias": {
-            "scale": float(scale_bias),
-            "zero_point": int(zp_bias),
-            "float": bias_float.cpu().numpy().tolist(),
-            "quantized": q_bias.cpu().numpy().tolist(),
-        },
-        "multiplier": {
-            "M0": int(q_M0),
-            "shift": int(shift),
-        },
-        "accumulator": int32_accum.cpu().numpy().tolist(),
-        "output": {
-            "scale": float(scale_out),
-            "zero_point": int(zp_out),
-            "tensor": q_out.cpu().numpy().tolist(),
-        },
-    }
-
-    debug_trace["layers"].append(layer_log)
-
-    return (
-        q_out,
-        scale_out,
-        zp_out,
-        (scale_w, zp_w),
-        (scale_bias, zp_bias),
-        (q_M0, shift),
-    )
+    return q_out, scale_out, zp_out
 
 
 def pool_uint8(q_tensor, name=None):
@@ -491,19 +333,27 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     # -----------------------------
     # [1] Float Inference + Calibration
     # -----------------------------
+    int8_model_path = model_path.replace(".pth", "_int8.pth")
+    if run_integer and not os.path.exists(int8_model_path):
+        raise FileNotFoundError(f"Missing INT8 checkpoint: {int8_model_path}. Run export_int8_model.py first.")
+    
     if run_integer:
-        handles = register_hooks(model)
-        with torch.no_grad():
-            float_logits = model(image_tensor)
-        for h in handles:
-            h.remove()
-    elif run_floating_point:
-        with torch.no_grad():
-            float_logits = model(image_tensor)
+        int8_state = torch.load(int8_model_path, map_location=image_tensor.device)
+        
+        # Load Calibration JSON to get concatenated input scales
+        calib_filename = f"{infer_data.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+        calib_path = os.path.join(UNET_DIR, "calibration", calib_filename)
+        if not os.path.exists(calib_path):
+            calib_path = os.path.join(UNET_DIR, calib_filename) # Fallback to current dir
+            
+        with open(calib_path, "r") as f:
+            calib_data = json.load(f)
+        activation_ranges = calib_data.get("layers", calib_data)
 
     if run_floating_point:
         # Binary segmentation metrics (lesion vs background)
         with torch.no_grad():
+            float_logits = model(image_tensor)
             float_probs = torch.sigmoid(float_logits)
             float_preds = (float_probs > 0.5).float()
 
@@ -559,120 +409,102 @@ def main(infer_data, run_floating_point=True, run_integer=True):
     # -----------------------------
     # [3] Integer-Only Forward Through UNet
     # -----------------------------
-    layer_cfg = _get_layer_config(model)
+    # -----------------------------
+    # [3] Integer-Only Forward Through UNet
+    # -----------------------------
+    if run_integer:
+        # Use offline meta parameters for input
+        scale_in = int8_state["meta"]["in_scale"]
+        zp_in = int8_state["meta"]["in_zp"]
+        q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint8)
 
-    # Encoder block 1
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv1"], "conv1", scale_in, zp_in, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv2"], "conv2", s, z, apply_relu=True)
-    q_e12, s_e12, z_e12 = q_x, s, z  # skip connection 1 (before pool)
-    q_x = pool_uint8(q_x, name="pool1")
+        # --- Encoder ---
+        q_x, s, z = run_integer_layer(q_x, int8_state["e11"], zp_in, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["e12"], z, apply_relu=True)
+        q_e12, s_e12, z_e12 = q_x, s, z
+        q_x = pool_uint8(q_x, name="pool1")
 
-    # Encoder block 2
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv3"], "conv3", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv4"], "conv4", s, z, apply_relu=True)
-    q_e22, s_e22, z_e22 = q_x, s, z  # skip connection 2
-    q_x = pool_uint8(q_x, name="pool2")
+        q_x, s, z = run_integer_layer(q_x, int8_state["e21"], z, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["e22"], z, apply_relu=True)
+        q_e22, s_e22, z_e22 = q_x, s, z
+        q_x = pool_uint8(q_x, name="pool2")
 
-    # Encoder block 3
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv5"], "conv5", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv6"], "conv6", s, z, apply_relu=True)
-    q_e32, s_e32, z_e32 = q_x, s, z  # skip connection 3
-    q_x = pool_uint8(q_x, name="pool3")
+        q_x, s, z = run_integer_layer(q_x, int8_state["e31"], z, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["e32"], z, apply_relu=True)
+        q_e32, s_e32, z_e32 = q_x, s, z
+        q_x = pool_uint8(q_x, name="pool3")
 
-    # Encoder block 4
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv7"], "conv7", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv8"], "conv8", s, z, apply_relu=True)
-    q_e42, s_e42, z_e42 = q_x, s, z  # skip connection 4
-    q_x = pool_uint8(q_x, name="pool4")
+        q_x, s, z = run_integer_layer(q_x, int8_state["e41"], z, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["e42"], z, apply_relu=True)
+        q_e42, s_e42, z_e42 = q_x, s, z
+        q_x = pool_uint8(q_x, name="pool4")
 
-    # ==========================================
-    # Bottom (no pooling)
-    # ==========================================
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv9"], "conv9", s, z, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv10"], "conv10", s, z, apply_relu=True)
+        # --- Bottom ---
+        q_x, s, z = run_integer_layer(q_x, int8_state["e51"], z, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["e52"], z, apply_relu=True)
 
-    # ==========================================
-    # Decoder block 1 (Skip connection from e42 -> "conv8")
-    # ==========================================
-    # 1. Run Upconv
-    q_x, s_up1, z_up1, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv1"], "upconv1", s, z, apply_relu=False)
-    
-    # 2. Get shared concatenation scale using "conv8"
-    s_cat1, z_cat1 = get_concat_quantization_params(activation_ranges, "upconv1", "conv8")
-    
-    # 3. Calculate multipliers
-    M0_up1, shift_up1 = compute_requantize_multiplier(s_up1, s_cat1)
-    M0_e42, shift_e42 = compute_requantize_multiplier(s_e42, s_cat1)
-    
-    # 4. Requantize both tensors
-    q_x_aligned = requantize_tensor(q_x, z_up1, z_cat1, M0_up1, shift_up1)
-    q_skip_aligned = requantize_tensor(q_e42, z_e42, z_cat1, M0_e42, shift_e42)
-    
-    # 5. Concatenate and run next convolutions
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv11"], "conv11", s_cat1, z_cat1, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv12"], "conv12", s, z, apply_relu=True)
+        # --- Decoder Block 1 ---
+        q_x, s_up1, z_up1 = run_integer_layer(q_x, int8_state["upconv1"], z, apply_relu=False)
+        s_cat1 = activation_ranges["d11"]["in_scale"]
+        z_cat1 = activation_ranges["d11"]["in_zero_point"]
+        
+        M0_up1, shift_up1 = compute_requantize_multiplier(s_up1, s_cat1)
+        M0_e42, shift_e42 = compute_requantize_multiplier(s_e42, s_cat1)
+        
+        q_x_aligned = requantize_tensor(q_x, z_up1, z_cat1, M0_up1, shift_up1)
+        q_skip_aligned = requantize_tensor(q_e42, z_e42, z_cat1, M0_e42, shift_e42)
+        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
+        
+        q_x, s, z = run_integer_layer(q_cat, int8_state["d11"], z_cat1, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["d12"], z, apply_relu=True)
 
-    # ==========================================
-    # Decoder block 2 (Skip connection from e32 -> "conv6")
-    # ==========================================
-    q_x, s_up2, z_up2, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv2"], "upconv2", s, z, apply_relu=False)
-    
-    s_cat2, z_cat2 = get_concat_quantization_params(activation_ranges, "upconv2", "conv6")
-    
-    M0_up2, shift_up2 = compute_requantize_multiplier(s_up2, s_cat2)
-    M0_e32, shift_e32 = compute_requantize_multiplier(s_e32, s_cat2)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up2, z_cat2, M0_up2, shift_up2)
-    q_skip_aligned = requantize_tensor(q_e32, z_e32, z_cat2, M0_e32, shift_e32)
-    
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv13"], "conv13", s_cat2, z_cat2, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv14"], "conv14", s, z, apply_relu=True)
+        # --- Decoder Block 2 ---
+        q_x, s_up2, z_up2 = run_integer_layer(q_x, int8_state["upconv2"], z, apply_relu=False)
+        s_cat2 = activation_ranges["d21"]["in_scale"]
+        z_cat2 = activation_ranges["d21"]["in_zero_point"]
+        
+        M0_up2, shift_up2 = compute_requantize_multiplier(s_up2, s_cat2)
+        M0_e32, shift_e32 = compute_requantize_multiplier(s_e32, s_cat2)
+        
+        q_x_aligned = requantize_tensor(q_x, z_up2, z_cat2, M0_up2, shift_up2)
+        q_skip_aligned = requantize_tensor(q_e32, z_e32, z_cat2, M0_e32, shift_e32)
+        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
+        
+        q_x, s, z = run_integer_layer(q_cat, int8_state["d21"], z_cat2, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["d22"], z, apply_relu=True)
 
-    # ==========================================
-    # Decoder block 3 (Skip connection from e22 -> "conv4")
-    # ==========================================
-    q_x, s_up3, z_up3, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv3"], "upconv3", s, z, apply_relu=False)
-    
-    s_cat3, z_cat3 = get_concat_quantization_params(activation_ranges, "upconv3", "conv4")
-    
-    M0_up3, shift_up3 = compute_requantize_multiplier(s_up3, s_cat3)
-    M0_e22, shift_e22 = compute_requantize_multiplier(s_e22, s_cat3)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up3, z_cat3, M0_up3, shift_up3)
-    q_skip_aligned = requantize_tensor(q_e22, z_e22, z_cat3, M0_e22, shift_e22)
-    
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv15"], "conv15", s_cat3, z_cat3, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv16"], "conv16", s, z, apply_relu=True)
+        # --- Decoder Block 3 ---
+        q_x, s_up3, z_up3 = run_integer_layer(q_x, int8_state["upconv3"], z, apply_relu=False)
+        s_cat3 = activation_ranges["d31"]["in_scale"]
+        z_cat3 = activation_ranges["d31"]["in_zero_point"]
+        
+        M0_up3, shift_up3 = compute_requantize_multiplier(s_up3, s_cat3)
+        M0_e22, shift_e22 = compute_requantize_multiplier(s_e22, s_cat3)
+        
+        q_x_aligned = requantize_tensor(q_x, z_up3, z_cat3, M0_up3, shift_up3)
+        q_skip_aligned = requantize_tensor(q_e22, z_e22, z_cat3, M0_e22, shift_e22)
+        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
+        
+        q_x, s, z = run_integer_layer(q_cat, int8_state["d31"], z_cat3, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["d32"], z, apply_relu=True)
 
-    # ==========================================
-    # Decoder block 4 (Skip connection from e12 -> "conv2")
-    # ==========================================
-    q_x, s_up4, z_up4, _, _, _ = run_integer_layer(q_x, layer_cfg["upconv4"], "upconv4", s, z, apply_relu=False)
-    
-    s_cat4, z_cat4 = get_concat_quantization_params(activation_ranges, "upconv4", "conv2")
-    
-    M0_up4, shift_up4 = compute_requantize_multiplier(s_up4, s_cat4)
-    M0_e12, shift_e12 = compute_requantize_multiplier(s_e12, s_cat4)
-    
-    q_x_aligned = requantize_tensor(q_x, z_up4, z_cat4, M0_up4, shift_up4)
-    q_skip_aligned = requantize_tensor(q_e12, z_e12, z_cat4, M0_e12, shift_e12)
-    
-    q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
-    q_x, s, z, _, _, _ = run_integer_layer(q_cat, layer_cfg["conv17"], "conv17", s_cat4, z_cat4, apply_relu=True)
-    q_x, s, z, _, _, _ = run_integer_layer(q_x, layer_cfg["conv18"], "conv18", s, z, apply_relu=True)
+        # --- Decoder Block 4 ---
+        q_x, s_up4, z_up4 = run_integer_layer(q_x, int8_state["upconv4"], z, apply_relu=False)
+        s_cat4 = activation_ranges["d41"]["in_scale"]
+        z_cat4 = activation_ranges["d41"]["in_zero_point"]
+        
+        M0_up4, shift_up4 = compute_requantize_multiplier(s_up4, s_cat4)
+        M0_e12, shift_e12 = compute_requantize_multiplier(s_e12, s_cat4)
+        
+        q_x_aligned = requantize_tensor(q_x, z_up4, z_cat4, M0_up4, shift_up4)
+        q_skip_aligned = requantize_tensor(q_e12, z_e12, z_cat4, M0_e12, shift_e12)
+        q_cat = torch.cat([q_x_aligned, q_skip_aligned], dim=1)
+        
+        q_x, s, z = run_integer_layer(q_cat, int8_state["d41"], z_cat4, apply_relu=True)
+        q_x, s, z = run_integer_layer(q_x, int8_state["d42"], z, apply_relu=True)
 
-    # Final output conv (no ReLU)
-    q_out, final_s, final_z, final_w, final_b, final_M = run_integer_layer(
-        q_x,
-        layer_cfg["outconv"],
-        "outconv",
-        s,
-        z,
-        apply_relu=False,
-    )
+        # Final output conv (no ReLU)
+        q_out, final_s, final_z = run_integer_layer(q_x, int8_state["outconv"], z, apply_relu=False)
 
     # -----------------------------
     # [4] Integer Metrics
