@@ -61,6 +61,7 @@ class LayerMetrics:
         self.cos_sim_sum = 0.0
         self.sqnr_sum = 0.0
         self.mae_sum = 0.0
+        self.median_ae_sum = 0.0
         self.mean_shift_sum = 0.0
         self.max_abs_err = 0.0  # We want the absolute max across the entire dataset
         self.batches = 0
@@ -84,9 +85,10 @@ class LayerMetrics:
             else 100.0
         )
 
-        # 3. MAE & Max Error
+        # 3. MAE, Median, & Max Error
         abs_diff = torch.abs(fp_flat - dq_flat)
         mae = abs_diff.mean().item()
+        batch_median_err = torch.median(abs_diff).item()  # <-- ADD THIS
         batch_max_err = abs_diff.max().item()
 
         # 4. Mean Shift
@@ -95,6 +97,7 @@ class LayerMetrics:
         self.cos_sim_sum += cos_sim
         self.sqnr_sum += sqnr
         self.mae_sum += mae
+        self.median_ae_sum += batch_median_err
         self.mean_shift_sum += mean_shift
         self.max_abs_err = max(self.max_abs_err, batch_max_err)
         self.batches += 1
@@ -106,6 +109,7 @@ class LayerMetrics:
             "cosine_similarity": self.cos_sim_sum / self.batches,
             "sqnr_db": self.sqnr_sum / self.batches,
             "mean_absolute_error": self.mae_sum / self.batches,
+            "median_absolute_error": self.median_ae_sum / self.batches,
             "max_absolute_error": self.max_abs_err,  # Max is NOT averaged
             "mean_shift": self.mean_shift_sum / self.batches,
         }
@@ -115,6 +119,10 @@ class LayerMetrics:
 fp32_tensors = {}
 
 
+def _activation_label(base_name: str, activation: str) -> str:
+    return f"{base_name}_{activation.lower()}"
+
+
 def get_fp32_hook(name):
     def hook(module, input, output):
         fp32_tensors[name] = output.detach().clone()
@@ -122,9 +130,9 @@ def get_fp32_hook(name):
     return hook
 
 
-def attach_fp32_hooks(model):
+def attach_fp32_hooks(model, activation: str):
     handles = []
-    handles.append(model.relu.register_forward_hook(get_fp32_hook("conv1_relu")))
+    handles.append(model.activation.register_forward_hook(get_fp32_hook(_activation_label("conv1", activation))))
 
     for l_idx, layer in enumerate(
         [model.layer1, model.layer2, model.layer3, model.layer4], 1
@@ -132,7 +140,7 @@ def attach_fp32_hooks(model):
         for b_idx, block in enumerate(layer):
             pfx = f"layer{l_idx}_block{b_idx}"
             handles.append(
-                block.relu1.register_forward_hook(get_fp32_hook(f"{pfx}_conv1_relu"))
+                block.activation1.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_conv1", activation)))
             )
             handles.append(
                 block.bn2.register_forward_hook(get_fp32_hook(f"{pfx}_conv2_out"))
@@ -143,7 +151,7 @@ def attach_fp32_hooks(model):
                 )
             )
             handles.append(
-                block.relu2.register_forward_hook(get_fp32_hook(f"{pfx}_out"))
+                block.activation2.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_out", activation)))
             )
 
     handles.append(model.fc.register_forward_hook(get_fp32_hook("fc")))
@@ -155,10 +163,18 @@ def attach_fp32_hooks(model):
 # ---------------------------------------------------------
 
 
-def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64):
-    print(f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name}...")
+def evaluate_error(
+    dataset_name: str,
+    num_data: int = None,
+    batch_size: int = 64,
+    activation: str = "relu",
+):
+    print(
+        f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name} "
+        f"({activation})..."
+    )
 
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int8_inference._resolve_infer_config(dataset_name, activation)
     model = cfg["model"]
 
     # 1. Load FP32 Model (for hooks)
@@ -193,7 +209,7 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
         raise RuntimeError("Could not resolve test loader.")
 
     # Attach FP32 Capture Hooks
-    attach_fp32_hooks(model)
+    attach_fp32_hooks(model, activation)
     layer_trackers = {}
 
     total_images = len(loader.dataset)
@@ -226,9 +242,9 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
 
         # Initial Conv1
         q_x, s_out, z_out = int8_inference.run_integer_conv_block(
-            q_x, int8_state["conv1"], zp_in, apply_relu=True
+            q_x, int8_state["conv1"], zp_in, apply_act=True, act_name=activation
         )
-        _evaluate_step(q_x, s_out, z_out, "conv1_relu")
+        _evaluate_step(q_x, s_out, z_out, _activation_label("conv1", activation))
 
         # Residual Blocks (Manually unrolled to capture intermediates)
         for layer_idx in range(1, 5):
@@ -237,12 +253,16 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
                 block_data = int8_state[prefix]
 
                 q_out1, s_out1, z_out1 = int8_inference.run_integer_conv_block(
-                    q_x, block_data["conv1"], z_out, apply_relu=True
+                    q_x,
+                    block_data["conv1"],
+                    z_out,
+                    apply_act=True,
+                    act_name=activation,
                 )
-                _evaluate_step(q_out1, s_out1, z_out1, f"{prefix}_conv1_relu")
+                _evaluate_step(q_out1, s_out1, z_out1, _activation_label(f"{prefix}_conv1", activation))
 
                 q_out2, s_out2, z_out2 = int8_inference.run_integer_conv_block(
-                    q_out1, block_data["conv2"], z_out1, apply_relu=False
+                    q_out1, block_data["conv2"], z_out1, apply_act=False
                 )
                 _evaluate_step(q_out2, s_out2, z_out2, f"{prefix}_conv2_out")
 
@@ -250,20 +270,30 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
                     q_short, s_short, z_short = q_x, s_out, z_out
                 else:
                     q_short, s_short, z_short = int8_inference.run_integer_conv_block(
-                        q_x, block_data["shortcut"], z_out, apply_relu=False
+                        q_x, block_data["shortcut"], z_out, apply_act=False
                     )
                     _evaluate_step(q_short, s_short, z_short, f"{prefix}_shortcut_out")
 
-                s_final = block_data["add"]["scale_out"]
-                z_final = block_data["add"]["zp_out"]
+                conv_s = block_data["add"]["conv_scale_out"]
+                conv_z = block_data["add"]["conv_zp_out"]
+                act_s = block_data["add"]["act_scale_out"]
+                act_z = block_data["add"]["act_zp_out"]
 
                 q_added = int8_utils.integer_add(
-                    q_out2, z_out2, s_out2, q_short, z_short, s_short, z_final, s_final
+                    q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
                 )
-                q_x = int8_utils.quantized_relu(q_added, z_final)
-                s_out, z_out = s_final, z_final
+                if activation == "relu":
+                    q_x = int8_utils.quantized_relu(q_added, act_z)
+                elif activation == "gelu":
+                    f_accum = int8_utils.dequantize_tensor(q_added, conv_s, conv_z)
+                    f_act = F.gelu(f_accum)
+                    f_act = torch.clamp(f_act, min=-0.17, max=10.0)
+                    q_x = int8_utils.quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+                else:
+                    raise ValueError(f"Unknown activation function: {activation}")
+                s_out, z_out = act_s, act_z
 
-                _evaluate_step(q_x, s_out, z_out, f"{prefix}_out")
+                _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))
 
         # Global Avg Pool & FC
         fc_in_scale = int8_state["fc"]["scale_in"]
@@ -289,7 +319,7 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
     return final_metrics
 
 
-def plot_error_metrics(metrics_dict, dataset_name):
+def plot_error_metrics(metrics_dict, dataset_name, activation: str = "relu"):
     """Generates a 4-panel graph tracking quantization errors across layers."""
     print(f"\n[plot] Generating quantization error graphs for {dataset_name}...")
 
@@ -304,6 +334,7 @@ def plot_error_metrics(metrics_dict, dataset_name):
 
     # Extract specific metrics into lists
     mae = [metrics_dict[l]["mean_absolute_error"] for l in valid_layers]
+    median_err = [metrics_dict[l]["median_absolute_error"] for l in valid_layers]
     max_err = [metrics_dict[l]["max_absolute_error"] for l in valid_layers]
     sqnr = [metrics_dict[l]["sqnr_db"] for l in valid_layers]
     cos_sim = [metrics_dict[l]["cosine_similarity"] for l in valid_layers]
@@ -320,8 +351,9 @@ def plot_error_metrics(metrics_dict, dataset_name):
     # X-axis ticks (using indices for spacing, replacing with names later)
     x = range(len(valid_layers))
 
-    # --- Plot 1: Absolute Errors (MAE & Max) ---
+    # --- Plot 1: Absolute Errors (MAE, Median, & Max) ---
     axs[0, 0].plot(x, mae, marker="o", color="blue", label="Mean Absolute Error")
+    axs[0, 0].plot(x, median_err, marker="v", color="orange", label="Median Absolute Error") # <-- ADD THIS
     axs[0, 0].plot(
         x,
         max_err,
@@ -370,7 +402,7 @@ def plot_error_metrics(metrics_dict, dataset_name):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     # Save the plot with a proper descriptive name
-    filename = f"quantization_divergence_{dataset_name.lower()}.png"
+    filename = f"quantization_divergence_{dataset_name.lower()}_{activation}.png"
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     print(f"[+] Saved error divergence graphs to {filename}")
 
@@ -383,13 +415,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_data", type=int, default=None, help="Number of images to process."
     )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu"],
+        help="Activation function the model was trained with",
+    )
     args = parser.parse_args()
 
-    metrics = evaluate_error(args.dataset, args.num_data)
+    metrics = evaluate_error(args.dataset, args.num_data, activation=args.activation)
 
-    file_name = f"error_accumulation_{args.dataset.lower()}.json"
+    file_name = f"error_accumulation_{args.dataset.lower()}_{args.activation}.json"
     with open(file_name, "w") as f:
-        json.dump({"dataset": args.dataset, "layer_metrics": metrics}, f, indent=2)
+        json.dump(
+            {
+                "dataset": args.dataset,
+                "activation": args.activation,
+                "layer_metrics": metrics,
+            },
+            f,
+            indent=2,
+        )
 
     print(f"\\n[+] Saved error accumulation log to {file_name}")
-    plot_error_metrics(metrics, args.dataset)
+    plot_error_metrics(metrics, args.dataset, args.activation)

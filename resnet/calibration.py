@@ -28,6 +28,7 @@ CALIBRATION_DATASETS = [
     "OCTMNIST",
     "BloodMNIST",
     "OrganAMNIST",
+    "PneumoniaMNIST",
 ]
 
 
@@ -51,6 +52,24 @@ def _load_module(module_name: str, file_path: str, prepend_dir: str):
             sys.modules["utils"] = previous_utils
 
 
+def _sample_loader_dataset(loader: torch.utils.data.DataLoader, max_samples: int = 1000, seed: int = 42):
+    dataset = loader.dataset
+    sample_count = min(max_samples, len(dataset))
+    if sample_count == len(dataset):
+        return loader
+
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(len(dataset), generator=generator)[:sample_count].tolist()
+    sampled_dataset = torch.utils.data.Subset(dataset, indices)
+    return torch.utils.data.DataLoader(
+        sampled_dataset,
+        batch_size=loader.batch_size,
+        shuffle=False,
+        num_workers=getattr(loader, "num_workers", 0),
+        pin_memory=getattr(loader, "pin_memory", False),
+    )
+
+
 def _get_test_loader(cfg, batch_size: int = 1):
     # Prevent stale globals in resnet18 from interfering
     import resnet18 as train_mod
@@ -64,20 +83,78 @@ def _get_test_loader(cfg, batch_size: int = 1):
     if (
         isinstance(setup_result, tuple)
         and len(setup_result) >= 3
-        and hasattr(setup_result[2], "dataset")
+        and hasattr(setup_result[0], "dataset")
     ):
-        loader = setup_result[2]
+        loader = _sample_loader_dataset(setup_result[0], max_samples=1000)
         train_mod.validate_loader_preprocessing(loader, cfg["display"], stage="calibration")
         return loader
 
     if train_mod.test_loader is not None:
-        train_mod.validate_loader_preprocessing(train_mod.test_loader, cfg["display"], stage="calibration")
-        return train_mod.test_loader
+        sampled_loader = _sample_loader_dataset(train_mod.test_loader, max_samples=1000)
+        train_mod.validate_loader_preprocessing(sampled_loader, cfg["display"], stage="calibration")
+        return sampled_loader
 
     raise RuntimeError(f"Could not resolve test loader for dataset: {cfg['display']}")
 
 
-def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None):
+# -----------------------------------
+# Local Calibration Hooks (GELU10 Aware)
+# -----------------------------------
+activation_ranges = {}
+
+
+def _activation_label(base_name: str, activation: str) -> str:
+    return f"{base_name}_{activation.lower()}"
+
+def register_hooks(model, activation: str):
+    handles = []
+    activation_ranges.clear()
+
+    def get_hook(name):
+        def hook(module, input, output):
+            in_tensor = input[0].detach()
+            out_tensor = output.detach()
+            
+            # --- NVIDIA GELU10 CLIPPING FOR PTQ ---
+            if isinstance(module, torch.nn.GELU):
+                out_tensor = torch.clamp(out_tensor, min=-0.17, max=10.0)
+
+            if name not in activation_ranges:
+                activation_ranges[name] = {
+                    "in_min": in_tensor.min().item(),
+                    "in_max": in_tensor.max().item(),
+                    "out_min": out_tensor.min().item(),
+                    "out_max": out_tensor.max().item(),
+                }
+            else:
+                activation_ranges[name]["in_min"] = min(activation_ranges[name]["in_min"], in_tensor.min().item())
+                activation_ranges[name]["in_max"] = max(activation_ranges[name]["in_max"], in_tensor.max().item())
+                activation_ranges[name]["out_min"] = min(activation_ranges[name]["out_min"], out_tensor.min().item())
+                activation_ranges[name]["out_max"] = max(activation_ranges[name]["out_max"], out_tensor.max().item())
+        return hook
+
+    # 1. Hook conv1 to capture the raw input image bounds
+    handles.append(model.conv1.register_forward_hook(get_hook("conv1")))
+
+    # 2. Hook initial activation
+    handles.append(model.activation.register_forward_hook(get_hook(_activation_label("conv1", activation))))
+
+    # 3. Hook the distinct outputs of every block stage
+    for layer_idx, layer in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
+        for block_idx, block in enumerate(layer):
+            prefix = f"layer{layer_idx}_block{block_idx}"
+            
+            handles.append(block.activation1.register_forward_hook(get_hook(_activation_label(f"{prefix}_conv1", activation))))
+            handles.append(block.bn2.register_forward_hook(get_hook(f"{prefix}_conv2_out")))
+            handles.append(block.shortcut.register_forward_hook(get_hook(f"{prefix}_shortcut_out")))
+            handles.append(block.activation2.register_forward_hook(get_hook(_activation_label(f"{prefix}_out", activation))))
+
+    # 4. Final FC
+    handles.append(model.fc.register_forward_hook(get_hook("fc")))
+
+    return handles
+
+def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None, activation: str = "relu"):
     int8_inference = _load_module(
         "resnet_int8_inference",
         os.path.join(INT8_DIR, "inference.py"),
@@ -92,7 +169,7 @@ def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None):
     import resnet18 as train_mod
 
     # Single-model calibration for supported datasets
-    cfg = int8_inference._resolve_infer_config(dataset)
+    cfg = int8_inference._resolve_infer_config(dataset, activation)
     display = cfg["display"]
 
     print(f"[calib] Dataset: {display} — building test loader (batch_size={batch_size})")
@@ -115,16 +192,16 @@ def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None):
     with torch.no_grad():
         for idx, (img, label) in enumerate(loader, 1):
             # clear previous ranges
-            int8_inference.activation_ranges.clear()
+            activation_ranges.clear()
 
             # register hooks and run one forward pass
-            handles = int8_inference.register_hooks(model)
+            handles = register_hooks(model, activation)
             _ = model(img)
             for h in handles:
                 h.remove()
 
             # merge activation_ranges into aggregated
-            for name, ranges in int8_inference.activation_ranges.items():
+            for name, ranges in activation_ranges.items():
                 if name not in aggregated:
                     aggregated[name] = {
                         "in_min": float(ranges["in_min"]),
@@ -163,9 +240,10 @@ def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None):
     # Default output directory is a `calibration` folder under this module
     out_dir = out_dir or os.path.join(THIS_DIR, "calibration")
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{dataset.lower().replace(' ', '_')}_calibration.json")
+    dataset_slug = dataset.lower().replace(" ", "_").replace("-", "_")
+    out_path = os.path.join(out_dir, f"{dataset_slug}_{activation}_calibration.json")
     with open(out_path, "w") as f:
-        json.dump({"dataset": display, "layers": calib}, f, indent=2)
+        json.dump({"dataset": display, "activation": activation, "layers": calib}, f, indent=2)
 
     print(f"[calib] Saved calibration to: {out_path}")
 
@@ -196,7 +274,13 @@ if __name__ == "__main__":
         default=None,
         help="Optional output directory for the calibration JSON",
     )
-
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu"],
+        help="Activation function the model was trained with"
+    )
     args = parser.parse_args()
     if args.nih_chest:
         args.dataset = "NIH-CHEST"
@@ -204,6 +288,6 @@ if __name__ == "__main__":
     if args.dataset is None:
         for ds in CALIBRATION_DATASETS:
             print(f"\n[calib] === Calibrating dataset: {ds} ===")
-            main(ds, batch_size=args.batch_size, out_dir=args.out_dir)
+            main(ds, batch_size=args.batch_size, out_dir=args.out_dir, activation=args.activation)
     else:
-        main(args.dataset, batch_size=args.batch_size, out_dir=args.out_dir)
+        main(args.dataset, batch_size=args.batch_size, out_dir=args.out_dir, activation=args.activation)

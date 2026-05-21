@@ -22,6 +22,7 @@ from resnet18 import ResNet18
 
 from utils import (
     compute_integer_multiplier,
+    dequantize_tensor,
     get_quantization_params,
     get_bias_quantization_params,
     compute_multiplier,
@@ -58,18 +59,30 @@ class FloatAdd(nn.Module):
     def forward(self, x, y):
         return x + y
 
+
+def _build_activation(activation: str) -> nn.Module:
+    if activation == "relu":
+        return nn.ReLU(inplace=True)
+    if activation == "gelu":
+        return nn.GELU()
+    raise ValueError(f"Unsupported activation: {activation}")
+
+
+def _activation_label(base_name: str, activation: str) -> str:
+    return f"{base_name}_{activation.lower()}"
+
 class BasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, stride=1, activation="relu"):
         super(BasicBlock, self).__init__()
+        self.activation1 = _build_activation(activation)
+        self.activation2 = _build_activation(activation)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu1 = nn.ReLU(inplace=True) 
         
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
         
         self.add = FloatAdd()
-        self.relu2 = nn.ReLU(inplace=True) 
         
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -82,7 +95,7 @@ class BasicBlock(nn.Module):
     def forward(self, x):
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu1(out)
+        out = self.activation1(out)
         
         out = self.conv2(out)
         out = self.bn2(out)
@@ -90,37 +103,37 @@ class BasicBlock(nn.Module):
         skip = self.shortcut(x)
         out = self.add(out, skip)
         
-        out = self.relu2(out)
+        out = self.activation2(out)
         return out
 
 class ResNet18Inference(nn.Module):
-    def __init__(self, num_classes=10, in_channels=3):
+    def __init__(self, num_classes=10, in_channels=3, activation="relu"):
         super(ResNet18Inference, self).__init__()
         self.in_channels = 64
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
+        self.activation = _build_activation(activation)
         
-        self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1)
-        self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2)
-        self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
-        self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
+        self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1, activation=activation)
+        self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2, activation=activation)
+        self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2, activation=activation)
+        self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2, activation=activation)
         
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
-    def _make_layer(self, block, out_channels, num_blocks, stride):
+    def _make_layer(self, block, out_channels, num_blocks, stride, activation):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_channels, out_channels, stride))
+            layers.append(block(self.in_channels, out_channels, stride, activation=activation))
             self.in_channels = out_channels
         return nn.Sequential(*layers)
 
     def forward(self, x):
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.activation(out)
         
         out = self.layer1(out)
         out = self.layer2(out)
@@ -137,15 +150,15 @@ class ResNet18Inference(nn.Module):
 # -----------------------------
 
 
-def _resolve_infer_config(infer_data: str):
+def _resolve_infer_config(infer_data: str, activation: str = "relu"):
     name = infer_data.upper()
 
     if name == "MNIST":
         return {
             "display": "MNIST",
             "setup_fn": train_mod.setup_MNIST,
-            "model": ResNet18Inference(num_classes=10, in_channels=1),
-            "model_path": "best_resnet18_mnist.pth",
+            "model": ResNet18Inference(num_classes=10, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_mnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -154,8 +167,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "CIFAR10",
             "setup_fn": train_mod.setup_CIFAR10,
-            "model": ResNet18Inference(num_classes=10, in_channels=3),
-            "model_path": "best_resnet18_cifar10.pth",
+            "model": ResNet18Inference(num_classes=10, in_channels=3, activation=activation),
+            "model_path": f"best_resnet18_{activation}_cifar10.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -164,8 +177,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "Brain-MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
-            "model": ResNet18Inference(num_classes=4, in_channels=1),
-            "model_path": "best_resnet18_brain_mri.pth",
+            "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_brain_mri.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -174,8 +187,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OCTMNIST",
             "setup_fn": train_mod.setup_OCTMNIST,
-            "model": ResNet18Inference(num_classes=4, in_channels=1),
-            "model_path": "best_resnet18_octmnist.pth",
+            "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_octmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -184,8 +197,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "BloodMNIST",
             "setup_fn": train_mod.setup_BloodMNIST,
-            "model": ResNet18Inference(num_classes=8, in_channels=3),
-            "model_path": "best_resnet18_bloodmnist.pth",
+            "model": ResNet18Inference(num_classes=8, in_channels=3, activation=activation),
+            "model_path": f"best_resnet18_{activation}_bloodmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -194,8 +207,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OrganAMNIST",
             "setup_fn": train_mod.setup_OrganAMNIST,
-            "model": ResNet18Inference(num_classes=11, in_channels=1),
-            "model_path": "best_resnet18_organamnist.pth",
+            "model": ResNet18Inference(num_classes=11, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_organamnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -204,12 +217,21 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "NIH-CHEST",
             "setup_fn": train_mod.setup_NIH_Chest,
-            "model": ResNet18Inference(num_classes=15, in_channels=1),
-            "model_path": "best_resnet18_NIH_Chest_XRay.pth",
+            "model": ResNet18Inference(num_classes=15, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_nih_chest_xray.pth",
             "is_multilabel": True,
             "eval_batch_size": 8,
         }
-
+    
+    if name == "PNEUMONIAMNIST":
+        return {
+            "display": "PneumoniaMNIST",
+            "setup_fn": train_mod.setup_PneumoniaMNIST,
+            "model": ResNet18Inference(num_classes=2, in_channels=1, activation=activation),
+            "model_path": f"best_resnet18_{activation}_pneumoniamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
     raise ValueError(f"Unknown dataset: {infer_data}")
 
 
@@ -305,7 +327,7 @@ def _evaluate_float_mean_auroc(model, loader, dataset_name: str):
 
 def _evaluate_integer_mean_auroc(model, loader, dataset_name: str):
     # 1. Load the offline compiled integer dictionary
-    cfg = _resolve_infer_config(dataset_name)
+    cfg = _resolve_infer_config(dataset_name, args.activation)
     int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
     if not os.path.exists(int8_model_path):
         raise FileNotFoundError(f"Missing compiled model: {int8_model_path}")
@@ -323,17 +345,17 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str):
         # Quantize input
         q_x = quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
 
-        # Traverse Conv1
+        # Traverse Conv1 (UPDATED SIGNATURE)
         q_x, s_out, z_out = run_integer_conv_block(
-            q_x, int8_state["conv1"], zp_in, apply_relu=True
+            q_x, int8_state["conv1"], zp_in, apply_act=True, act_name=args.activation
         )
 
-        # Traverse Residual Blocks
+        # Traverse Residual Blocks (UPDATED SIGNATURE)
         for layer_idx in range(1, 5):
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
                 q_x, s_out, z_out = run_integer_basic_block(
-                    q_x, int8_state[prefix], z_out, s_out
+                    q_x, int8_state[prefix], z_out, s_out, act_name=args.activation
                 )
 
         # Global Average Pool
@@ -367,31 +389,45 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str):
     print(f"[AUROC][{dataset_name}][int] Mean AUROC: {score:.4f}")
     return score
 
-
 # -----------------------------
 # 3. Calibration Hooks
 # -----------------------------
 activation_ranges = {}
 
 
-def _calibration_file_name(dataset_display: str):
-    return f"{dataset_display.lower().replace(' ', '_')}_calibration.json"
+def _calibration_file_name(dataset_display: str, activation: str = "relu"):
+    dataset_slug = dataset_display.lower().replace(' ', '_').replace('-', '_')
+    return f"{dataset_slug}_{activation}_calibration.json"
 
 
-def _calibration_file_path(dataset_display: str):
+def _calibration_file_path(dataset_display: str, activation: str = "relu"):
     return os.path.normpath(
-        os.path.join(THIS_DIR, "..", "calibration", _calibration_file_name(dataset_display))
+        os.path.join(THIS_DIR, "..", "calibration", _calibration_file_name(dataset_display, activation))
     )
 
 
-def load_calibration_ranges(dataset_display: str):
+def load_calibration_ranges(dataset_display: str, activation: str = "relu"):
     """Load offline calibration stats for a dataset from the calibration folder."""
-    calibration_path = _calibration_file_path(dataset_display)
+    calibration_path = _calibration_file_path(dataset_display, activation)
+    
+    # Try the new format first (with activation and underscores)
     if not os.path.exists(calibration_path):
-        raise FileNotFoundError(
-            f"Missing calibration file for {dataset_display}: {calibration_path}. "
-            f"Run resnet/calibration.py for this dataset first."
-        )
+        # For backward compatibility, also try the old format without activation suffix
+        # (which may use hyphens instead of underscores)
+        if activation == "relu":
+            # Try with hyphens for old files
+            old_dataset_slug = dataset_display.lower().replace(' ', '_')  # Keep hyphens
+            old_path = os.path.normpath(
+                os.path.join(THIS_DIR, "..", "calibration", f"{old_dataset_slug}_calibration.json")
+            )
+            if os.path.exists(old_path):
+                calibration_path = old_path
+        
+        if not os.path.exists(calibration_path):
+            raise FileNotFoundError(
+                f"Missing calibration file for {dataset_display} ({activation}): {calibration_path}. "
+                f"Run resnet/calibration.py for this dataset first."
+            )
 
     with open(calibration_path, "r") as f:
         payload = json.load(f)
@@ -438,15 +474,16 @@ def _get_layer_config(model: ResNet18Inference):
 
 def register_hooks(model: ResNet18Inference):
     handles = []
+    activation = model.activation.__class__.__name__.lower()
     
     # 1. Hook conv1 JUST to capture the raw input image bounds
     handles.append(model.conv1.register_forward_hook(
         lambda m, i, o: calibration_hook(m, i, o, "conv1")
     ))
 
-    # 2. Hook initial conv block output (post-relu) for the first integer pass
-    handles.append(model.relu.register_forward_hook(
-        lambda m, i, o: calibration_hook(m, i, o, "conv1_relu")
+    # 2. Hook initial conv block output (post-activation) for the first integer pass
+    handles.append(model.activation.register_forward_hook(
+        lambda m, i, o: calibration_hook(m, i, o, _activation_label("conv1", activation))
     ))
 
     # Hook the distinct outputs of every block stage
@@ -454,11 +491,11 @@ def register_hooks(model: ResNet18Inference):
         for block_idx, block in enumerate(layer):
             prefix = f"layer{layer_idx}_block{block_idx}"
             
-            # Post-conv1 block (after ReLU)
-            handles.append(block.relu1.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_conv1_relu")
+            # Post-conv1 block (after activation)
+            handles.append(block.activation1.register_forward_hook(
+                lambda m, i, o, p=prefix: calibration_hook(m, i, o, _activation_label(f"{p}_conv1", activation))
             ))
-            # Post-conv2 block (after BN, NO ReLU)
+            # Post-conv2 block (after BN, NO ReLU/Activation)
             handles.append(block.bn2.register_forward_hook(
                 lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_conv2_out")
             ))
@@ -466,9 +503,9 @@ def register_hooks(model: ResNet18Inference):
             handles.append(block.shortcut.register_forward_hook(
                 lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_shortcut_out")
             ))
-            # Final Block Output (after add -> relu2)
-            handles.append(block.relu2.register_forward_hook(
-                lambda m, i, o, p=prefix: calibration_hook(m, i, o, f"{p}_out")
+            # Final Block Output (after add -> activation2)
+            handles.append(block.activation2.register_forward_hook(
+                lambda m, i, o, p=prefix: calibration_hook(m, i, o, _activation_label(f"{p}_out", activation))
             ))
 
     handles.append(model.fc.register_forward_hook(
@@ -503,26 +540,38 @@ def fold_conv_bn_eval(conv, bn):
     
     return w_folded, b_folded
 
-def run_integer_conv_block(q_input, layer_data, zp_in, apply_relu=True):
-    # Load statically compiled integer params
+def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name="relu"):
     q_w = layer_data["q_weight"].to(q_input.device)
     zp_w = layer_data["zp_w"]
     q_bias = layer_data["q_bias"].to(q_input.device)
     q_M0 = layer_data["q_M0"]
     shift = layer_data["shift"]
-    zp_out = layer_data["zp_out"]
-    stride = layer_data["stride"]
-    padding = layer_data["padding"]
-
-    # Pure Integer Math
-    int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=stride, padding=padding)
-    int32_accum = add_bias(int32_accum, q_bias)
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
     
-    if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
-
-    return q_out, layer_data["scale_out"], zp_out
+    # Unpack both scales
+    conv_s = layer_data["conv_scale_out"]
+    conv_z = layer_data["conv_zp_out"]
+    
+    # Execute Integer Convolution
+    int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=layer_data["stride"], padding=layer_data["padding"])
+    int32_accum = add_bias(int32_accum, q_bias)
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, conv_z)
+    
+    if not apply_act:
+        return q_out, conv_s, conv_z
+        
+    act_s = layer_data["act_scale_out"]
+    act_z = layer_data["act_zp_out"]
+    
+    if act_name == "relu":
+        q_out = quantized_relu(q_out, act_z)
+    elif act_name == "gelu":
+        # FPU Fallback + GELU10
+        f_accum = dequantize_tensor(q_out, conv_s, conv_z)
+        f_act = torch.nn.functional.gelu(f_accum)
+        f_act = torch.clamp(f_act, min=-0.17, max=10.0)
+        q_out = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+        
+    return q_out, act_s, act_z
 
 
 def run_integer_fc(q_input, fc_data, zp_in):
@@ -540,29 +589,44 @@ def run_integer_fc(q_input, fc_data, zp_in):
     return q_out, fc_data["scale_out"], zp_out
 
 
-def run_integer_basic_block(q_x, block_data, zp_in, s_in):
+def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
     q_out1, s_out1, z_out1 = run_integer_conv_block(
-        q_x, block_data["conv1"], zp_in, apply_relu=True
+        q_x, block_data["conv1"], zp_in, apply_act=True, act_name=act_name
     )
 
     q_out2, s_out2, z_out2 = run_integer_conv_block(
-        q_out1, block_data["conv2"], z_out1, apply_relu=False
+        q_out1, block_data["conv2"], z_out1, apply_act=False
     )
 
     if "shortcut" not in block_data:
         q_short, s_short, z_short = q_x, s_in, zp_in
     else:
         q_short, s_short, z_short = run_integer_conv_block(
-            q_x, block_data["shortcut"], zp_in, apply_relu=False
+            q_x, block_data["shortcut"], zp_in, apply_act=False
         )
 
-    s_final = block_data["add"]["scale_out"]
-    z_final = block_data["add"]["zp_out"]
+    # Unpack the dual-scales for the Addition + Activation sequence
+    conv_s = block_data["add"]["conv_scale_out"]
+    conv_z = block_data["add"]["conv_zp_out"]
+    act_s = block_data["add"]["act_scale_out"]
+    act_z = block_data["add"]["act_zp_out"]
 
-    q_added = integer_add(q_out2, z_out2, s_out2, q_short, z_short, s_short, z_final, s_final)
-    q_final = quantized_relu(q_added, z_final)
+    # 1. Pure Integer Addition (Aligns scales and targets conv_s / conv_z)
+    q_added = integer_add(q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s)
 
-    return q_final, s_final, z_final
+    # 2. Apply Activation (ReLU or FPU Fallback)
+    if act_name == "relu":
+        q_final = quantized_relu(q_added, act_z)
+    elif act_name == "gelu":
+        # FPU Fallback + GELU10
+        f_accum = dequantize_tensor(q_added, conv_s, conv_z)
+        f_act = torch.nn.functional.gelu(f_accum)
+        f_act = torch.clamp(f_act, min=-0.17, max=10.0)
+        q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+    else:
+        raise ValueError(f"Unknown activation function: {act_name}")
+
+    return q_final, act_s, act_z
 
 # -----------------------------
 # 5. Main Execution
@@ -570,7 +634,7 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in):
 def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = True):
     print("--- Starting ResNet18 Quantized Inference Pipeline ---")
 
-    cfg = _resolve_infer_config(infer_data)
+    cfg = _resolve_infer_config(infer_data, args.activation)
     name = infer_data.upper()
     dataset_display = cfg["display"]
     model = cfg["model"]
@@ -676,13 +740,13 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     print("\n[3] Executing TRUE Integer-Only Inference...")
 
     # 2. Traverse Conv1
-    q_x, s_out, z_out = run_integer_conv_block(q_x, int8_state["conv1"], zp_in, apply_relu=True)
+    q_x, s_out, z_out = run_integer_conv_block(q_x, int8_state["conv1"], zp_in, apply_act=True, act_name=args.activation)
 
     # 3. Traverse Residual Blocks
     for layer_idx in range(1, 5):
         for block_idx in range(2):
             prefix = f"layer{layer_idx}_block{block_idx}"
-            q_x, s_out, z_out = run_integer_basic_block(q_x, int8_state[prefix], z_out, s_out)
+            q_x, s_out, z_out = run_integer_basic_block(q_x, int8_state[prefix], z_out, s_out, act_name=args.activation)
 
     # 4. Global Average Pooling (Using IN_SCALE, not OUT_SCALE)
     fc_in_scale = int8_state["fc"]["scale_in"]

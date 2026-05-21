@@ -135,6 +135,8 @@ def _normalize_bench_name(name: str) -> str:
         return "BloodMNIST"
     if name_upper == "ORGANAMNIST":
         return "OrganAMNIST"
+    if name_upper == "PNEUMONIAMNIST":
+        return "PneumoniaMNIST"
     raise ValueError(f"Unknown benchmark dataset: {name}")
 
 
@@ -162,6 +164,8 @@ def _train_dataset_for_checkpoint(dataset_name: str) -> None:
         args.data_dir = train_mod.DATA_CIFAR10_DIR
     elif train_data_flag == "OCTMNIST":
         args.data_dir = train_mod.DATA_OCTMNIST_DIR
+    elif train_data_flag == "PneumoniaMNIST":
+        args.data_dir = train_mod.DATA_PNEUMONIAMNIST_DIR
     elif train_data_flag == "BloodMNIST":
         args.data_dir = train_mod.DATA_BLOODMNIST_DIR
     elif train_data_flag == "OrganAMNIST":
@@ -174,7 +178,7 @@ def _train_dataset_for_checkpoint(dataset_name: str) -> None:
 
 
 def _ensure_checkpoint(dataset_name: str) -> None:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int8_inference._resolve_infer_config(dataset_name, args.activation)
     model_path = cfg["model_path"]
 
     if os.path.exists(model_path):
@@ -189,7 +193,7 @@ def _ensure_checkpoint(dataset_name: str) -> None:
 
 
 def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> DataLoader:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int8_inference._resolve_infer_config(dataset_name, args.activation)
     effective_batch_size = batch_size if batch_size is not None else cfg["eval_batch_size"]
 
     train_mod.train_loader = None
@@ -216,7 +220,7 @@ def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> Dat
 
 
 def _build_model(dataset_name: str) -> torch.nn.Module:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int8_inference._resolve_infer_config(dataset_name, args.activation)
     model = cfg["model"]
     state = torch.load(cfg["model_path"], map_location="cpu")
     if list(state.keys())[0].startswith("module."):
@@ -246,7 +250,7 @@ def _compute_batch_metrics(outputs: torch.Tensor, labels: torch.Tensor):
     return correct, total
 
 def _is_multilabel(dataset_name: str) -> bool:
-    return bool(int8_inference._resolve_infer_config(dataset_name)["is_multilabel"])
+    return bool(int8_inference._resolve_infer_config(dataset_name, args.activation)["is_multilabel"])
 
 
 def _format_metric_value(dataset_name: str, value) -> str:
@@ -331,7 +335,7 @@ def _int8_accuracy(
 
     print(f"[bench][{dataset_name}][int8] Starting benchmark over {target_images}/{total_images} images.")
 
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int8_inference._resolve_infer_config(dataset_name, args.activation)
     int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
     
     if not os.path.exists(int8_model_path):
@@ -354,12 +358,12 @@ def _int8_accuracy(
             images, labels = images[:remaining], labels[:remaining]
 
         q_x = int8_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint8)
-        q_x, s_out, z_out = int8_inference.run_integer_conv_block(q_x, int8_state["conv1"], zp_in, apply_relu=True)
+        q_x, s_out, z_out = int8_inference.run_integer_conv_block(q_x, int8_state["conv1"], zp_in, apply_act=True, act_name=args.activation)
 
         for layer_idx in range(1, 5):
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
-                q_x, s_out, z_out = int8_inference.run_integer_basic_block(q_x, int8_state[prefix], z_out, s_out)
+                q_x, s_out, z_out = int8_inference.run_integer_basic_block(q_x, int8_state[prefix], z_out, s_out, act_name=args.activation)
 
         fc_in_scale = int8_state["fc"]["scale_in"]
         fc_in_zp = int8_state["fc"]["zp_in"]
@@ -489,7 +493,7 @@ def _int32_accuracy(
 
     print(f"[bench][{dataset_name}][int32] Starting benchmark over {target_images}/{total_images} images.")
 
-    cfg = int32_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name, args.activation)
     int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
 
     if not os.path.exists(int32_model_path):
@@ -514,12 +518,12 @@ def _int32_accuracy(
             images, labels = images[:remaining], labels[:remaining]
 
         q_x = int32_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint32)
-        q_x, s_out, z_out = int32_inference.run_integer_conv_block(q_x, int32_state["conv1"], zp_in, apply_relu=True)
+        q_x, s_out, z_out = int32_inference.run_integer_conv_block(q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=args.activation)
 
         for layer_idx in range(1, 5):
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
-                q_x, s_out, z_out = int32_inference.run_integer_basic_block(q_x, int32_state[prefix], z_out, s_out)
+                q_x, s_out, z_out = int32_inference.run_integer_basic_block(q_x, int32_state[prefix], z_out, s_out, act_name=args.activation)
 
         fc_in_scale = int32_state["fc"]["scale_in"]
         fc_in_zp = int32_state["fc"]["zp_in"]
@@ -717,6 +721,13 @@ if __name__ == "__main__":
         choices=["fp32", "int8", "int32", "fxp32", "fxp64"],
         default=None,
         help="Benchmark a specific mode. If omitted, benchmarks all 5 modes.",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu"],
+        help="Activation function the model was trained with"
     )
     args = parser.parse_args()
 

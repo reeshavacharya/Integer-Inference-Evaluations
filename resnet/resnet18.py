@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset, Dataset
 from torchvision import datasets, transforms
-from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST
+from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
@@ -23,6 +23,8 @@ DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
 DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
 DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
 DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
+DATA_PNEUMONIAMNIST_DIR = os.path.join(DATA_ROOT, "PneumoniaMNIST")
+
 
 # -----------------------------
 # Device
@@ -45,8 +47,10 @@ class FloatAdd(nn.Module):
 
 
 class BasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, stride=1, activation="relu"):
         super(BasicBlock, self).__init__()
+        self.activation1 = _build_activation(activation)
+        self.activation2 = _build_activation(activation)
         self.conv1 = nn.Conv2d(
             in_channels,
             out_channels,
@@ -56,7 +60,6 @@ class BasicBlock(nn.Module):
             bias=False,
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu1 = nn.ReLU(inplace=True)  # Explicit ReLU 1
 
         self.conv2 = nn.Conv2d(
             out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
@@ -65,7 +68,6 @@ class BasicBlock(nn.Module):
 
         # The Addition Wrapper
         self.add = FloatAdd()
-        self.relu2 = nn.ReLU(inplace=True)  # Explicit ReLU 2
 
         # The Shortcut Fix
         if stride != 1 or in_channels != out_channels:
@@ -82,7 +84,7 @@ class BasicBlock(nn.Module):
     def forward(self, x):
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu1(out)
+        out = self.activation1(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
@@ -91,41 +93,51 @@ class BasicBlock(nn.Module):
         skip = self.shortcut(x)
         out = self.add(out, skip)
 
-        out = self.relu2(out)
+        out = self.activation2(out)
         return out
 
 
 class ResNet18(nn.Module):
-    def __init__(self, num_classes=10, in_channels=3):
+    def __init__(self, num_classes=10, in_channels=3, activation="relu"):
         super(ResNet18, self).__init__()
         self.in_channels = 64
+        self.activation = _build_activation(activation)
         # Use the provided number of input channels instead of hardcoding 3
         self.conv1 = nn.Conv2d(
             in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
         )
         self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
 
-        self.layer1 = self._make_layer(BasicBlock, 64, 2, stride=1)
-        self.layer2 = self._make_layer(BasicBlock, 128, 2, stride=2)
-        self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
-        self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
+        self.layer1 = self._make_layer(
+            BasicBlock, 64, 2, stride=1, activation=activation
+        )
+        self.layer2 = self._make_layer(
+            BasicBlock, 128, 2, stride=2, activation=activation
+        )
+        self.layer3 = self._make_layer(
+            BasicBlock, 256, 2, stride=2, activation=activation
+        )
+        self.layer4 = self._make_layer(
+            BasicBlock, 512, 2, stride=2, activation=activation
+        )
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
-    def _make_layer(self, block, out_channels, num_blocks, stride):
+    def _make_layer(self, block, out_channels, num_blocks, stride, activation):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_channels, out_channels, stride))
+            layers.append(
+                block(self.in_channels, out_channels, stride, activation=activation)
+            )
             self.in_channels = out_channels
         return nn.Sequential(*layers)
 
     def forward(self, x):
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.activation(out)
 
         out = self.layer1(out)
         out = self.layer2(out)
@@ -158,6 +170,7 @@ PREPROCESS_SPECS = {
     "OCTMNIST": {"channels": 1, "height": 28, "width": 28},
     "BLOODMNIST": {"channels": 3, "height": 28, "width": 28},
     "ORGANAMNIST": {"channels": 1, "height": 28, "width": 28},
+    "PNEUMONIAMNIST": {"channels": 1, "height": 28, "width": 28},
 }
 
 
@@ -166,6 +179,18 @@ def _normalize_dataset_key(dataset_name: str) -> str:
     if key == "CIFR10":
         return "CIFAR10"
     return key
+
+
+def _checkpoint_dataset_slug(dataset_name: str) -> str:
+    return _normalize_dataset_key(dataset_name).lower().replace("-", "_")
+
+
+def _build_activation(activation_name: str) -> nn.Module:
+    if activation_name == "relu":
+        return nn.ReLU(inplace=True)
+    if activation_name == "gelu":
+        return nn.GELU()
+    raise ValueError(f"Unsupported activation: {activation_name}")
 
 
 def validate_preprocessed_batch(
@@ -256,6 +281,7 @@ def setup_MNIST(batch_size: int):
 
     validate_loader_preprocessing(train_loader, "MNIST", stage="training")
     validate_loader_preprocessing(test_loader, "MNIST", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 def setup_CIFAR10(batch_size: int = 64):
@@ -339,6 +365,7 @@ def setup_CIFAR10(batch_size: int = 64):
 
     validate_loader_preprocessing(train_loader, "CIFAR10", stage="training")
     validate_loader_preprocessing(test_loader, "CIFAR10", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 # MedMNIST Dataset Setup Functions
@@ -348,22 +375,51 @@ def setup_OCTMNIST(batch_size: int):
 
     os.makedirs(DATA_OCTMNIST_DIR, exist_ok=True)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),  # Using MNIST normalization for grayscale
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.1307,), (0.3081,)
+            ),  # Using MNIST normalization for grayscale
+        ]
+    )
 
     # MedMNIST has built-in splits: train, val, test
-    train_dataset = OCTMNIST(split="train", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
-    val_dataset = OCTMNIST(split="val", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
-    test_dataset = OCTMNIST(split="test", transform=transform, download=True, root=DATA_OCTMNIST_DIR)
+    train_dataset = OCTMNIST(
+        split="train", transform=transform, download=True, root=DATA_OCTMNIST_DIR
+    )
+    val_dataset = OCTMNIST(
+        split="val", transform=transform, download=True, root=DATA_OCTMNIST_DIR
+    )
+    test_dataset = OCTMNIST(
+        split="test", transform=transform, download=True, root=DATA_OCTMNIST_DIR
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     validate_loader_preprocessing(train_loader, "OCTMNIST", stage="training")
     validate_loader_preprocessing(test_loader, "OCTMNIST", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 def setup_BloodMNIST(batch_size: int):
@@ -372,22 +428,61 @@ def setup_BloodMNIST(batch_size: int):
 
     os.makedirs(DATA_BLOODMNIST_DIR, exist_ok=True)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
 
     # MedMNIST has built-in splits: train, val, test
-    train_dataset = BloodMNIST(split="train", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
-    val_dataset = BloodMNIST(split="val", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
-    test_dataset = BloodMNIST(split="test", transform=transform, download=True, root=DATA_BLOODMNIST_DIR, as_rgb=True)
+    train_dataset = BloodMNIST(
+        split="train",
+        transform=transform,
+        download=True,
+        root=DATA_BLOODMNIST_DIR,
+        as_rgb=True,
+    )
+    val_dataset = BloodMNIST(
+        split="val",
+        transform=transform,
+        download=True,
+        root=DATA_BLOODMNIST_DIR,
+        as_rgb=True,
+    )
+    test_dataset = BloodMNIST(
+        split="test",
+        transform=transform,
+        download=True,
+        root=DATA_BLOODMNIST_DIR,
+        as_rgb=True,
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     validate_loader_preprocessing(train_loader, "BloodMNIST", stage="training")
     validate_loader_preprocessing(test_loader, "BloodMNIST", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 def setup_OrganAMNIST(batch_size: int):
@@ -396,22 +491,104 @@ def setup_OrganAMNIST(batch_size: int):
 
     os.makedirs(DATA_ORGANAMNIST_DIR, exist_ok=True)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),  # Using MNIST normalization for grayscale
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.1307,), (0.3081,)
+            ),  # Using MNIST normalization for grayscale
+        ]
+    )
 
     # MedMNIST has built-in splits: train, val, test
-    train_dataset = OrganAMNIST(split="train", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
-    val_dataset = OrganAMNIST(split="val", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
-    test_dataset = OrganAMNIST(split="test", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR)
+    train_dataset = OrganAMNIST(
+        split="train", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR
+    )
+    val_dataset = OrganAMNIST(
+        split="val", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR
+    )
+    test_dataset = OrganAMNIST(
+        split="test", transform=transform, download=True, root=DATA_ORGANAMNIST_DIR
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     validate_loader_preprocessing(train_loader, "OrganAMNIST", stage="training")
     validate_loader_preprocessing(test_loader, "OrganAMNIST", stage="training")
+    return train_loader, val_loader, test_loader
+
+
+def setup_PneumoniaMNIST(batch_size: int):
+    """Setup PneumoniaMNIST data with built-in train/val/test splits."""
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.1307,), (0.3081,)
+            ),  # Using MNIST normalization for grayscale
+        ]
+    )
+
+    # MedMNIST has built-in splits: train, val, test
+    train_dataset = PneumoniaMNIST(
+        split="train", transform=transform, download=True, root=DATA_PNEUMONIAMNIST_DIR
+    )
+    val_dataset = PneumoniaMNIST(
+        split="val", transform=transform, download=True, root=DATA_PNEUMONIAMNIST_DIR
+    )
+    test_dataset = PneumoniaMNIST(
+        split="test", transform=transform, download=True, root=DATA_PNEUMONIAMNIST_DIR
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    validate_loader_preprocessing(train_loader, "PNEUMONIAMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "PNEUMONIAMNIST", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
@@ -544,8 +721,7 @@ def setup_Brain_MRI(batch_size: int = 64):
 
     validate_loader_preprocessing(train_loader, "Brain-MRI", stage="training")
     validate_loader_preprocessing(test_loader, "Brain-MRI", stage="training")
-
-    return train_dataset
+    return train_loader, val_loader, test_loader
 
 
 class NIHChestDataset(Dataset):
@@ -595,7 +771,9 @@ class NIHChestDataset(Dataset):
             "Hernia",
             "No Finding",
         ]
-        self.disease_to_idx = {disease: idx for idx, disease in enumerate(self.all_diseases)}
+        self.disease_to_idx = {
+            disease: idx for idx, disease in enumerate(self.all_diseases)
+        }
 
     def __len__(self):
         return len(self.image_list)
@@ -640,10 +818,14 @@ class NIHChestDataset(Dataset):
 
     def _find_original_image(self, img_name):
         for i in range(1, 13):
-            potential_path = os.path.join(self.data_dir, f"images_{i:03d}", "images", img_name)
+            potential_path = os.path.join(
+                self.data_dir, f"images_{i:03d}", "images", img_name
+            )
             if os.path.exists(potential_path):
                 return potential_path
-        raise FileNotFoundError(f"Image {img_name} not found in any images_xxx/images directory")
+        raise FileNotFoundError(
+            f"Image {img_name} not found in any images_xxx/images directory"
+        )
 
 
 def setup_NIH_Chest(batch_size: int = 16):
@@ -755,6 +937,7 @@ def setup_NIH_Chest(batch_size: int = 16):
 
     validate_loader_preprocessing(train_loader, "NIH-CHEST", stage="training")
     validate_loader_preprocessing(test_loader, "NIH-CHEST", stage="training")
+    return train_loader, val_loader, test_loader
 
 
 def _train_current_dataset(num_epochs: int, best_model_path: str):
@@ -871,10 +1054,16 @@ def evaluate(model, dataloader, criterion, is_multilabel=False, is_medmnist=Fals
     elif is_medmnist:
         all_targets = np.concatenate(all_targets)
         all_outputs = np.vstack(all_outputs)
-        # MUST use multi_class="ovr" for single-label multi-class AUC
-        auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
+        # For binary classification (2 classes), use the positive class probability
+        if all_outputs.shape[1] == 2:
+            auc = roc_auc_score(all_targets, all_outputs[:, 1])
+        else:
+            # MUST use multi_class="ovr" for multi-class (3+) AUC
+            auc = roc_auc_score(
+                all_targets, all_outputs, multi_class="ovr", average="macro"
+            )
         acc = 100.0 * correct / total
-        metric_score = (auc, acc) # Return a tuple of both metrics
+        metric_score = (auc, acc)  # Return a tuple of both metrics
     else:
         metric_score = 100.0 * correct / total
 
@@ -889,13 +1078,18 @@ def main(args: argparse.Namespace):
 
     best_val_acc = 0.0
     num_epochs = 10
+    dataset_name = getattr(args, "dataset_name", getattr(args, "train_data", "MNIST"))
+    best_model_path = (
+        f"best_resnet18_{args.activation}_{_checkpoint_dataset_slug(dataset_name)}.pth"
+    )
 
     if args.data_dir == DATA_MNIST_DIR:
-        best_model_path = "best_resnet18_mnist.pth"
         setup_MNIST(args.batch_size)
 
         # Leave MNIST setup unchanged in spirit
-        model = ResNet18(num_classes=10, in_channels=args.in_channels).to(device)
+        model = ResNet18(
+            num_classes=10, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -903,12 +1097,13 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_CIFAR10_DIR:
-        best_model_path = "best_resnet18_cifar10.pth"
         num_epochs = 50
         setup_CIFAR10(args.batch_size)
 
         # CIFAR-10 has 10 classes, RGB input (in_channels should be 3)
-        model = ResNet18(num_classes=10, in_channels=3).to(device)
+        model = ResNet18(num_classes=10, in_channels=3, activation=args.activation).to(
+            device
+        )
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -916,13 +1111,14 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_BRAIN_MRI_DIR:
-        best_model_path = "best_resnet18_brain_mri.pth"
         num_epochs = 30
 
-        train_dataset = setup_Brain_MRI(args.batch_size)
+        train_dataset, _, _ = setup_Brain_MRI(args.batch_size)
 
         # Brain-MRI has 4 classes
-        model = ResNet18(num_classes=4, in_channels=args.in_channels).to(device)
+        model = ResNet18(
+            num_classes=4, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
 
         class_weights = _compute_class_weights_from_subset(train_dataset, num_classes=4)
         print(f"Using class weights: {class_weights.detach().cpu().tolist()}")
@@ -943,10 +1139,11 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_NIH_CHEST_XRAY_DIR:
-        best_model_path = "best_resnet18_NIH_Chest_XRay.pth"
         num_epochs = 30
-        train_dataset = setup_NIH_Chest(args.batch_size) 
-        model = ResNet18(num_classes=15, in_channels=args.in_channels).to(device)
+        train_dataset, _, _ = setup_NIH_Chest(args.batch_size)
+        model = ResNet18(
+            num_classes=15, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
 
         # Multi-label uses BCEWithLogitsLoss, not CrossEntropy
         criterion = nn.BCEWithLogitsLoss()
@@ -956,10 +1153,11 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_OCTMNIST_DIR:
-        best_model_path = "best_resnet18_octmnist.pth"
         num_epochs = 30
         setup_OCTMNIST(args.batch_size)
-        model = ResNet18(num_classes=4, in_channels=args.in_channels).to(device)
+        model = ResNet18(
+            num_classes=4, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -967,10 +1165,11 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_BLOODMNIST_DIR:
-        best_model_path = "best_resnet18_bloodmnist.pth"
         num_epochs = 30
         setup_BloodMNIST(args.batch_size)
-        model = ResNet18(num_classes=8, in_channels=3).to(device)
+        model = ResNet18(num_classes=8, in_channels=3, activation=args.activation).to(
+            device
+        )
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -978,10 +1177,23 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_ORGANAMNIST_DIR:
-        best_model_path = "best_resnet18_organamnist.pth"
         num_epochs = 30
         setup_OrganAMNIST(args.batch_size)
-        model = ResNet18(num_classes=11, in_channels=args.in_channels).to(device)
+        model = ResNet18(
+            num_classes=11, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_PNEUMONIAMNIST_DIR:
+        num_epochs = 30
+        setup_PneumoniaMNIST(args.batch_size)
+        model = ResNet18(
+            num_classes=2, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -990,10 +1202,11 @@ def main(args: argparse.Namespace):
 
     else:
         print(f"Training using default data directory: {DATA_MNIST_DIR}")
-        best_model_path = "best_resnet18_mnist.pth"
         setup_MNIST(args.batch_size)
 
-        model = ResNet18(num_classes=10, in_channels=args.in_channels).to(device)
+        model = ResNet18(
+            num_classes=10, in_channels=args.in_channels, activation=args.activation
+        ).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -1046,7 +1259,13 @@ def main(args: argparse.Namespace):
             metric_name = "Acc"
 
         # 1. Pass BOTH flags to evaluate
-        val_loss, val_metric = evaluate(model, val_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
+        val_loss, val_metric = evaluate(
+            model,
+            val_loader,
+            criterion,
+            is_multilabel=is_multilabel,
+            is_medmnist=is_medmnist,
+        )
 
         # 2. Dynamic Print & Save Logic
         if is_medmnist:
@@ -1061,7 +1280,7 @@ def main(args: argparse.Namespace):
                 best_val_acc = val_auc
                 torch.save(model.state_dict(), best_model_path)
                 print(f"Saved best model to {best_model_path}")
-                
+
         elif is_multilabel:
             print(
                 f"Epoch [{epoch+1}/{num_epochs}] | "
@@ -1072,7 +1291,7 @@ def main(args: argparse.Namespace):
                 best_val_acc = val_metric
                 torch.save(model.state_dict(), best_model_path)
                 print(f"Saved best model to {best_model_path}")
-                
+
         else:
             print(
                 f"Epoch [{epoch+1}/{num_epochs}] | "
@@ -1091,13 +1310,21 @@ def main(args: argparse.Namespace):
     model.to(device)
 
     # 1. Pass both flags to the final test evaluation
-    test_loss, test_metric = evaluate(model, test_loader, criterion, is_multilabel=is_multilabel, is_medmnist=is_medmnist)
+    test_loss, test_metric = evaluate(
+        model,
+        test_loader,
+        criterion,
+        is_multilabel=is_multilabel,
+        is_medmnist=is_medmnist,
+    )
 
     # 2. Dynamically format the print statements
     if is_medmnist:
         test_auc, test_acc = test_metric
         print(f"Best Validation AUC: {best_val_acc:.4f}")
-        print(f"Test Loss: {test_loss:.4f}, Test AUC: {test_auc:.4f}, Test ACC: {test_acc:.2f}%")
+        print(
+            f"Test Loss: {test_loss:.4f}, Test AUC: {test_auc:.4f}, Test ACC: {test_acc:.2f}%"
+        )
     elif is_multilabel:
         print(f"Best Validation {metric_name}: {best_val_acc:.4f}")
         print(f"Test Loss: {test_loss:.4f}, Test {metric_name}: {test_metric:.4f}")
@@ -1161,6 +1388,13 @@ def datasetDownloader(dataset_name: str):
         OrganAMNIST(split="val", download=True, root=DATA_ORGANAMNIST_DIR)
         OrganAMNIST(split="test", download=True, root=DATA_ORGANAMNIST_DIR)
 
+    if dataset_name == "PneumoniaMNIST":
+        print("Downloading PneumoniaMNIST dataset (MedMNIST)...")
+        os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+        PneumoniaMNIST(split="train", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+        PneumoniaMNIST(split="val", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+        PneumoniaMNIST(split="test", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1188,6 +1422,13 @@ if __name__ == "__main__":
         default=1,
         help="Number of input channels for the model (e.g., 1 for grayscale, 3 for RGB)",
     )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        choices=["relu", "gelu"],
+        required=True,
+        help="Activation function to use inside ResNet-18",
+    )
 
     args = parser.parse_args()
 
@@ -1195,29 +1436,41 @@ if __name__ == "__main__":
 
     if train_data_key == "MNIST":
         args.data_dir = DATA_MNIST_DIR
+        args.dataset_name = "MNIST"
         datasetDownloader("MNIST")
     elif train_data_key == "BRAIN-MRI":
         args.data_dir = DATA_BRAIN_MRI_DIR
+        args.dataset_name = "Brain-MRI"
         datasetDownloader("Brain-MRI")
     elif train_data_key in ("CIFR10", "CIFAR10"):
         args.data_dir = DATA_CIFAR10_DIR
+        args.dataset_name = "CIFAR10"
         datasetDownloader("CIFAR10")
     elif train_data_key == "NIH-CHEST":
         args.data_dir = DATA_NIH_CHEST_XRAY_DIR
+        args.dataset_name = "NIH-CHEST"
         datasetDownloader("NIH-CHEST")
     elif train_data_key == "OCTMNIST":
         args.data_dir = DATA_OCTMNIST_DIR
+        args.dataset_name = "OCTMNIST"
         datasetDownloader("OCTMNIST")
     elif train_data_key == "BLOODMNIST":
         args.data_dir = DATA_BLOODMNIST_DIR
+        args.dataset_name = "BloodMNIST"
         datasetDownloader("BloodMNIST")
     elif train_data_key == "ORGANAMNIST":
         args.data_dir = DATA_ORGANAMNIST_DIR
+        args.dataset_name = "OrganAMNIST"
         datasetDownloader("OrganAMNIST")
+    elif train_data_key == "PNEUMONIAMNIST":
+        args.data_dir = DATA_PNEUMONIAMNIST_DIR
+        args.dataset_name = "PneumoniaMNIST"
+        datasetDownloader("PneumoniaMNIST")
     else:
         print(
             f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}"
         )
         args.data_dir = DATA_MNIST_DIR
+        args.dataset_name = "MNIST"
 
     main(args)
