@@ -685,12 +685,12 @@ def _mode_suffix(mode: Optional[str]) -> str:
     return mode.replace("-", "_")
 
 
-def _results_filename(single_dataset_name: Optional[str], mode: Optional[str]) -> str:
+def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], activation: str) -> str:
     mode_part = _mode_suffix(mode)
     if single_dataset_name is None:
-        return f"benchmark_results_{mode_part}.json"
+        return f"benchmark_results_{mode_part}_{activation}.json"
     ds_part = single_dataset_name.lower().replace("-", "_")
-    return f"benchmark_results_{ds_part}_{mode_part}.json"
+    return f"benchmark_results_{ds_part}_{mode_part}_{activation}.json"
 
 
 if __name__ == "__main__":
@@ -742,9 +742,21 @@ if __name__ == "__main__":
         targets = [single_name]
 
     metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode)
-    results_file = _results_filename(single_name, args.mode)
+    results_file = _results_filename(single_name, args.mode, args.activation)
     with open(results_file, "w") as f:
         json.dump(metrics, f, indent=2)
+
+    # Also save per-dataset results into structured folder: resnet/Benchmark-Results/{dataset}/
+    bench_root = os.path.join(THIS_DIR, "benchmark-results")
+    os.makedirs(bench_root, exist_ok=True)
+    for ds, vals in metrics.items():
+        ds_part = ds.lower().replace("-", "_")
+        per_ds_dir = os.path.join(bench_root, ds_part)
+        os.makedirs(per_ds_dir, exist_ok=True)
+        per_file = _results_filename(ds, args.mode, args.activation)
+        per_path = os.path.join(per_ds_dir, per_file)
+        with open(per_path, "w") as pf:
+            json.dump({ds: vals}, pf, indent=2)
 
     print(f"\nSaved {results_file} with:")
     for ds, vals in metrics.items():

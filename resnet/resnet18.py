@@ -190,6 +190,8 @@ def _build_activation(activation_name: str) -> nn.Module:
         return nn.ReLU(inplace=True)
     if activation_name == "gelu":
         return nn.GELU()
+    if activation_name == "leaky_relu":
+        return nn.LeakyReLU(inplace=True, negative_slope=1.0)
     raise ValueError(f"Unsupported activation: {activation_name}")
 
 
@@ -1120,7 +1122,7 @@ def main(args: argparse.Namespace):
             num_classes=4, in_channels=args.in_channels, activation=args.activation
         ).to(device)
 
-        class_weights = _compute_class_weights_from_subset(train_dataset, num_classes=4)
+        class_weights = _compute_class_weights_from_subset(train_dataset.dataset, num_classes=4)
         print(f"Using class weights: {class_weights.detach().cpu().tolist()}")
 
         criterion = nn.CrossEntropyLoss(weight=class_weights)
@@ -1425,7 +1427,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--activation",
         type=str,
-        choices=["relu", "gelu"],
+        choices=["relu", "gelu", "leaky_relu"],
         required=True,
         help="Activation function to use inside ResNet-18",
     )

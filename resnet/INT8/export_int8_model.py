@@ -167,7 +167,7 @@ if __name__ == "__main__":
         "--activation",
         type=str,
         default="relu",
-        choices=["relu", "gelu"],
+        choices=["relu", "gelu", "leaky_relu"],
         help="Activation function the model was trained with"
     )
     args = parser.parse_args()

@@ -1,0 +1,267 @@
+{
+  "dataset": "OrganAMNIST",
+  "activation": "leaky_relu",
+  "layer_metrics": {
+    "conv1_leaky_relu": {
+      "cosine_similarity": 0.9996279671046508,
+      "sqnr_db": 31.284892559051514,
+      "mean_absolute_error": 0.022688680794090033,
+      "median_absolute_error": 0.02113793045282364,
+      "std_absolute_error": 0.014996070647612214,
+      "max_absolute_error": 0.12003445625305176,
+      "mean_shift": -0.00042315051541663706
+    },
+    "layer1_block0_conv1_leaky_relu": {
+      "cosine_similarity": 0.999536322554063,
+      "sqnr_db": 30.326374530792236,
+      "mean_absolute_error": 0.024152151308953762,
+      "median_absolute_error": 0.02288088947534561,
+      "std_absolute_error": 0.015377446310594678,
+      "max_absolute_error": 0.15066707134246826,
+      "mean_shift": -0.0006714016199111938
+    },
+    "layer1_block0_conv2_out": {
+      "cosine_similarity": 0.9981311685961751,
+      "sqnr_db": 24.2769136428833,
+      "mean_absolute_error": 0.049552581273019314,
+      "median_absolute_error": 0.048969950526952744,
+      "std_absolute_error": 0.029293790459632874,
+      "max_absolute_error": 0.18796217441558838,
+      "mean_shift": -2.1445099264383316e-05
+    },
+    "layer1_block0_out_leaky_relu": {
+      "cosine_similarity": 0.9982693342565192,
+      "sqnr_db": 24.59036684036255,
+      "mean_absolute_error": 0.06419353000819683,
+      "median_absolute_error": 0.05608166754245758,
+      "std_absolute_error": 0.0459755202755332,
+      "max_absolute_error": 0.3090181350708008,
+      "mean_shift": -0.0007652232889086008
+    },
+    "layer1_block1_conv1_leaky_relu": {
+      "cosine_similarity": 0.9994809649057033,
+      "sqnr_db": 29.669823169708252,
+      "mean_absolute_error": 0.025612083729356527,
+      "median_absolute_error": 0.02211427316069603,
+      "std_absolute_error": 0.01901465654373169,
+      "max_absolute_error": 0.22565233707427979,
+      "mean_shift": 0.0002803550742100924
+    },
+    "layer1_block1_conv2_out": {
+      "cosine_similarity": 0.9982605658686627,
+      "sqnr_db": 24.554166316986084,
+      "mean_absolute_error": 0.04805509280413389,
+      "median_absolute_error": 0.04715318325906992,
+      "std_absolute_error": 0.02875815937295556,
+      "max_absolute_error": 0.16078519821166992,
+      "mean_shift": 0.00029379280749708414
+    },
+    "layer1_block1_out_leaky_relu": {
+      "cosine_similarity": 0.9965713309455312,
+      "sqnr_db": 21.62629461288452,
+      "mean_absolute_error": 0.08874666318297386,
+      "median_absolute_error": 0.0761435255408287,
+      "std_absolute_error": 0.0652955174446106,
+      "max_absolute_error": 0.4601691663265228,
+      "mean_shift": -0.0005249273963272572
+    },
+    "layer2_block0_conv1_leaky_relu": {
+      "cosine_similarity": 0.9988842928728388,
+      "sqnr_db": 26.505621910095215,
+      "mean_absolute_error": 0.035329963080585,
+      "median_absolute_error": 0.030281109269708395,
+      "std_absolute_error": 0.026579740922898054,
+      "max_absolute_error": 0.32979220151901245,
+      "mean_shift": -0.00039919884875416756
+    },
+    "layer2_block0_conv2_out": {
+      "cosine_similarity": 0.9913500737916949,
+      "sqnr_db": 17.606236457824707,
+      "mean_absolute_error": 0.1076955571770668,
+      "median_absolute_error": 0.10643599182367325,
+      "std_absolute_error": 0.06358030252158642,
+      "max_absolute_error": 0.3615594506263733,
+      "mean_shift": 0.0002043410495389253
+    },
+    "layer2_block0_shortcut_out": {
+      "cosine_similarity": 0.9976128297096956,
+      "sqnr_db": 23.2159423828125,
+      "mean_absolute_error": 0.05596129409968853,
+      "median_absolute_error": 0.04685288481414318,
+      "std_absolute_error": 0.04309516865760088,
+      "max_absolute_error": 0.43322211503982544,
+      "mean_shift": 0.00022943795192986727
+    },
+    "layer2_block0_out_leaky_relu": {
+      "cosine_similarity": 0.9947166249723127,
+      "sqnr_db": 19.729647159576416,
+      "mean_absolute_error": 0.12820109724998474,
+      "median_absolute_error": 0.1148359626531601,
+      "std_absolute_error": 0.08859221637248993,
+      "max_absolute_error": 0.6656641364097595,
+      "mean_shift": 0.0005412678001448512
+    },
+    "layer2_block1_conv1_leaky_relu": {
+      "cosine_similarity": 0.9982980504759509,
+      "sqnr_db": 24.6806378364563,
+      "mean_absolute_error": 0.04302883241325617,
+      "median_absolute_error": 0.034952644258737564,
+      "std_absolute_error": 0.03507539350539446,
+      "max_absolute_error": 0.44384872913360596,
+      "mean_shift": 0.0008350845891982317
+    },
+    "layer2_block1_conv2_out": {
+      "cosine_similarity": 0.9939185426702025,
+      "sqnr_db": 19.163455963134766,
+      "mean_absolute_error": 0.08804474957287312,
+      "median_absolute_error": 0.0840622317045927,
+      "std_absolute_error": 0.055313014425337315,
+      "max_absolute_error": 0.4553194046020508,
+      "mean_shift": -0.00023920845706015825
+    },
+    "layer2_block1_out_leaky_relu": {
+      "cosine_similarity": 0.9938487315006599,
+      "sqnr_db": 19.082011222839355,
+      "mean_absolute_error": 0.15399280935525894,
+      "median_absolute_error": 0.1333581805229187,
+      "std_absolute_error": 0.11165677756071091,
+      "max_absolute_error": 1.0875816345214844,
+      "mean_shift": 0.00026094960048794746
+    },
+    "layer3_block0_conv1_leaky_relu": {
+      "cosine_similarity": 0.9990278219301982,
+      "sqnr_db": 27.117647171020508,
+      "mean_absolute_error": 0.03253447636961937,
+      "median_absolute_error": 0.026601449586451054,
+      "std_absolute_error": 0.026229077484458685,
+      "max_absolute_error": 0.30503350496292114,
+      "mean_shift": 3.373375511728227e-05
+    },
+    "layer3_block0_conv2_out": {
+      "cosine_similarity": 0.9861836673086875,
+      "sqnr_db": 15.51279616355896,
+      "mean_absolute_error": 0.13465863093733788,
+      "median_absolute_error": 0.1334889456629753,
+      "std_absolute_error": 0.07901822403073311,
+      "max_absolute_error": 0.41082581877708435,
+      "mean_shift": -0.00023731322289677337
+    },
+    "layer3_block0_shortcut_out": {
+      "cosine_similarity": 0.9973016391145436,
+      "sqnr_db": 22.677302360534668,
+      "mean_absolute_error": 0.060673351399600506,
+      "median_absolute_error": 0.05204962193965912,
+      "std_absolute_error": 0.04502239637076855,
+      "max_absolute_error": 0.44360271096229553,
+      "mean_shift": -9.187497198581696e-06
+    },
+    "layer3_block0_out_leaky_relu": {
+      "cosine_similarity": 0.9930477507643413,
+      "sqnr_db": 18.551569938659668,
+      "mean_absolute_error": 0.14927582070231438,
+      "median_absolute_error": 0.13639632612466812,
+      "std_absolute_error": 0.09996222704648972,
+      "max_absolute_error": 0.688273549079895,
+      "mean_shift": -0.00010913657024502754
+    },
+    "layer3_block1_conv1_leaky_relu": {
+      "cosine_similarity": 0.9990437988663043,
+      "sqnr_db": 27.177151679992676,
+      "mean_absolute_error": 0.03161357901990414,
+      "median_absolute_error": 0.02572359936311841,
+      "std_absolute_error": 0.025757629424333572,
+      "max_absolute_error": 0.3669741153717041,
+      "mean_shift": -0.0001200817059725523
+    },
+    "layer3_block1_conv2_out": {
+      "cosine_similarity": 0.9800117713197698,
+      "sqnr_db": 13.909829378128052,
+      "mean_absolute_error": 0.15343712642788887,
+      "median_absolute_error": 0.15228505432605743,
+      "std_absolute_error": 0.08991961367428303,
+      "max_absolute_error": 0.4590108394622803,
+      "mean_shift": 0.00010059092892333865
+    },
+    "layer3_block1_out_leaky_relu": {
+      "cosine_similarity": 0.9875049751275631,
+      "sqnr_db": 15.958455324172974,
+      "mean_absolute_error": 0.2096201367676258,
+      "median_absolute_error": 0.18270041421055794,
+      "std_absolute_error": 0.14998145401477814,
+      "max_absolute_error": 1.001135230064392,
+      "mean_shift": -5.1136594265699387e-05
+    },
+    "layer4_block0_conv1_leaky_relu": {
+      "cosine_similarity": 0.9988399279953659,
+      "sqnr_db": 26.358416080474854,
+      "mean_absolute_error": 0.03557170554995537,
+      "median_absolute_error": 0.02880562050268054,
+      "std_absolute_error": 0.028965278528630733,
+      "max_absolute_error": 0.3444739282131195,
+      "mean_shift": 0.00011461565736681223
+    },
+    "layer4_block0_conv2_out": {
+      "cosine_similarity": 0.975156160163166,
+      "sqnr_db": 12.925160646438599,
+      "mean_absolute_error": 0.18380123004317284,
+      "median_absolute_error": 0.18246100470423698,
+      "std_absolute_error": 0.1077522523701191,
+      "max_absolute_error": 0.5594230890274048,
+      "mean_shift": -1.4741963241249323e-06
+    },
+    "layer4_block0_shortcut_out": {
+      "cosine_similarity": 0.9978758865661828,
+      "sqnr_db": 23.71397066116333,
+      "mean_absolute_error": 0.05057232268154621,
+      "median_absolute_error": 0.043191700242459774,
+      "std_absolute_error": 0.037688094191253185,
+      "max_absolute_error": 0.35733282566070557,
+      "mean_shift": 1.7321639461442828e-05
+    },
+    "layer4_block0_out_leaky_relu": {
+      "cosine_similarity": 0.9878084765200603,
+      "sqnr_db": 16.11658477783203,
+      "mean_absolute_error": 0.18866918981075287,
+      "median_absolute_error": 0.18059983104467392,
+      "std_absolute_error": 0.1174341719597578,
+      "max_absolute_error": 0.7285957336425781,
+      "mean_shift": -2.9040034860372543e-05
+    },
+    "layer4_block1_conv1_leaky_relu": {
+      "cosine_similarity": 0.9990587862897411,
+      "sqnr_db": 27.007219314575195,
+      "mean_absolute_error": 0.03157819714397192,
+      "median_absolute_error": 0.02538149803876877,
+      "std_absolute_error": 0.02608013292774558,
+      "max_absolute_error": 0.2929539978504181,
+      "mean_shift": -1.8653227016329765e-05
+    },
+    "layer4_block1_conv2_out": {
+      "cosine_similarity": 0.9264812568834409,
+      "sqnr_db": 8.123474717140198,
+      "mean_absolute_error": 0.3055397868156433,
+      "median_absolute_error": 0.29789214581251144,
+      "std_absolute_error": 0.18389862030744553,
+      "max_absolute_error": 0.7795801162719727,
+      "mean_shift": -0.0006691632443107665
+    },
+    "layer4_block1_out_leaky_relu": {
+      "cosine_similarity": 0.9614490431860521,
+      "sqnr_db": 11.03401803970337,
+      "mean_absolute_error": 0.34137485921382904,
+      "median_absolute_error": 0.3052392452955246,
+      "std_absolute_error": 0.23324576765298843,
+      "max_absolute_error": 1.3175945281982422,
+      "mean_shift": -0.0007906903047114611
+    },
+    "fc": {
+      "cosine_similarity": 0.9959380146486618,
+      "sqnr_db": 20.226304531097412,
+      "mean_absolute_error": 0.40841006487607956,
+      "median_absolute_error": 0.28485584259033203,
+      "std_absolute_error": 0.42032135277986526,
+      "max_absolute_error": 3.6727004051208496,
+      "mean_shift": -0.024581409990787506
+    }
+  }
+}

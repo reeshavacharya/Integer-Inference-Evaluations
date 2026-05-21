@@ -117,7 +117,11 @@ def register_hooks(model, activation: str):
             
             # --- NVIDIA GELU10 CLIPPING FOR PTQ ---
             if isinstance(module, torch.nn.GELU):
-                out_tensor = torch.clamp(out_tensor, min=-0.17, max=10.0)
+                out_tensor = torch.clamp(out_tensor, min=-10.0, max=10.0)
+
+            # --- LeakyReLU10 CLIPPING FOR PTQ ---
+            elif isinstance(module, torch.nn.LeakyReLU):
+                out_tensor = torch.clamp(out_tensor, min=-50.0, max=50.0)
 
             if name not in activation_ranges:
                 activation_ranges[name] = {
@@ -278,7 +282,7 @@ if __name__ == "__main__":
         "--activation",
         type=str,
         default="relu",
-        choices=["relu", "gelu"],
+        choices=["relu", "gelu", "leaky_relu"],
         help="Activation function the model was trained with"
     )
     args = parser.parse_args()

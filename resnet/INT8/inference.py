@@ -65,6 +65,8 @@ def _build_activation(activation: str) -> nn.Module:
         return nn.ReLU(inplace=True)
     if activation == "gelu":
         return nn.GELU()
+    if activation == "leaky_relu":
+        return nn.LeakyReLU(inplace=True, negative_slope=1.0)
     raise ValueError(f"Unsupported activation: {activation}")
 
 
@@ -568,9 +570,14 @@ def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name=
         # FPU Fallback + GELU10
         f_accum = dequantize_tensor(q_out, conv_s, conv_z)
         f_act = torch.nn.functional.gelu(f_accum)
-        f_act = torch.clamp(f_act, min=-0.17, max=10.0)
+        f_act = torch.clamp(f_act, min=-10.0, max=10.0)
         q_out = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
-        
+    elif act_name == "leakyrelu":
+        # FPU Fallback + Symmetric LeakyReLU10
+        f_accum = dequantize_tensor(q_out, conv_s, conv_z)
+        f_act = torch.nn.functional.leaky_relu(f_accum, negative_slope=1.0)
+        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+        q_out = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
     return q_out, act_s, act_z
 
 
@@ -621,7 +628,13 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
         # FPU Fallback + GELU10
         f_accum = dequantize_tensor(q_added, conv_s, conv_z)
         f_act = torch.nn.functional.gelu(f_accum)
-        f_act = torch.clamp(f_act, min=-0.17, max=10.0)
+        f_act = torch.clamp(f_act, min=-10.0, max=10.0)
+        q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+    elif act_name == "leakyrelu":
+        # FPU Fallback + Symmetric LeakyReLU10
+        f_accum = dequantize_tensor(q_added, conv_s, conv_z)
+        f_act = torch.nn.functional.leaky_relu(f_accum, negative_slope=1.0)
+        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
         q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
     else:
         raise ValueError(f"Unknown activation function: {act_name}")
