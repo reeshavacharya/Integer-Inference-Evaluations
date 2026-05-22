@@ -69,8 +69,14 @@ class LayerMetrics:
         self.mean_shift_sum = 0.0
         self.max_abs_err = 0.0
         self.batches = 0
+        self.scale = None
+        self.zp = None
 
-    def update(self, fp_tensor, dq_tensor):
+    def update(self, fp_tensor, dq_tensor, scale=None, zp=None):
+        if self.scale is None:
+            self.scale = scale
+            self.zp = zp
+
         fp_flat = fp_tensor.detach().view(-1).float()
         dq_flat = dq_tensor.detach().view(-1).float()
 
@@ -107,6 +113,8 @@ class LayerMetrics:
         if self.batches == 0:
             return {}
         return {
+            "scale": self.scale,
+            "zero_point": self.zp,                
             "cosine_similarity": self.cos_sim_sum / self.batches,
             "sqnr_db": self.sqnr_sum / self.batches,
             "mean_absolute_error": self.mae_sum / self.batches,
@@ -128,41 +136,30 @@ def _activation_label(base_name: str, activation: str) -> str:
 def get_fp32_hook(name):
     def hook(module, input, output):
         fp32_tensors[name] = output.detach().clone()
-
     return hook
 
 
 def attach_fp32_hooks(model, activation: str):
     handles = []
-    handles.append(
-        model.activation.register_forward_hook(
-            get_fp32_hook(_activation_label("conv1", activation))
-        )
-    )
+    # Hook Initial Conv1 Pre-Act and Post-Act
+    handles.append(model.bn1.register_forward_hook(get_fp32_hook("conv1_pre_act")))
+    handles.append(model.activation.register_forward_hook(get_fp32_hook(_activation_label("conv1", activation))))
 
-    for l_idx, layer in enumerate(
-        [model.layer1, model.layer2, model.layer3, model.layer4], 1
-    ):
+    for l_idx, layer in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
         for b_idx, block in enumerate(layer):
             pfx = f"layer{l_idx}_block{b_idx}"
-            handles.append(
-                block.activation1.register_forward_hook(
-                    get_fp32_hook(_activation_label(f"{pfx}_conv1", activation))
-                )
-            )
-            handles.append(
-                block.bn2.register_forward_hook(get_fp32_hook(f"{pfx}_conv2_out"))
-            )
-            handles.append(
-                block.shortcut.register_forward_hook(
-                    get_fp32_hook(f"{pfx}_shortcut_out")
-                )
-            )
-            handles.append(
-                block.activation2.register_forward_hook(
-                    get_fp32_hook(_activation_label(f"{pfx}_out", activation))
-                )
-            )
+            
+            # Hook Block Conv1 Pre-Act and Post-Act
+            handles.append(block.bn1.register_forward_hook(get_fp32_hook(f"{pfx}_conv1_pre_act")))
+            handles.append(block.activation1.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_conv1", activation))))
+            
+            # Hook Intermediates
+            handles.append(block.bn2.register_forward_hook(get_fp32_hook(f"{pfx}_conv2_out")))
+            handles.append(block.shortcut.register_forward_hook(get_fp32_hook(f"{pfx}_shortcut_out")))
+            
+            # Hook Block Addition Pre-Act and Post-Act
+            handles.append(block.add.register_forward_hook(get_fp32_hook(f"{pfx}_add_pre_act")))
+            handles.append(block.activation2.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_out", activation))))
 
     handles.append(model.fc.register_forward_hook(get_fp32_hook("fc")))
     return handles
@@ -242,31 +239,77 @@ def evaluate_error(
             if name not in layer_trackers:
                 layer_trackers[name] = LayerMetrics()
             dq_tensor = s_out * (q_tensor.to(torch.float32) - z_out)
-            layer_trackers[name].update(fp32_tensors[name], dq_tensor)
+            layer_trackers[name].update(fp32_tensors[name], dq_tensor, s_out, z_out)
 
-        q_x, s_out, z_out = int8_inference.run_integer_conv_block(
-            q_x, int8_state["conv1"], zp_in, apply_act=True, act_name=activation
+        # 1. Unroll Initial Conv1
+        q_pre_act, conv_s, conv_z = int8_inference.run_integer_conv_block(
+            q_x, int8_state["conv1"], zp_in, apply_act=False
         )
-        _evaluate_step(q_x, s_out, z_out, _activation_label("conv1", activation))
+        # Evaluate Pre-Act
+        _evaluate_step(q_pre_act, conv_s, conv_z, "conv1_pre_act")
+
+        act_s = int8_state["conv1"]["act_scale_out"]
+        act_z = int8_state["conv1"]["act_zp_out"]
+
+        # Apply Activation
+        if activation == "relu":
+            q_x = int8_utils.quantized_relu(q_pre_act, act_z)
+        elif activation == "gelu":
+            f_accum = int8_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
+            f_act = F.gelu(f_accum)
+            f_act = torch.clamp(f_act, min=-10.0, max=10.0)
+            q_x = int8_utils.quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+        elif activation == "leaky_relu":
+            f_accum = int8_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
+            f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+            f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+            q_x = int8_utils.quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
+        else:
+            raise ValueError(f"Unknown activation function: {activation}")
+
+        # Evaluate Post-Act
+        _evaluate_step(q_x, act_s, act_z, _activation_label("conv1", activation))
+        s_out, z_out = act_s, act_z
 
         for layer_idx in range(1, 5):
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
                 block_data = int8_state[prefix]
 
-                q_out1, s_out1, z_out1 = int8_inference.run_integer_conv_block(
-                    q_x,
-                    block_data["conv1"],
-                    z_out,
-                    apply_act=True,
-                    act_name=activation,
+                # 2. Unroll Block Conv1
+                q_out1_pre, conv_s1, conv_z1 = int8_inference.run_integer_conv_block(
+                    q_x, block_data["conv1"], z_out, apply_act=False
                 )
+                # Evaluate Pre-Act
+                _evaluate_step(q_out1_pre, conv_s1, conv_z1, f"{prefix}_conv1_pre_act")
+
+                act_s1 = block_data["conv1"]["act_scale_out"]
+                act_z1 = block_data["conv1"]["act_zp_out"]
+
+                # Apply Activation
+                if activation == "relu":
+                    q_out1 = int8_utils.quantized_relu(q_out1_pre, act_z1)
+                elif activation == "gelu":
+                    f_accum = int8_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
+                    f_act = F.gelu(f_accum)
+                    f_act = torch.clamp(f_act, min=-10.0, max=10.0)
+                    q_out1 = int8_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=torch.uint8)
+                elif activation == "leaky_relu":
+                    f_accum = int8_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
+                    f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                    f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                    q_out1 = int8_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=torch.uint8)
+                else:
+                    raise ValueError(f"Unknown activation function: {activation}")
+
+                # Evaluate Post-Act
                 _evaluate_step(
                     q_out1,
-                    s_out1,
-                    z_out1,
+                    act_s1,
+                    act_z1,
                     _activation_label(f"{prefix}_conv1", activation),
                 )
+                s_out1, z_out1 = act_s1, act_z1
 
                 q_out2, s_out2, z_out2 = int8_inference.run_integer_conv_block(
                     q_out1, block_data["conv2"], z_out1, apply_act=False
@@ -289,6 +332,10 @@ def evaluate_error(
                 q_added = int8_utils.integer_add(
                     q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
                 )
+                
+                # 3. Evaluate the Addition Pre-Act
+                _evaluate_step(q_added, conv_s, conv_z, f"{prefix}_add_pre_act")
+
                 if activation == "relu":
                     q_x = int8_utils.quantized_relu(q_added, act_z)
                 elif activation == "gelu":
