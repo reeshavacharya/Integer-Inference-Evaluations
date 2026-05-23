@@ -7,8 +7,9 @@ Requires three files to exist in the current working directory:
   error_accumulation_{dataset}_relu.json
   error_accumulation_{dataset}_gelu.json
     error_accumulation_{dataset}_leaky_relu.json
+    (now expects mode suffix: error_accumulation_{dataset}_{activation}_{mode}.json)
 
-Saves: `error_comparison_{dataset}.png`
+Saves: `error_comparison_{dataset}_{mode}.png`
 """
 import argparse
 import json
@@ -60,13 +61,21 @@ def build_series(metrics, layers, key):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, help="Dataset slug to compare")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        required=True,
+        choices=["int8", "int32"],
+        help="Integer inference mode to read JSONs for",
+    )
     args = parser.parse_args()
 
     ds = args.dataset
     slug = ds.lower()
-    relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_relu.json")
-    gelu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_gelu.json")
-    leaky_relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_leaky_relu.json")
+    mode = args.mode
+    relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_relu_{mode}.json")
+    gelu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_gelu_{mode}.json")
+    leaky_relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_leaky_relu_{mode}.json")
 
     if not os.path.exists(relu_fname):
         print(f"ERROR: Missing file: {relu_fname}")
@@ -141,7 +150,7 @@ def main():
     axs[3].set_xticklabels(layers, rotation=45, ha="right", fontsize=8)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    out = os.path.join(OUT_DIR, f"error_comparison_{slug}.png")
+    out = os.path.join(OUT_DIR, f"error_comparison_{slug}_{mode}.png")
     plt.savefig(out, dpi=300, bbox_inches="tight")
     print(f"[+] Saved comparison plot to {out}")
 
