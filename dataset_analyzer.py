@@ -4,9 +4,8 @@ import os
 import torch
 import numpy as np
 import cv2
-from scipy.stats import kurtosis
-from skimage.measure import shannon_entropy
-from skimage.morphology import skeletonize
+import matplotlib.pyplot as plt
+
 from resnet.resnet18 import (
     setup_MNIST,
     setup_CIFAR10,
@@ -15,166 +14,345 @@ from resnet.resnet18 import (
     setup_OCTMNIST,
     setup_OrganAMNIST,
     setup_BloodMNIST,
+    setup_PneumoniaMNIST,
 )
-import matplotlib.pyplot as plt
 from resnet import resnet18 as resnet_mod
 
 
 DATASET_SETUP_FNS = {
-    "MNIST": setup_MNIST,
-    "CIFAR10": setup_CIFAR10,
-    "Brain-MRI": setup_Brain_MRI,
-    "NIH-CHEST": setup_NIH_Chest,
-    "OCTMNIST": setup_OCTMNIST,
+    "MNIST":       setup_MNIST,
+    "CIFAR10":     setup_CIFAR10,
+    "Brain-MRI":   setup_Brain_MRI,
+    "NIH-CHEST":   setup_NIH_Chest,
+    "OCTMNIST":    setup_OCTMNIST,
     "OrganAMNIST": setup_OrganAMNIST,
-    "BloodMNIST": setup_BloodMNIST,
+    "BloodMNIST":  setup_BloodMNIST,
+    "PneumoniaMNIST": setup_PneumoniaMNIST,
 }
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset-stats")
+OUTPUT_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset-stats")
 OUTPUT_JSON = os.path.join(OUTPUT_DIR, "dataset_stats.json")
 
-class DatasetQualityAnalyzer:
-    def __init__(self, dataloader, num_images=500):
-        """
-        Analyzes a PyTorch DataLoader to calculate pre-inference modality variance.
-        """
+# Canny thresholds — fixed across all datasets so edge density is comparable.
+# Low/high follow the commonly used 1:3 ratio recommended in the original
+# Canny (1986) paper.  Adjust here if your images are unusually low-contrast.
+CANNY_LOW  = 50
+CANNY_HIGH = 150
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _to_gray_uint8(img_chw: np.ndarray) -> np.ndarray:
+    """Convert a CHW float image (any range) to an HxW uint8 grayscale image."""
+    img_hwc = np.transpose(img_chw, (1, 2, 0))
+    lo, hi  = img_hwc.min(), img_hwc.max()
+    img_norm = (img_hwc - lo) / (hi - lo + 1e-8)
+
+    if img_norm.shape[-1] == 3:
+        gray = cv2.cvtColor((img_norm * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    else:
+        gray = (img_norm.squeeze() * 255).astype(np.uint8)
+
+    return gray
+
+
+def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
+    """Per-pixel Sobel gradient magnitude as a float32 map."""
+    gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    return np.sqrt(gx ** 2 + gy ** 2).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Metric functions
+# ---------------------------------------------------------------------------
+
+def gradient_centroid_deviation(grad_mag: np.ndarray) -> float:
+    """
+    Gradient energy centroid deviation.
+
+    Treats the Sobel gradient magnitude map as a 2-D mass distribution,
+    finds its energy-weighted centroid, and returns the Euclidean distance
+    of that centroid from the geometric centre of the image.
+
+    Normalised by the half-diagonal so values are resolution-independent
+    and comparable across datasets.
+
+    Interpretation
+    --------------
+    Low  → gradient energy is concentrated near the image centre
+           (well-centred, compact ROI — e.g. Brain-MRI, BloodMNIST).
+    High → energy is off-centre or spread towards the periphery
+           (scattered / irregular ROI — e.g. NIH-CHEST, OCTMNIST).
+    """
+    H, W   = grad_mag.shape
+    total  = grad_mag.sum()
+    if total == 0:
+        return 0.0
+
+    ys = np.arange(H).reshape(-1, 1).astype(np.float32)
+    xs = np.arange(W).reshape(1, -1).astype(np.float32)
+
+    cy = (grad_mag * ys).sum() / total
+    cx = (grad_mag * xs).sum() / total
+
+    centre_y, centre_x = (H - 1) / 2.0, (W - 1) / 2.0
+    half_diagonal      = np.sqrt(H ** 2 + W ** 2) / 2.0
+    deviation          = np.sqrt((cy - centre_y) ** 2 + (cx - centre_x) ** 2)
+
+    return float(deviation / half_diagonal)
+
+
+def spatial_entropy_of_gradient(grad_mag: np.ndarray) -> float:
+    """
+    Spatial entropy of the gradient magnitude map.
+
+    Normalises the gradient magnitude map into a probability distribution
+    over spatial positions and computes its Shannon entropy (in bits).
+
+    Interpretation
+    --------------
+    Low  → gradient energy is localised (consistent, predictable ROI).
+    High → gradient energy is diffuse across the image (scattered edges,
+           variable structure).  Directly predicts a wide calibration
+           range and coarser INT8 quantisation steps.
+    """
+    total = grad_mag.sum()
+    if total == 0:
+        return 0.0
+
+    p       = (grad_mag / total).flatten()
+    nonzero = p[p > 0]
+    return float(-np.sum(nonzero * np.log2(nonzero)))
+
+
+def canny_edge_density(gray: np.ndarray) -> float:
+    """
+    Canny edge density.
+
+    Implements the O.ED metric from Chu et al. (2025) "What Makes a
+    Visualization Image Complex?" (arXiv:2510.08332), Table 2:
+
+        ED = P_edge / P_total
+
+    where P_edge is the number of pixels identified as edges by the Canny
+    detector and P_total is the total number of pixels in the image.
+
+    The Canny thresholds (CANNY_LOW / CANNY_HIGH) are fixed constants
+    defined at the top of this file so that edge density is directly
+    comparable across all datasets.
+
+    Interpretation
+    --------------
+    Low  → few, clean boundaries — geometrically simple, compact shapes
+           (circles, smooth blobs).  Typical of Brain-MRI and BloodMNIST.
+    High → many edges — complex, fragmented, or textured boundaries.
+           Typical of NIH-CHEST (overlapping anatomical structures) or
+           OCTMNIST (horizontal retinal layer bands across full width).
+
+    Relationship to the quantisation hypothesis
+    -------------------------------------------
+    High edge density forces VGG19's early conv layers to activate across
+    a large spatial region.  Combined with high centroid deviation or high
+    spatial entropy, this widens the activation distribution and degrades
+    the effectiveness of a single INT8 calibration scale.
+    """
+    edges    = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH)
+    p_edge   = int(np.count_nonzero(edges))
+    p_total  = int(edges.size)
+    return float(p_edge / p_total) if p_total > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Analyser
+# ---------------------------------------------------------------------------
+
+class DatasetGeometryAnalyzer:
+    """
+    Computes three gradient / edge -based spatial geometry metrics.
+
+    Metrics reported (mean and std across num_images samples)
+    ---------------------------------------------------------
+    centroid_deviation
+        Gradient energy centroid deviation (normalised, dimensionless).
+    spatial_gradient_entropy
+        Shannon entropy of the spatial gradient distribution (bits).
+    canny_edge_density
+        Proportion of Canny-detected edge pixels (dimensionless, 0-1).
+        Defined per Chu et al. arXiv:2510.08332, Table 2 (O.ED).
+    """
+
+    def __init__(self, dataloader, num_images: int = 500):
         self.dataloader = dataloader
         self.num_images = num_images
 
-    def analyze(self):
-        metrics = {
-            "kurtosis": [],          
-            "shannon_entropy": [],   
-            "laplacian_variance": [], 
-            "edge_density": [],      # Visual congestion
-            "compactness": [],       # Roundness / Object complexity
-            "turns": [],             # Polygons / Sharp corners
-            "skeleton_complexity": [] # Internal branching
-        }
-        
+    def analyze(self) -> dict:
+        centroid_devs    = []
+        spatial_entropies = []
+        edge_densities   = []
+
         processed = 0
         for images, _ in self.dataloader:
             if processed >= self.num_images:
                 break
-                
+
             images_np = images.detach().cpu().numpy()
-            
+
             for i in range(images_np.shape[0]):
                 if processed >= self.num_images:
                     break
-                    
-                img = images_np[i]
-                img_hwc = np.transpose(img, (1, 2, 0))
-                
-                # 1. Pixel Kurtosis
-                metrics["kurtosis"].append(kurtosis(img.flatten(), fisher=True))
-                
-                # 2. Shannon Entropy
-                img_scaled = (img_hwc - img_hwc.min()) / (img_hwc.max() - img_hwc.min() + 1e-8)
-                metrics["shannon_entropy"].append(shannon_entropy(img_scaled))
-                
-                # Convert to Grayscale for structural/shape metrics
-                if img_hwc.shape[-1] == 3:
-                    gray = cv2.cvtColor((img_scaled * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-                else:
-                    gray = (img_scaled.squeeze() * 255).astype(np.uint8)
-                    
-                # 3. Laplacian Variance
-                metrics["laplacian_variance"].append(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-                # ----------------------------------------------------
-                # SHAPE ANALYSIS METRICS
-                # ----------------------------------------------------
-                
-                # Create a Binary Mask using Otsu's Thresholding to isolate the object
-                _, binary_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                
-                # 4. Edge Density
-                # Proportion of edge pixels to total pixels
-                edges = cv2.Canny(gray, 50, 150)
-                edge_density = np.count_nonzero(edges) / max(edges.size, 1)
-                metrics["edge_density"].append(edge_density)
+                gray     = _to_gray_uint8(images_np[i])
+                grad_mag = _gradient_magnitude(gray)
 
-                # Find contours on the binary mask to evaluate shape boundaries
-                contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
-                if contours:
-                    # Isolate the largest contour (the primary object/anatomy)
-                    c = max(contours, key=cv2.contourArea)
-                    area = cv2.contourArea(c)
-                    perimeter = cv2.arcLength(c, True)
-                    
-                    # 5. Compactness
-                    # Ratio of squared perimeter to area (perfect circle is ~12.57, higher is more irregular)
-                    compactness = (perimeter ** 2) / area if area > 0 else 0
-                    metrics["compactness"].append(compactness)
-                    
-                    # 6. Turns
-                    # Approximate the contour polygon and count the vertices (turns)
-                    approx = cv2.approxPolyDP(c, 0.02 * perimeter, True)
-                    metrics["turns"].append(len(approx))
-                else:
-                    metrics["compactness"].append(0)
-                    metrics["turns"].append(0)
-
-                # 7. Skeletons
-                # Measure branching complexity by reducing shape to a 1-pixel wide skeleton
-                bool_mask = binary_mask > 0
-                skeleton = skeletonize(bool_mask)
-                area_pixels = np.count_nonzero(bool_mask)
-                
-                # Calculate the ratio of skeleton pixels to total shape pixels
-                skeleton_complexity = np.count_nonzero(skeleton) / area_pixels if area_pixels > 0 else 0
-                metrics["skeleton_complexity"].append(skeleton_complexity)
+                centroid_devs.append(gradient_centroid_deviation(grad_mag))
+                spatial_entropies.append(spatial_entropy_of_gradient(grad_mag))
+                edge_densities.append(canny_edge_density(gray))
 
                 processed += 1
-                
-        # Aggregate and return the mean of each metric
-        return {k: float(np.mean(v)) for k, v in metrics.items()}
 
-def plot_dataset_metrics(dataset_name, metrics_dict, output_dir):
-    """Generates and saves a bar chart of the quality metrics."""
-    metrics = list(metrics_dict.keys())
-    values = list(metrics_dict.values())
+        return {
+            "centroid_deviation_mean":         float(np.mean(centroid_devs)),
+            "centroid_deviation_std":          float(np.std(centroid_devs)),
+            "spatial_gradient_entropy_mean":   float(np.mean(spatial_entropies)),
+            "spatial_gradient_entropy_std":    float(np.std(spatial_entropies)),
+            "canny_edge_density_mean":         float(np.mean(edge_densities)),
+            "canny_edge_density_std":          float(np.std(edge_densities)),
+        }
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Use a dynamic colormap to handle the 7 different metrics
-    colors = plt.cm.tab10.colors
-    bars = ax.bar(metrics, values, color=colors[:len(metrics)])
 
-    ax.set_yscale('symlog')
-    
-    ax.set_title(f"Pre-Inference Modality Metrics: {dataset_name}", fontsize=14, fontweight='bold')
-    ax.set_ylabel("Metric Value (SymLog Scale)", fontsize=12)
-    
-    # Rotate x-axis labels to prevent text overlap
-    plt.xticks(rotation=45, ha='right')
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
 
-    for bar in bars:
-        height = bar.get_height()
-        ax.annotate(f'{height:.2f}',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3), 
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=10)
+def plot_dataset_metrics(dataset_name: str, metrics: dict, output_dir: str):
+    """
+    Bar chart with error bars for the three geometry metrics.
+    Uses a dual y-axis: centroid deviation and edge density share the left
+    axis (both dimensionless 0-1); spatial entropy uses the right axis
+    (bits, different scale).
+    """
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax2 = ax1.twinx()
+
+    bar_specs = [
+        # (label,                          mean key,                        std key,                         axis,  color)
+        ("Centroid\nDeviation",            "centroid_deviation_mean",        "centroid_deviation_std",        ax1,   "#4C72B0"),
+        ("Canny Edge\nDensity",            "canny_edge_density_mean",        "canny_edge_density_std",        ax1,   "#55A868"),
+        ("Spatial Gradient\nEntropy (bits)","spatial_gradient_entropy_mean", "spatial_gradient_entropy_std", ax2,   "#DD8452"),
+    ]
+
+    x      = np.arange(len(bar_specs))
+    width  = 0.5
+    colors = [s[4] for s in bar_specs]
+
+    for idx, (label, mk, sk, ax, color) in enumerate(bar_specs):
+        mean = metrics[mk]
+        std  = metrics[sk]
+        bar  = ax.bar(idx, mean, width, yerr=std, capsize=7,
+                      color=color, edgecolor="black", linewidth=0.8,
+                      error_kw={"elinewidth": 1.5, "ecolor": "black"},
+                      label=label)
+        ax.text(idx, mean + std + mean * 0.05,
+                f"{mean:.4f}\n±{std:.4f}",
+                ha="center", va="bottom", fontsize=8)
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([s[0] for s in bar_specs], fontsize=10)
+    ax1.set_ylabel("Value (dimensionless)", fontsize=10)
+    ax2.set_ylabel("Spatial Gradient Entropy (bits)", fontsize=10, color="#DD8452")
+    ax1.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=0)
+
+    ax1.set_title(f"Spatial Geometry Metrics: {dataset_name}",
+                  fontsize=13, fontweight="bold")
+    ax1.grid(axis="y", linestyle="--", alpha=0.5)
 
     plt.tight_layout()
-    
     safe_name = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    filename = os.path.join(output_dir, f"{safe_name}_quality_metrics.png")
-    
-    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    path      = os.path.join(output_dir, f"{safe_name}_geometry_metrics.png")
+    plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"[analyzer] Saved graph to {filename}")
+    print(f"[analyzer] Saved plot → {path}")
+
+
+def plot_cross_dataset_comparison(all_stats: dict, output_dir: str):
+    """
+    Grouped bar chart comparing all datasets on all three metrics.
+
+    Centroid deviation and Canny edge density share the left axis
+    (both are dimensionless proportions).  Spatial gradient entropy
+    uses its own right axis (bits).
+
+    This is the key figure for the hypothesis: Brain-MRI and BloodMNIST
+    should cluster at low centroid deviation AND low edge density,
+    separate from the rest.
+    """
+    datasets = list(all_stats.keys())
+    n        = len(datasets)
+    x        = np.arange(n)
+    width    = 0.25
+
+    cd_means = [all_stats[d]["centroid_deviation_mean"]       for d in datasets]
+    cd_stds  = [all_stats[d]["centroid_deviation_std"]        for d in datasets]
+    ed_means = [all_stats[d]["canny_edge_density_mean"]       for d in datasets]
+    ed_stds  = [all_stats[d]["canny_edge_density_std"]        for d in datasets]
+    se_means = [all_stats[d]["spatial_gradient_entropy_mean"] for d in datasets]
+    se_stds  = [all_stats[d]["spatial_gradient_entropy_std"]  for d in datasets]
+
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    ax2 = ax1.twinx()
+
+    ekw = {"elinewidth": 1.2, "ecolor": "black"}
+
+    ax1.bar(x - width, cd_means, width, yerr=cd_stds, capsize=4,
+            label="Centroid Deviation (left)",
+            color="#4C72B0", alpha=0.85, edgecolor="black", error_kw=ekw)
+
+    ax1.bar(x,          ed_means, width, yerr=ed_stds, capsize=4,
+            label="Canny Edge Density (left)",
+            color="#55A868", alpha=0.85, edgecolor="black", error_kw=ekw)
+
+    ax2.bar(x + width,  se_means, width, yerr=se_stds, capsize=4,
+            label="Spatial Gradient Entropy (right)",
+            color="#DD8452", alpha=0.85, edgecolor="black", error_kw=ekw)
+
+    ax1.set_xlabel("Dataset", fontsize=12)
+    ax1.set_ylabel("Value (dimensionless)", fontsize=11)
+    ax2.set_ylabel("Spatial Gradient Entropy (bits)", fontsize=11, color="#DD8452")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(datasets, rotation=30, ha="right", fontsize=10)
+    ax1.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=0)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2,
+               loc="upper left", fontsize=9)
+
+    ax1.set_title("Cross-Dataset Spatial Geometry Comparison",
+                  fontsize=14, fontweight="bold")
+    ax1.grid(axis="y", linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "cross_dataset_geometry_comparison.png")
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[analyzer] Saved cross-dataset comparison → {path}")
+
+
+# ---------------------------------------------------------------------------
+# Loader resolution
+# ---------------------------------------------------------------------------
 
 def _resolve_test_loader(dataset_name: str, batch_size: int = 64):
     setup_fn = DATASET_SETUP_FNS[dataset_name]
 
     resnet_mod.train_loader = None
-    resnet_mod.val_loader = None
-    resnet_mod.test_loader = None
+    resnet_mod.val_loader   = None
+    resnet_mod.test_loader  = None
 
     setup_fn(batch_size=batch_size)
 
@@ -184,36 +362,45 @@ def _resolve_test_loader(dataset_name: str, batch_size: int = 64):
     return resnet_mod.test_loader
 
 
-def analyze_all_datasets(num_images: int = 500):
-    dataset_stats = {}
-    
-    os.makedirs(OUTPUT_DIR, exist_ok=True) 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    for dataset_name in [
-        "MNIST",
-        "CIFAR10",
-        "Brain-MRI",
-        "NIH-CHEST",
-        "OCTMNIST",
-        "OrganAMNIST",
-        "BloodMNIST",
-    ]:
+DATASETS = [
+    "MNIST",
+    "CIFAR10",
+    "Brain-MRI",
+    "NIH-CHEST",
+    "OCTMNIST",
+    "OrganAMNIST",
+    "BloodMNIST",
+    "PneumoniaMNIST",
+]
+
+
+def analyze_all_datasets(num_images: int = 500) -> dict:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    all_stats = {}
+
+    for dataset_name in DATASETS:
         print(f"[analyzer] Processing {dataset_name}...")
-        loader = _resolve_test_loader(dataset_name)
-        analyzer = DatasetQualityAnalyzer(loader, num_images=num_images)
-        
-        stats = analyzer.analyze()
-        dataset_stats[dataset_name] = stats
+        loader   = _resolve_test_loader(dataset_name)
+        analyzer = DatasetGeometryAnalyzer(loader, num_images=num_images)
+        stats    = analyzer.analyze()
+
+        all_stats[dataset_name] = stats
         print(f"[analyzer] {dataset_name}: {stats}")
-        
+
         plot_dataset_metrics(dataset_name, stats, OUTPUT_DIR)
 
-    return dataset_stats
+    plot_cross_dataset_comparison(all_stats, OUTPUT_DIR)
+    return all_stats
 
 
 if __name__ == "__main__":
     all_stats = analyze_all_datasets(num_images=500)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     with open(OUTPUT_JSON, "w") as f:
         json.dump(all_stats, f, indent=2)
-    print(f"[analyzer] Saved dataset stats to {OUTPUT_JSON}")
+
+    print(f"[analyzer] Saved all stats → {OUTPUT_JSON}")

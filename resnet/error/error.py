@@ -20,6 +20,7 @@ for p in (ROOT_DIR, THIS_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Ensure output directories exist
 os.makedirs(os.path.join(THIS_DIR, "json"), exist_ok=True)
 os.makedirs(os.path.join(THIS_DIR, "graphs"), exist_ok=True)
 
@@ -54,6 +55,7 @@ int32_inference = _load_module("resnet_int32_inference", os.path.join(INT32_DIR,
 # Error Tracking Classes
 # ---------------------------------------------------------
 
+
 class LayerMetrics:
     """Tracks running averages and absolute maximums for a single layer."""
 
@@ -74,7 +76,7 @@ class LayerMetrics:
             self.scale = scale
             self.zp = zp
 
-        # FIX 1: Enforce float64 for all reductions to prevent catastrophic cancellation
+        # Ensure float64 is strictly used to prevent 32-bit mantissa truncation
         fp_flat = fp_tensor.detach().view(-1).to(torch.float64)
         dq_flat = dq_tensor.detach().view(-1).to(torch.float64)
 
@@ -109,6 +111,8 @@ class LayerMetrics:
         if self.batches == 0:
             return {}
         return {
+            "scale": self.scale,
+            "zero_point": self.zp,
             "cosine_similarity": self.cos_sim_sum / self.batches,
             "sqnr_db": self.sqnr_sum / self.batches,
             "mean_absolute_error": self.mae_sum / self.batches,
@@ -131,14 +135,24 @@ def get_fp32_hook(name):
 
 def attach_fp32_hooks(model, activation: str):
     handles = []
+    # Hook Initial Conv1 Pre-Act and Post-Act
+    handles.append(model.bn1.register_forward_hook(get_fp32_hook("conv1_pre_act")))
     handles.append(model.activation.register_forward_hook(get_fp32_hook(_activation_label("conv1", activation))))
 
     for l_idx, layer in enumerate([model.layer1, model.layer2, model.layer3, model.layer4], 1):
         for b_idx, block in enumerate(layer):
             pfx = f"layer{l_idx}_block{b_idx}"
+
+            # Hook Block Conv1 Pre-Act and Post-Act
+            handles.append(block.bn1.register_forward_hook(get_fp32_hook(f"{pfx}_conv1_pre_act")))
             handles.append(block.activation1.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_conv1", activation))))
+
+            # Hook Intermediates
             handles.append(block.bn2.register_forward_hook(get_fp32_hook(f"{pfx}_conv2_out")))
             handles.append(block.shortcut.register_forward_hook(get_fp32_hook(f"{pfx}_shortcut_out")))
+
+            # Hook Block Addition Pre-Act and Post-Act
+            handles.append(block.add.register_forward_hook(get_fp32_hook(f"{pfx}_add_pre_act")))
             handles.append(block.activation2.register_forward_hook(get_fp32_hook(_activation_label(f"{pfx}_out", activation))))
 
     handles.append(model.fc.register_forward_hook(get_fp32_hook("fc")))
@@ -149,6 +163,7 @@ def attach_fp32_hooks(model, activation: str):
 # Main Execution Logic
 # ---------------------------------------------------------
 
+
 def evaluate_error(
     dataset_name: str,
     num_data: int = None,
@@ -156,11 +171,11 @@ def evaluate_error(
     activation: str = "relu",
     mode: str = "int8",
 ):
-    print(f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name} ({activation})...")
+    print(f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name} ({activation} | {mode})...")
 
     infer_module = int8_inference if mode == "int8" else int32_inference
     quant_utils = int8_utils if mode == "int8" else int32_utils
-    target_dtype = torch.uint8 if mode == "int8" else torch.int32
+    target_dtype = torch.uint8 if mode == "int8" else torch.uint32
 
     cfg = infer_module._resolve_infer_config(dataset_name, activation)
     model = cfg["model"]
@@ -188,6 +203,7 @@ def evaluate_error(
     else:
         raise RuntimeError("Could not resolve test loader.")
 
+    # High Granularity Hooks aligned to the unrolled execution
     attach_fp32_hooks(model, activation)
     layer_trackers = {}
 
@@ -214,8 +230,8 @@ def evaluate_error(
         def _evaluate_step(q_tensor, s_out, z_out, name):
             if name not in layer_trackers:
                 layer_trackers[name] = LayerMetrics()
-
-            # FIX 2: Float64 casting guarantees precision for both uint8 and uint32
+            
+            # Using Float64 guarantees precision for both uint8 and uint32 arrays
             dq_tensor = s_out * (q_tensor.to(torch.float64) - z_out)
             layer_trackers[name].update(fp32_tensors[name], dq_tensor, s_out, z_out)
 
@@ -223,10 +239,11 @@ def evaluate_error(
         q_pre_act, conv_s, conv_z = infer_module.run_integer_conv_block(
             q_x, int_state["conv1"], zp_in, apply_act=False
         )
+        _evaluate_step(q_pre_act, conv_s, conv_z, "conv1_pre_act")
+
         act_s = int_state["conv1"]["act_scale_out"]
         act_z = int_state["conv1"]["act_zp_out"]
 
-        # RESTORED: Pure integer clamped ReLU
         if activation == "relu":
             q_x = quant_utils.quantized_relu(q_pre_act, act_z)
         elif activation == "gelu":
@@ -252,6 +269,8 @@ def evaluate_error(
                 q_out1_pre, conv_s1, conv_z1 = infer_module.run_integer_conv_block(
                     q_x, block_data["conv1"], z_out, apply_act=False
                 )
+                _evaluate_step(q_out1_pre, conv_s1, conv_z1, f"{prefix}_conv1_pre_act")
+
                 act_s1 = block_data["conv1"]["act_scale_out"]
                 act_z1 = block_data["conv1"]["act_zp_out"]
 
@@ -292,6 +311,7 @@ def evaluate_error(
                 q_added = quant_utils.integer_add(
                     q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
                 )
+                _evaluate_step(q_added, conv_s, conv_z, f"{prefix}_add_pre_act")
 
                 if activation == "relu":
                     q_x = quant_utils.quantized_relu(q_added, act_z)
@@ -345,7 +365,7 @@ def plot_error_metrics(metrics_dict, dataset_name, activation: str = "relu", mod
 
     fig, axs = plt.subplots(2, 2, figsize=(18, 12))
     fig.suptitle(
-        f"ResNet18 FP32 vs Quantization Error Progression ({dataset_name})",
+        f"ResNet18 FP32 vs {mode.upper()} Quantization Error Progression ({dataset_name})",
         fontsize=16,
         fontweight="bold",
     )

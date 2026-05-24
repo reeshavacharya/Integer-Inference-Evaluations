@@ -1,65 +1,66 @@
 {
   "MNIST": {
-    "kurtosis": 3.5189950466156006,
-    "shannon_entropy": 1.6432012629884523,
-    "laplacian_variance": 10688.153091908322,
-    "edge_density": 0.11059438775510205,
-    "compactness": 78.19253286432202,
-    "turns": 9.464,
-    "skeleton_complexity": 0.3437048550351919
+    "centroid_deviation_mean": 0.0427103565748583,
+    "centroid_deviation_std": 0.01707054594884353,
+    "spatial_gradient_entropy_mean": 7.628033333778381,
+    "spatial_gradient_entropy_std": 0.30082192537029395,
+    "canny_edge_density_mean": 0.11059438775510205,
+    "canny_edge_density_std": 0.022550196650159164
   },
   "CIFAR10": {
-    "kurtosis": -0.27541908621788025,
-    "shannon_entropy": 8.554744820352933,
-    "laplacian_variance": 2890.6981538066866,
-    "edge_density": 0.259513671875,
-    "compactness": 64.9635095213801,
-    "turns": 9.616,
-    "skeleton_complexity": 0.2431538593280088
+    "centroid_deviation_mean": 0.07968472462744357,
+    "centroid_deviation_std": 0.04943412027501362,
+    "spatial_gradient_entropy_mean": 9.374230973243714,
+    "spatial_gradient_entropy_std": 0.25465138593555503,
+    "canny_edge_density_mean": 0.259513671875,
+    "canny_edge_density_std": 0.06532474265093502
   },
   "Brain-MRI": {
-    "kurtosis": -0.9979940056800842,
-    "shannon_entropy": 5.670265294397362,
-    "laplacian_variance": 7404.798897588244,
-    "edge_density": 0.24137755102040817,
-    "compactness": 20.568582418533893,
-    "turns": 8.932,
-    "skeleton_complexity": 0.1539612521750495
+    "centroid_deviation_mean": 0.04467604258155798,
+    "centroid_deviation_std": 0.029416038781969068,
+    "spatial_gradient_entropy_mean": 8.745039224624634,
+    "spatial_gradient_entropy_std": 0.25152186502654944,
+    "canny_edge_density_mean": 0.24137755102040817,
+    "canny_edge_density_std": 0.05075854995551001
   },
   "NIH-CHEST": {
-    "kurtosis": -0.2530662715435028,
-    "shannon_entropy": 7.382657702739165,
-    "laplacian_variance": 266.1766320892836,
-    "edge_density": 0.07642514349489796,
-    "compactness": 64.29390026582041,
-    "turns": 7.676,
-    "skeleton_complexity": 0.06259011044834573
+    "centroid_deviation_mean": 0.09046862256093834,
+    "centroid_deviation_std": 0.039451133033264314,
+    "spatial_gradient_entropy_mean": 14.753678424835204,
+    "spatial_gradient_entropy_std": 0.16942001097617537,
+    "canny_edge_density_mean": 0.07642514349489796,
+    "canny_edge_density_std": 0.031058508896399075
   },
   "OCTMNIST": {
-    "kurtosis": 2.9642343521118164,
-    "shannon_entropy": 6.09069400891141,
-    "laplacian_variance": 3997.2842804625675,
-    "edge_density": 0.16284438775510204,
-    "compactness": 66.63855053164158,
-    "turns": 5.268,
-    "skeleton_complexity": 0.3772465648884962
+    "centroid_deviation_mean": 0.17658537286668236,
+    "centroid_deviation_std": 0.09287167858697687,
+    "spatial_gradient_entropy_mean": 8.511901217460633,
+    "spatial_gradient_entropy_std": 0.17391442815421215,
+    "canny_edge_density_mean": 0.16284438775510204,
+    "canny_edge_density_std": 0.023809409544793842
   },
   "OrganAMNIST": {
-    "kurtosis": -0.4397108256816864,
-    "shannon_entropy": 6.310451260317958,
-    "laplacian_variance": 17644.665592487505,
-    "edge_density": 0.3117295918367347,
-    "compactness": 68.75841114343964,
-    "turns": 10.448,
-    "skeleton_complexity": 0.3179366762423365
+    "centroid_deviation_mean": 0.08021480595990534,
+    "centroid_deviation_std": 0.06077826837456998,
+    "spatial_gradient_entropy_mean": 9.00461997795105,
+    "spatial_gradient_entropy_std": 0.2929221393554009,
+    "canny_edge_density_mean": 0.3117295918367347,
+    "canny_edge_density_std": 0.05347858791973861
   },
   "BloodMNIST": {
-    "kurtosis": 0.38641461730003357,
-    "shannon_entropy": 7.168531204748632,
-    "laplacian_variance": 1814.1864282362817,
-    "edge_density": 0.23418367346938776,
-    "compactness": 27.030357896591237,
-    "turns": 5.652,
-    "skeleton_complexity": 0.1645268171845624
+    "centroid_deviation_mean": 0.04754188441579449,
+    "centroid_deviation_std": 0.030693484399186535,
+    "spatial_gradient_entropy_mean": 8.916705307006836,
+    "spatial_gradient_entropy_std": 0.18307844919499927,
+    "canny_edge_density_mean": 0.23418367346938776,
+    "canny_edge_density_std": 0.041093605370329356
+  },
+  "PneumoniaMNIST": {
+    "centroid_deviation_mean": 0.04727149756130033,
+    "centroid_deviation_std": 0.0325175908548055,
+    "spatial_gradient_entropy_mean": 9.232098014831543,
+    "spatial_gradient_entropy_std": 0.06567540243021829,
+    "canny_edge_density_mean": 0.276375,
+    "canny_edge_density_std": 0.03178161713611092
   }
 }
