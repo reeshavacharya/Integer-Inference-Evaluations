@@ -46,7 +46,7 @@ from utils import (
 # With 32-bit weights the P_hh << 32 step would reach ~2^76, overflowing.
 # ---------------------------------------------------------------------------
 
-WEIGHT_BITS = 16
+WEIGHT_BITS = 32
 
 
 def _activation_label(base_name, activation):

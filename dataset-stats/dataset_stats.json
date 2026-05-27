@@ -23,14 +23,6 @@
     "canny_edge_density_mean": 0.24137755102040817,
     "canny_edge_density_std": 0.05075854995551001
   },
-  "NIH-CHEST": {
-    "centroid_deviation_mean": 0.09046862256093834,
-    "centroid_deviation_std": 0.039451133033264314,
-    "spatial_gradient_entropy_mean": 14.753678424835204,
-    "spatial_gradient_entropy_std": 0.16942001097617537,
-    "canny_edge_density_mean": 0.07642514349489796,
-    "canny_edge_density_std": 0.031058508896399075
-  },
   "OCTMNIST": {
     "centroid_deviation_mean": 0.17658537286668236,
     "centroid_deviation_std": 0.09287167858697687,

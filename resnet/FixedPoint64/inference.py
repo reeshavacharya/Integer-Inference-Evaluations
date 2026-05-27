@@ -388,7 +388,7 @@ def _get_layer_config(model: ResNet18Inference):
     }
 
 
-def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
+def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True, apply_act=None, act_name="relu"):
     # Fold BN into Conv
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
@@ -402,8 +402,24 @@ def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
     )
     q_out = add_bias(q_accum, q_bias)
 
-    if apply_relu:
-        q_out = fixed_point_relu(q_out)
+    # Determine if we should apply activation
+    should_apply_act = apply_act if apply_act is not None else apply_relu
+    
+    if should_apply_act:
+        if act_name == "relu":
+            q_out = fixed_point_relu(q_out)
+        elif act_name == "gelu":
+            f_out = dequantize_fixed_point(q_out)
+            import torch.nn.functional as F
+            f_out = F.gelu(f_out)
+            f_out = torch.clamp(f_out, min=-10.0, max=10.0)
+            q_out = quantize_fixed_point(f_out)
+        elif act_name == "leaky_relu":
+            f_out = dequantize_fixed_point(q_out)
+            import torch.nn.functional as F
+            f_out = F.leaky_relu(f_out, negative_slope=1.0)
+            f_out = torch.clamp(f_out, min=-50.0, max=50.0)
+            q_out = quantize_fixed_point(f_out)
 
     return q_out
 

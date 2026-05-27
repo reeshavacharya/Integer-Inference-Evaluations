@@ -388,7 +388,7 @@ def _get_layer_config(model: ResNet18Inference):
     }
 
 
-def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
+def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True, apply_act=None, act_name="relu"):
     # Fold BN into Conv
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
@@ -402,19 +402,35 @@ def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True):
     )
     q_out = add_bias(q_accum, q_bias)
 
-    if apply_relu:
-        q_out = fixed_point_relu(q_out)
+    # Determine if we should apply activation
+    should_apply_act = apply_act if apply_act is not None else apply_relu
+    
+    if should_apply_act:
+        if act_name == "relu":
+            q_out = fixed_point_relu(q_out)
+        elif act_name == "gelu":
+            f_out = dequantize_fixed_point(q_out)
+            import torch.nn.functional as F
+            f_out = F.gelu(f_out)
+            f_out = torch.clamp(f_out, min=-10.0, max=10.0)
+            q_out = quantize_fixed_point(f_out)
+        elif act_name == "leaky_relu":
+            f_out = dequantize_fixed_point(q_out)
+            import torch.nn.functional as F
+            f_out = F.leaky_relu(f_out, negative_slope=1.0)
+            f_out = torch.clamp(f_out, min=-50.0, max=50.0)
+            q_out = quantize_fixed_point(f_out)
 
     return q_out
 
 
-def run_static_fixed_point_basic_block(q_x, block):
+def run_static_fixed_point_basic_block(q_x, block, act_name="relu"):
     # 1. Main Branch
     q_out1 = run_static_fixed_point_conv_block(
-        q_x, block.conv1, block.bn1, apply_relu=True
+        q_x, block.conv1, block.bn1, apply_relu=True, act_name=act_name
     )
     q_out2 = run_static_fixed_point_conv_block(
-        q_out1, block.conv2, block.bn2, apply_relu=False
+        q_out1, block.conv2, block.bn2, apply_relu=False, act_name=act_name
     )
 
     # 2. Shortcut Branch
@@ -423,15 +439,30 @@ def run_static_fixed_point_basic_block(q_x, block):
     else:
         short_conv, short_bn = block.shortcut[0], block.shortcut[1]
         q_short = run_static_fixed_point_conv_block(
-            q_x, short_conv, short_bn, apply_relu=False
+            q_x, short_conv, short_bn, apply_relu=False, act_name=act_name
         )
 
     # 3. Direct Addition (Upcast to 64-bit for safe summing, then clamp to 32-bit)
     sum_int64 = q_out2.to(torch.int64) + q_short.to(torch.int64)
     q_added = torch.clamp(sum_int64, -2147483648, 2147483647).to(torch.int32)
 
-    # 4. Final ReLU
-    return fixed_point_relu(q_added)
+    # 4. Final activation
+    if act_name == "relu":
+        return fixed_point_relu(q_added)
+    elif act_name == "gelu":
+        import torch.nn.functional as F
+        f_out = dequantize_fixed_point(q_added)
+        f_out = F.gelu(f_out)
+        f_out = torch.clamp(f_out, min=-10.0, max=10.0)
+        return quantize_fixed_point(f_out)
+    elif act_name == "leaky_relu":
+        import torch.nn.functional as F
+        f_out = dequantize_fixed_point(q_added)
+        f_out = F.leaky_relu(f_out, negative_slope=1.0)
+        f_out = torch.clamp(f_out, min=-50.0, max=50.0)
+        return quantize_fixed_point(f_out)
+    else:
+        return fixed_point_relu(q_added)
 
 
 def run_static_fixed_point_fc(q_input, fc):

@@ -630,7 +630,7 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
         f_act = torch.nn.functional.gelu(f_accum)
         f_act = torch.clamp(f_act, min=-10.0, max=10.0)
         q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint8)
-    elif act_name == "leakyrelu":
+    elif act_name == "leaky_relu":
         # FPU Fallback + Symmetric LeakyReLU10
         f_accum = dequantize_tensor(q_added, conv_s, conv_z)
         f_act = torch.nn.functional.leaky_relu(f_accum, negative_slope=1.0)
