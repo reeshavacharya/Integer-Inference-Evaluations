@@ -25,66 +25,122 @@ def dequantize_fixed_point(q_tensor, f_bits=F_BITS):
 # 2. Pure INT32 Arithmetic Operations (Post-Truncation via 64-bit MAC)
 # ---------------------------------------------------------
 
-def execute_and_shift_conv2d(q_x, q_w, stride=1, padding=0, f_bits=F_BITS):
-    """32-bit fixed-point conv2d using an internal 64-bit accumulator."""
-    # 1. Upcast inputs to int64 to simulate a hardware 64-bit MAC unit
-    x_mac = q_x.to(torch.int64)
-    w_mac = q_w.to(torch.int64)
-    
-    # 2. Multiply and Accumulate: The product natively lands at 32 fractional bits (16 + 16)
-    accum = F.conv2d(x_mac, w_mac, stride=stride, padding=padding)
-    
-    # 3. Post-Truncation: Shift right by 16 to return to Q15.16 format
-    q_out = (accum + (1 << (f_bits - 1))) >> f_bits
-    
-    return torch.clamp(q_out, INT32_MIN, INT32_MAX).to(torch.int32)
+def execute_and_shift_conv2d(q_x, q_w, stride=1, padding=0, f_bits=F_BITS, clamp=True):
+    """Strict Q15.16 MAC: Configurable truncation and accumulation."""
+    B, C_in, H, W = q_x.shape
+    C_out, _, kH, kW = q_w.shape
+
+    if padding > 0:
+        q_x = torch.nn.functional.pad(q_x, (padding, padding, padding, padding))
+
+    out_H = (H + 2 * padding - kH) // stride + 1
+    out_W = (W + 2 * padding - kW) // stride + 1
+
+    accum = torch.zeros((B, C_out, out_H, out_W), dtype=torch.int32, device=q_x.device)
+
+    for kh in range(kH):
+        h_start = kh
+        h_end = h_start + out_H * stride
+        for kw in range(kW):
+            w_start = kw
+            w_end = w_start + out_W * stride
+
+            x_slice = q_x[:, :, h_start:h_end:stride, w_start:w_end:stride]
+            w_slice = q_w[:, :, kh, kw].view(C_out, C_in, 1, 1)
+
+            # 1. ALU Multiply (Q15.16 * Q15.16 = Q31.32 internal wire)
+            prod_64 = x_slice.unsqueeze(1).to(torch.int64) * w_slice.to(torch.int64)
+
+            # 2. Immediate Truncation
+            prod_trunc = (prod_64 + (1 << (f_bits - 1))) >> f_bits
+            prod_32 = prod_trunc.to(torch.int32)
+
+            # 3. Configurable Addition
+            if clamp:
+                # Saturation Math (Hardware Clamping)
+                accum_64 = accum.to(torch.int64) + prod_32.sum(dim=2).to(torch.int64)
+                accum = torch.clamp(accum_64, INT32_MIN, INT32_MAX).to(torch.int32)
+            else:
+                # Modulo Math (Native 32-bit ALU)
+                accum = accum + prod_32.sum(dim=2, dtype=torch.int32)
+
+    return accum
 
 
-def execute_and_shift_linear(q_x, q_w, f_bits=F_BITS):
-    """32-bit fixed-point linear matmul using an internal 64-bit accumulator."""
-    x_mac = q_x.to(torch.int64)
-    w_mac = q_w.to(torch.int64)
+def execute_and_shift_linear(q_x, q_w, f_bits=F_BITS, clamp=True):
+    """Strict Q15.16 MAC: Configurable truncation and accumulation."""
+    B, in_f = q_x.shape
+    out_f = q_w.shape[0]
     
-    accum = F.linear(x_mac, w_mac)
-    
-    # --- Capture Logging Stats ---
-    max_accum_val = accum.abs().max().item()
-    max_bits_used = math.ceil(math.log2(max_accum_val + 1)) if max_accum_val > 0 else 0
-    
-    # In Post-Truncation, the remainder is the exact fractional precision dropped
-    mask = (1 << f_bits) - 1
-    max_remainder = (accum.abs() & mask).max().item()
-    # -----------------------------
-    
-    # Post-Truncation Shift
-    q_out = (accum + (1 << (f_bits - 1))) >> f_bits
-    q_out = torch.clamp(q_out, INT32_MIN, INT32_MAX).to(torch.int32)
-    
-    return q_out, max_bits_used, max_remainder
+    accum = torch.zeros((B, out_f), dtype=torch.int32, device=q_x.device)
+
+    for i in range(in_f):
+        x_val = q_x[:, i:i+1]
+        w_val = q_w[:, i:i+1].transpose(0, 1)
+
+        # 1. ALU Multiply
+        prod_64 = x_val.to(torch.int64) * w_val.to(torch.int64)
+
+        # 2. Immediate Truncation
+        prod_trunc = (prod_64 + (1 << (f_bits - 1))) >> f_bits
+        prod_32 = prod_trunc.to(torch.int32)
+
+        # 3. Configurable Addition
+        if clamp:
+            accum_64 = accum.to(torch.int64) + prod_32.to(torch.int64)
+            accum = torch.clamp(accum_64, INT32_MIN, INT32_MAX).to(torch.int32)
+        else:
+            accum = accum + prod_32
+
+    return accum, 0, 0
 
 
-def add_bias(q_accum, q_bias):
+def add_bias(q_accum, q_bias, clamp=True):
     """Adds the Q15.16 bias to the Q15.16 accumulator."""
     bias_int32 = q_bias.to(torch.int32)
     if q_accum.dim() == 4:
         bias_int32 = bias_int32.view(1, -1, 1, 1)
     
-    # Use int64 for the addition to prevent overflow, then clamp down
-    sum_int64 = q_accum.to(torch.int64) + bias_int32.to(torch.int64)
-    return torch.clamp(sum_int64, INT32_MIN, INT32_MAX).to(torch.int32)
+    if clamp:
+        # Saturation Math
+        sum_int64 = q_accum.to(torch.int64) + bias_int32.to(torch.int64)
+        return torch.clamp(sum_int64, INT32_MIN, INT32_MAX).to(torch.int32)
+    else:
+        # Modulo Math
+        return q_accum + bias_int32
 
 
-def fixed_point_relu(q_tensor):
-    return torch.clamp(q_tensor, min=0)
-
-
-def fixed_point_global_avg_pool2d(q_in):
-    """Sums spatial dimensions and divides by N using native integer division."""
-    q_int64 = q_in.to(torch.int64)
-    B, C, H, W = q_int64.shape
+def fixed_point_global_avg_pool2d(q_in, clamp=True):
+    """Sums spatial dimensions and divides by N."""
+    q_int32 = q_in.to(torch.int32)
+    B, C, H, W = q_int32.shape
     N = H * W
     
-    # Accumulate fully in int64 to avoid overflow
-    accum = q_int64.sum(dim=(2, 3), keepdim=True)
-    pooled = torch.div(accum + (N // 2), N, rounding_mode='floor')
-    return torch.clamp(pooled, INT32_MIN, INT32_MAX).to(torch.int32)
+    if clamp:
+        accum = q_int32.to(torch.int64).sum(dim=(2, 3), keepdim=True)
+        pooled = torch.div(accum + (N // 2), N, rounding_mode='floor')
+        return torch.clamp(pooled, INT32_MIN, INT32_MAX).to(torch.int32)
+    else:
+        accum = q_int32.sum(dim=(2, 3), keepdim=True, dtype=torch.int32)
+        pooled = torch.div(accum + (N // 2), N, rounding_mode='floor')
+        return pooled.to(torch.int32)
+
+def fixed_point_relu(q_tensor):
+    """Executes a pure 32-bit integer ReLU."""
+    # Since Q15.16 format has 0 float == 0 int, ReLU is a simple native clamp.
+    return torch.clamp(q_tensor, min=0)
+
+def fixed_point_gelu_lut(q_tensor, lut_dict):
+    """Executes a pure 32-bit Q15.16 GELU using a precomputed Lookup Table."""
+    lut = lut_dict["lut"].to(q_tensor.device)
+    q_min = lut_dict["q_min"]
+    q_max = lut_dict["q_max"]
+
+    # 1. Clamp to safe LUT boundaries
+    q_clamped = torch.clamp(q_tensor, q_min, q_max)
+    
+    # 2. Shift values down to act as 0-based array indices (using int64 safely for PyTorch indexing)
+    indices = q_clamped.to(torch.int64) - q_min
+    
+    # 3. Vectorized Table Fetch
+    return lut[indices]

@@ -49,6 +49,9 @@ int8_utils = _load_module("resnet_int8_utils", os.path.join(INT8_DIR, "utils.py"
 int8_inference = _load_module("resnet_int8_inference", os.path.join(INT8_DIR, "inference.py"), INT8_DIR)
 int32_utils = _load_module("resnet_int32_utils", os.path.join(INT32_DIR, "utils.py"), INT32_DIR)
 int32_inference = _load_module("resnet_int32_inference", os.path.join(INT32_DIR, "inference.py"), INT32_DIR)
+fp32_dir = os.path.join(ROOT_DIR, "FixedPoint32")
+fp32_utils = _load_module("resnet_fp32_utils", os.path.join(fp32_dir, "utils.py"), fp32_dir)
+fp32_inference = _load_module("resnet_fp32_inference", os.path.join(fp32_dir, "inference.py"), fp32_dir)
 
 
 # ---------------------------------------------------------
@@ -65,13 +68,16 @@ class LayerMetrics:
         self.mae_sum = 0.0
         self.median_ae_sum = 0.0
         self.std_err_sum = 0.0
-        self.mean_shift_sum = 0.0
+        
+        # New Strict Quantized Tracker
+        self.q_neg_pct_sum = 0.0
+        
         self.max_abs_err = 0.0
         self.batches = 0
         self.scale = None
         self.zp = None
 
-    def update(self, fp_tensor, dq_tensor, scale=None, zp=None):
+    def update(self, fp_tensor, dq_tensor, q_tensor, scale=None, zp=None):
         if self.scale is None:
             self.scale = scale
             self.zp = zp
@@ -96,32 +102,41 @@ class LayerMetrics:
         batch_std_err = abs_diff.std().item()
         batch_max_err = abs_diff.max().item()
 
-        mean_shift = (fp_flat.mean() - dq_flat.mean()).item()
+        # --- NEW: Strictly Quantized Negative Distribution (%) ---
+        # A quantized number is negative if it falls below the zero-point grid alignment.
+        q_flat = q_tensor.detach().view(-1).to(torch.int64)
+        q_neg = (q_flat < zp).float().mean().item() * 100.0
 
         self.cos_sim_sum += cos_sim
         self.sqnr_sum += sqnr
         self.mae_sum += mae
         self.median_ae_sum += batch_median_err
         self.std_err_sum += batch_std_err
-        self.mean_shift_sum += mean_shift
+        
+        self.q_neg_pct_sum += q_neg
+        
         self.max_abs_err = max(self.max_abs_err, batch_max_err)
         self.batches += 1
 
     def finalize(self):
         if self.batches == 0:
             return {}
+        
+        # Convert torch tensors to Python scalars for JSON serialization
+        scale_val = self.scale.item() if isinstance(self.scale, torch.Tensor) else self.scale
+        zp_val = self.zp.item() if isinstance(self.zp, torch.Tensor) else self.zp
+        
         return {
-            "scale": self.scale,
-            "zero_point": self.zp,
+            "scale": scale_val,
+            "zero_point": zp_val,
             "cosine_similarity": self.cos_sim_sum / self.batches,
             "sqnr_db": self.sqnr_sum / self.batches,
             "mean_absolute_error": self.mae_sum / self.batches,
             "median_absolute_error": self.median_ae_sum / self.batches,
             "std_absolute_error": self.std_err_sum / self.batches,
             "max_absolute_error": self.max_abs_err,
-            "mean_shift": self.mean_shift_sum / self.batches,
+            "q_pct_negative": self.q_neg_pct_sum / self.batches,
         }
-
 
 fp32_tensors = {}
 
@@ -170,14 +185,28 @@ def evaluate_error(
     batch_size: int = 64,
     activation: str = "relu",
     mode: str = "int8",
+    clamp: bool = True,
 ):
     print(f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name} ({activation} | {mode})...")
 
-    infer_module = int8_inference if mode == "int8" else int32_inference
-    quant_utils = int8_utils if mode == "int8" else int32_utils
-    target_dtype = torch.uint8 if mode == "int8" else torch.uint32
+    if mode == "int8":
+        infer_module = int8_inference
+        quant_utils = int8_utils
+        target_dtype = torch.uint8
+        cfg = infer_module._resolve_infer_config(dataset_name, activation)
+    elif mode == "int32":
+        infer_module = int32_inference
+        quant_utils = int32_utils
+        target_dtype = torch.uint32
+        cfg = infer_module._resolve_infer_config(dataset_name, activation)
+    elif mode == "fxp32":
+        infer_module = fp32_inference
+        quant_utils = fp32_utils
+        target_dtype = torch.int32
+        cfg = infer_module._resolve_infer_config(dataset_name, activation)
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
 
-    cfg = infer_module._resolve_infer_config(dataset_name, activation)
     model = cfg["model"]
 
     state = torch.load(cfg["model_path"], map_location="cpu")
@@ -186,11 +215,20 @@ def evaluate_error(
     model.load_state_dict(state)
     model.eval()
 
-    model_suffix = f"_{mode}.pth"
-    int_model_path = cfg["model_path"].replace(".pth", model_suffix)
-    if not os.path.exists(int_model_path):
-        raise FileNotFoundError(f"Missing compiled model: {int_model_path}. Run export_{mode}_model.py first.")
-    int_state = torch.load(int_model_path, map_location="cpu")
+    int_state = None
+    if mode in ("int8", "int32"):
+        model_suffix = f"_{mode}.pth"
+        int_model_path = cfg["model_path"].replace(".pth", model_suffix)
+        if not os.path.exists(int_model_path):
+            raise FileNotFoundError(f"Missing compiled model: {int_model_path}. Run export_{mode}_model.py first.")
+        int_state = torch.load(int_model_path, map_location="cpu")
+
+    global_gelu_lut = None
+    if mode == "fxp32" and activation == "gelu":
+        lut_path = os.path.join(fp32_dir, "gelu_q15_16_lut.pt")
+        if not os.path.exists(lut_path):
+            raise FileNotFoundError(f"Missing LUT file: {lut_path}. Run FixedPoint32/lut.py first.")
+        global_gelu_lut = torch.load(lut_path, map_location="cpu")
 
     train_mod.train_loader = None
     train_mod.val_loader = None
@@ -211,8 +249,10 @@ def evaluate_error(
     target_images = total_images if num_data is None else min(num_data, total_images)
     processed_images = 0
 
-    scale_in = int_state["meta"]["in_scale"]
-    zp_in = int_state["meta"]["in_zp"]
+    scale_in = int_state["meta"]["in_scale"] if int_state is not None else None
+    zp_in = int_state["meta"]["in_zp"] if int_state is not None else None
+    fxp_scale = 1.0 / (2 ** 16)
+    fxp_zp = 0
 
     for batch_idx, (images, labels) in enumerate(loader, 1):
         if processed_images >= target_images:
@@ -225,7 +265,10 @@ def evaluate_error(
         with torch.no_grad():
             _ = model(images)
 
-        q_x = quant_utils.quantize_tensor(images, scale_in, zp_in, dtype=target_dtype)
+        if mode == "fxp32":
+            q_x = quant_utils.quantize_fixed_point(images)
+        else:
+            q_x = quant_utils.quantize_tensor(images, scale_in, zp_in, dtype=target_dtype)
 
         def _evaluate_step(q_tensor, s_out, z_out, name):
             if name not in layer_trackers:
@@ -233,112 +276,219 @@ def evaluate_error(
             
             # Using Float64 guarantees precision for both uint8 and uint32 arrays
             dq_tensor = s_out * (q_tensor.to(torch.float64) - z_out)
-            layer_trackers[name].update(fp32_tensors[name], dq_tensor, s_out, z_out)
+            layer_trackers[name].update(fp32_tensors[name], dq_tensor, q_tensor, s_out, z_out)
 
-        # 1. Unroll Initial Conv1
-        q_pre_act, conv_s, conv_z = infer_module.run_integer_conv_block(
-            q_x, int_state["conv1"], zp_in, apply_act=False
-        )
-        _evaluate_step(q_pre_act, conv_s, conv_z, "conv1_pre_act")
+        if mode == "fxp32":
+            def _apply_activation(q_tensor, activation_name: str):
+                if activation_name == "relu":
+                    return fp32_utils.fixed_point_relu(q_tensor)
+                if activation_name == "gelu":
+                    return fp32_inference.fixed_point_gelu_lut(q_tensor, global_gelu_lut)
+                return q_tensor
 
-        act_s = int_state["conv1"]["act_scale_out"]
-        act_z = int_state["conv1"]["act_zp_out"]
+            q_pre_act = fp32_inference.run_static_fixed_point_conv_block(
+                q_x,
+                model.conv1,
+                model.bn1,
+                apply_act=False,
+                act_name=activation,
+                clamp=clamp,
+                lut_dict=global_gelu_lut,
+            )
+            _evaluate_step(q_pre_act, fxp_scale, fxp_zp, "conv1_pre_act")
+            q_x = _apply_activation(q_pre_act, activation)
+            _evaluate_step(q_x, fxp_scale, fxp_zp, _activation_label("conv1", activation))
+            s_out, z_out = fxp_scale, fxp_zp
 
-        if activation == "relu":
-            q_x = quant_utils.quantized_relu(q_pre_act, act_z)
-        elif activation == "gelu":
-            f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
-            f_act = F.gelu(f_accum)
-            f_act = torch.clamp(f_act, min=-10.0, max=10.0)
-            q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
-        elif activation == "leaky_relu":
-            f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
-            f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-            f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-            q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+            for layer_idx in range(1, 5):
+                for block_idx in range(2):
+                    prefix = f"layer{layer_idx}_block{block_idx}"
+                    block = getattr(model, f"layer{layer_idx}")[block_idx]
 
-        _evaluate_step(q_x, act_s, act_z, _activation_label("conv1", activation))
-        s_out, z_out = act_s, act_z
-
-        for layer_idx in range(1, 5):
-            for block_idx in range(2):
-                prefix = f"layer{layer_idx}_block{block_idx}"
-                block_data = int_state[prefix]
-
-                # 2. Unroll Block Conv1
-                q_out1_pre, conv_s1, conv_z1 = infer_module.run_integer_conv_block(
-                    q_x, block_data["conv1"], z_out, apply_act=False
-                )
-                _evaluate_step(q_out1_pre, conv_s1, conv_z1, f"{prefix}_conv1_pre_act")
-
-                act_s1 = block_data["conv1"]["act_scale_out"]
-                act_z1 = block_data["conv1"]["act_zp_out"]
-
-                if activation == "relu":
-                    q_out1 = quant_utils.quantized_relu(q_out1_pre, act_z1)
-                elif activation == "gelu":
-                    f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
-                    f_act = F.gelu(f_accum)
-                    f_act = torch.clamp(f_act, min=-10.0, max=10.0)
-                    q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
-                elif activation == "leaky_relu":
-                    f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
-                    f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-                    f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-                    q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
-
-                _evaluate_step(q_out1, act_s1, act_z1, _activation_label(f"{prefix}_conv1", activation))
-                s_out1, z_out1 = act_s1, act_z1
-
-                q_out2, s_out2, z_out2 = infer_module.run_integer_conv_block(
-                    q_out1, block_data["conv2"], z_out1, apply_act=False
-                )
-                _evaluate_step(q_out2, s_out2, z_out2, f"{prefix}_conv2_out")
-
-                if "shortcut" not in block_data:
-                    q_short, s_short, z_short = q_x, s_out, z_out
-                else:
-                    q_short, s_short, z_short = infer_module.run_integer_conv_block(
-                        q_x, block_data["shortcut"], z_out, apply_act=False
+                    q_out1_pre = fp32_inference.run_static_fixed_point_conv_block(
+                        q_x,
+                        block.conv1,
+                        block.bn1,
+                        apply_act=False,
+                        act_name=activation,
+                        clamp=clamp,
+                        lut_dict=global_gelu_lut,
                     )
-                    _evaluate_step(q_short, s_short, z_short, f"{prefix}_shortcut_out")
+                    _evaluate_step(q_out1_pre, fxp_scale, fxp_zp, f"{prefix}_conv1_pre_act")
+                    q_out1 = _apply_activation(q_out1_pre, activation)
+                    _evaluate_step(q_out1, fxp_scale, fxp_zp, _activation_label(f"{prefix}_conv1", activation))
 
-                conv_s = block_data["add"]["conv_scale_out"]
-                conv_z = block_data["add"]["conv_zp_out"]
-                act_s = block_data["add"]["act_scale_out"]
-                act_z = block_data["add"]["act_zp_out"]
+                    q_out2 = fp32_inference.run_static_fixed_point_conv_block(
+                        q_out1,
+                        block.conv2,
+                        block.bn2,
+                        apply_act=False,
+                        act_name=activation,
+                        clamp=clamp,
+                        lut_dict=global_gelu_lut,
+                    )
+                    _evaluate_step(q_out2, fxp_scale, fxp_zp, f"{prefix}_conv2_out")
 
-                q_added = quant_utils.integer_add(
-                    q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
-                )
-                _evaluate_step(q_added, conv_s, conv_z, f"{prefix}_add_pre_act")
+                    if isinstance(block.shortcut, torch.nn.Identity):
+                        q_short = q_x
+                    else:
+                        q_short = fp32_inference.run_static_fixed_point_conv_block(
+                            q_x,
+                            block.shortcut[0],
+                            block.shortcut[1],
+                            apply_act=False,
+                            act_name=activation,
+                            clamp=clamp,
+                            lut_dict=global_gelu_lut,
+                        )
+                        _evaluate_step(q_short, fxp_scale, fxp_zp, f"{prefix}_shortcut_out")
 
-                if activation == "relu":
-                    q_x = quant_utils.quantized_relu(q_added, act_z)
-                elif activation == "gelu":
-                    f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
+                    if clamp:
+                        q_added = torch.clamp(
+                            q_out2.to(torch.int64) + q_short.to(torch.int64),
+                            -2147483648,
+                            2147483647,
+                        ).to(torch.int32)
+                    else:
+                        q_added = q_out2 + q_short
+                    _evaluate_step(q_added, fxp_scale, fxp_zp, f"{prefix}_add_pre_act")
+
+                    q_x = _apply_activation(q_added, activation)
+                    s_out, z_out = fxp_scale, fxp_zp
+                    _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))
+
+            q_pooled = fp32_utils.fixed_point_global_avg_pool2d(q_x, clamp=clamp)
+            q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+            q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc, clamp=clamp)
+            _evaluate_step(q_out, fxp_scale, fxp_zp, "fc")
+        else:
+            # 1. Unroll Initial Conv1
+            q_pre_act, conv_s, conv_z = infer_module.run_integer_conv_block(
+                q_x, int_state["conv1"], zp_in, apply_act=False, clamp=clamp if mode == "int32" else True
+            )
+            _evaluate_step(q_pre_act, conv_s, conv_z, "conv1_pre_act")
+
+            act_s = int_state["conv1"]["act_scale_out"]
+            act_z = int_state["conv1"]["act_zp_out"]
+
+            if activation == "relu":
+                q_x = quant_utils.quantized_relu(q_pre_act, act_z)
+            elif activation == "gelu":
+                if mode == "int32":
+                    # --- NEW: Pure Integer Execution using LUT ---
+                    lut = int_state["conv1"]["gelu_lut"].to(q_pre_act.device)
+                    q_min = int_state["conv1"]["gelu_q_min"]
+                    q_max = int_state["conv1"]["gelu_q_max"]
+                    q_x = quant_utils.integer_gelu_lut(q_pre_act, lut, q_min, q_max)
+                else:
+                    f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
                     f_act = F.gelu(f_accum)
                     f_act = torch.clamp(f_act, min=-10.0, max=10.0)
                     q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
-                elif activation == "leaky_relu":
-                    f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
-                    f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-                    f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-                    q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+            elif activation == "leaky_relu":
+                f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
+                f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
 
-                s_out, z_out = act_s, act_z
-                _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))
+            _evaluate_step(q_x, act_s, act_z, _activation_label("conv1", activation))
+            s_out, z_out = act_s, act_z
 
-        fc_in_scale = int_state["fc"]["scale_in"]
-        fc_in_zp = int_state["fc"]["zp_in"]
+            for layer_idx in range(1, 5):
+                for block_idx in range(2):
+                    prefix = f"layer{layer_idx}_block{block_idx}"
+                    block_data = int_state[prefix]
 
-        q_pooled = quant_utils.integer_global_avg_pool2d(
-            q_x, z_out, s_out, fc_in_zp, fc_in_scale
-        )
-        q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+                    # 2. Unroll Block Conv1
+                    q_out1_pre, conv_s1, conv_z1 = infer_module.run_integer_conv_block(
+                        q_x, block_data["conv1"], z_out, apply_act=False, clamp=clamp if mode == "int32" else True
+                    )
+                    _evaluate_step(q_out1_pre, conv_s1, conv_z1, f"{prefix}_conv1_pre_act")
 
-        q_out, final_s, final_z = infer_module.run_integer_fc(q_fc_in, int_state["fc"], fc_in_zp)
-        _evaluate_step(q_out, final_s, final_z, "fc")
+                    act_s1 = block_data["conv1"]["act_scale_out"]
+                    act_z1 = block_data["conv1"]["act_zp_out"]
+
+                    if activation == "relu":
+                        q_out1 = quant_utils.quantized_relu(q_out1_pre, act_z1)
+                    elif activation == "gelu":
+                        if mode == "int32":
+                            # --- NEW: Pure Integer Execution using LUT ---
+                            lut = block_data["conv1"]["gelu_lut"].to(q_out1_pre.device)
+                            q_min = block_data["conv1"]["gelu_q_min"]
+                            q_max = block_data["conv1"]["gelu_q_max"]
+                            q_out1 = quant_utils.integer_gelu_lut(q_out1_pre, lut, q_min, q_max)
+                        else:
+                            f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
+                            f_act = F.gelu(f_accum)
+                            f_act = torch.clamp(f_act, min=-10.0, max=10.0)
+                            q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
+                    elif activation == "leaky_relu":
+                        f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
+                        f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                        q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
+
+                    _evaluate_step(q_out1, act_s1, act_z1, _activation_label(f"{prefix}_conv1", activation))
+                    s_out1, z_out1 = act_s1, act_z1
+
+                    q_out2, s_out2, z_out2 = infer_module.run_integer_conv_block(
+                        q_out1, block_data["conv2"], z_out1, apply_act=False, clamp=clamp if mode == "int32" else True
+                    )
+                    _evaluate_step(q_out2, s_out2, z_out2, f"{prefix}_conv2_out")
+
+                    if "shortcut" not in block_data:
+                        q_short, s_short, z_short = q_x, s_out, z_out
+                    else:
+                        q_short, s_short, z_short = infer_module.run_integer_conv_block(
+                            q_x, block_data["shortcut"], z_out, apply_act=False, clamp=clamp if mode == "int32" else True
+                        )
+                        _evaluate_step(q_short, s_short, z_short, f"{prefix}_shortcut_out")
+
+                    conv_s = block_data["add"]["conv_scale_out"]
+                    conv_z = block_data["add"]["conv_zp_out"]
+                    act_s = block_data["add"]["act_scale_out"]
+                    act_z = block_data["add"]["act_zp_out"]
+
+                    q_added = quant_utils.integer_add(
+                        q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s, clamp=clamp if mode == "int32" else True
+                    )
+                    _evaluate_step(q_added, conv_s, conv_z, f"{prefix}_add_pre_act")
+
+                    if activation == "relu":
+                        q_x = quant_utils.quantized_relu(q_added, act_z)
+                    elif activation == "gelu":
+                        if mode == "int32":
+                            # --- NEW: Pure Integer Execution using LUT ---
+                            lut = block_data["add"]["gelu_lut"].to(q_added.device)
+                            q_min = block_data["add"]["gelu_q_min"]
+                            q_max = block_data["add"]["gelu_q_max"]
+                            q_x = quant_utils.integer_gelu_lut(q_added, lut, q_min, q_max)
+                        else:
+                            f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
+                            f_act = F.gelu(f_accum)
+                            f_act = torch.clamp(f_act, min=-10.0, max=10.0)
+                            q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+                    elif activation == "leaky_relu":
+                        f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
+                        f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                        q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+
+                    s_out, z_out = act_s, act_z
+                    _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))
+
+            fc_in_scale = int_state["fc"]["scale_in"]
+            fc_in_zp = int_state["fc"]["zp_in"]
+
+            q_pooled = quant_utils.integer_global_avg_pool2d(
+                q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp if mode == "int32" else True
+            )
+            q_fc_in = q_pooled.view(q_pooled.size(0), -1)
+
+            q_out, final_s, final_z = infer_module.run_integer_fc(
+                q_fc_in, int_state["fc"], fc_in_zp, clamp=clamp if mode == "int32" else True
+            )
+            _evaluate_step(q_out, final_s, final_z, "fc")
 
         processed_images += images.size(0)
         print(f"[error] Processed {processed_images}/{target_images} images...")
@@ -361,7 +511,9 @@ def plot_error_metrics(metrics_dict, dataset_name, activation: str = "relu", mod
     max_err = [metrics_dict[l]["max_absolute_error"] for l in valid_layers]
     sqnr = [metrics_dict[l]["sqnr_db"] for l in valid_layers]
     cos_sim = [metrics_dict[l]["cosine_similarity"] for l in valid_layers]
-    mean_shift = [metrics_dict[l]["mean_shift"] for l in valid_layers]
+    
+    # Extract Strictly Quantized Negative Distribution
+    q_neg = [metrics_dict[l]["q_pct_negative"] for l in valid_layers]
 
     fig, axs = plt.subplots(2, 2, figsize=(18, 12))
     fig.suptitle(
@@ -394,11 +546,14 @@ def plot_error_metrics(metrics_dict, dataset_name, activation: str = "relu", mod
     axs[1, 0].set_ylim(min(0.85, min(cos_sim) - 0.05), 1.01)
     axs[1, 0].grid(True, linestyle=":", alpha=0.7)
 
-    axs[1, 1].bar(x, mean_shift, color=["red" if v < 0 else "blue" for v in mean_shift], alpha=0.6)
-    axs[1, 1].axhline(y=0, color="black", linestyle="-")
-    axs[1, 1].set_title("Mean Shift (Zero-Point Drift / Bias)")
-    axs[1, 1].set_ylabel("Shift Direction")
-    axs[1, 1].grid(True, linestyle=":", alpha=0.7, axis="y")
+    # NEW: Isolated Quantized Sign Distribution Graph
+    axs[1, 1].plot(x, q_neg, marker="v", color="red", label="Quantized % Negative (q_val < zero_point)")
+    
+    axs[1, 1].set_title("Quantized Sign Distribution (% Negative)")
+    axs[1, 1].set_ylabel("Percentage (%)")
+    axs[1, 1].set_ylim(-5, 105)
+    axs[1, 1].grid(True, linestyle=":", alpha=0.7)
+    axs[1, 1].legend()
 
     for ax in axs.flat:
         ax.set_xticks(x)
@@ -426,18 +581,33 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         required=True,
-        choices=["int8", "int32"],
-        help="Integer inference mode used for error analysis",
+        choices=["int8", "int32", "fxp32"],
+        help="Inference mode used for error analysis",
+    )
+    parser.add_argument(
+        "--clamp",
+        type=str,
+        required=False,
+        default=None,
+        choices=["true", "false", "True", "False"],
+        help="Clamp mode for int32/fxp32 analysis.",
     )
     args = parser.parse_args()
 
-    metrics = evaluate_error(args.dataset, args.num_data, activation=args.activation, mode=args.mode)
+    clamp_bool = None if args.clamp is None else args.clamp.lower() == "true"
+    if args.mode == "int8":
+        clamp_bool = True
+    if clamp_bool is None:
+        clamp_bool = True
+
+    metrics = evaluate_error(args.dataset, args.num_data, activation=args.activation, mode=args.mode, clamp=clamp_bool)
 
     data_dir = os.path.join(THIS_DIR, "json")
-    file_name = os.path.join(data_dir, f"error_accumulation_{args.dataset.lower()}_{args.activation}_{args.mode}.json")
+    clamp_part = "" if args.mode == "int8" else f"_{'clamped' if clamp_bool else 'unclamped'}"
+    file_name = os.path.join(data_dir, f"error_accumulation_{args.dataset.lower()}_{args.activation}_{args.mode}{clamp_part}.json")
     
     with open(file_name, "w") as f:
-        json.dump({"dataset": args.dataset, "activation": args.activation, "layer_metrics": metrics}, f, indent=2)
+        json.dump({"dataset": args.dataset, "activation": args.activation, "mode": args.mode, "clamp": clamp_bool, "layer_metrics": metrics}, f, indent=2)
 
     print(f"\n[+] Saved error accumulation log to {file_name}")
-    plot_error_metrics(metrics, args.dataset, args.activation, args.mode)
+    plot_error_metrics(metrics, args.dataset, args.activation, f"{args.mode}{clamp_part}")

@@ -4,12 +4,12 @@ Usage:
   python3 error_comparison.py --dataset MNIST
 
 Requires three files to exist in the current working directory:
-  error_accumulation_{dataset}_relu.json
-  error_accumulation_{dataset}_gelu.json
+    error_accumulation_{dataset}_relu.json
+    error_accumulation_{dataset}_gelu.json
     error_accumulation_{dataset}_leaky_relu.json
-    (now expects mode suffix: error_accumulation_{dataset}_{activation}_{mode}.json)
+    (mode suffix is now included: error_accumulation_{dataset}_{activation}_{mode}_{clamp}.json)
 
-Saves: `error_comparison_{dataset}_{mode}.png`
+Saves: `error_comparison_{dataset}_{mode}_{clamp}.png`
 """
 import argparse
 import json
@@ -65,17 +65,32 @@ def main():
         "--mode",
         type=str,
         required=True,
-        choices=["int8", "int32"],
+        choices=["int8", "int32", "fxp32"],
         help="Integer inference mode to read JSONs for",
+    )
+    parser.add_argument(
+        "--clamp",
+        type=str,
+        required=False,
+        default=None,
+        choices=["true", "false", "True", "False"],
+        help="Clamp mode suffix to load (ignored for int8).",
     )
     args = parser.parse_args()
 
     ds = args.dataset
     slug = ds.lower()
     mode = args.mode
-    relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_relu_{mode}.json")
-    gelu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_gelu_{mode}.json")
-    leaky_relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_leaky_relu_{mode}.json")
+    clamp_bool = None if args.clamp is None else args.clamp.lower() == "true"
+    if mode == "int8":
+        clamp_part = ""
+    else:
+        if clamp_bool is None:
+            clamp_bool = True
+        clamp_part = f"_{'clamped' if clamp_bool else 'unclamped'}"
+    relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_relu_{mode}{clamp_part}.json")
+    gelu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_gelu_{mode}{clamp_part}.json")
+    leaky_relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_leaky_relu_{mode}{clamp_part}.json")
 
     if not os.path.exists(relu_fname):
         print(f"ERROR: Missing file: {relu_fname}")
@@ -150,7 +165,7 @@ def main():
     axs[3].set_xticklabels(layers, rotation=45, ha="right", fontsize=8)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    out = os.path.join(OUT_DIR, f"error_comparison_{slug}_{mode}.png")
+    out = os.path.join(OUT_DIR, f"error_comparison_{slug}_{mode}{clamp_part}.png")
     plt.savefig(out, dpi=300, bbox_inches="tight")
     print(f"[+] Saved comparison plot to {out}")
 

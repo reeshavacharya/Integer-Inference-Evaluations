@@ -46,21 +46,18 @@ from utils import (
 # With 32-bit weights the P_hh << 32 step would reach ~2^76, overflowing.
 # ---------------------------------------------------------------------------
 
-WEIGHT_BITS = 32
-
+WEIGHT_BITS = 8
+TRUNC_SHIFT = 32
 
 def _activation_label(base_name, activation):
     return f"{base_name}_{activation.lower()}"
 
 
 def process_conv(conv, bn, layer_name, scale_in):
-    """Folds, quantizes (16-bit weights), and exports a Conv+BN block."""
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
-    # 16-bit weight quantization: scale is ~1e-5, not ~1e-9
     scale_w, zp_w = get_quantization_params(w_folded, num_bits=WEIGHT_BITS)
     q_w = quantize_tensor(w_folded, scale_w, zp_w, dtype=torch.uint32)
-    # q_w values are 0..65535, stored in uint32 (upper 16 bits always zero)
 
     out_range = activation_ranges[layer_name]
     conv_scale_out = out_range["in_scale"]
@@ -68,28 +65,44 @@ def process_conv(conv, bn, layer_name, scale_in):
     act_scale_out = out_range["out_scale"]
     act_zp_out = out_range["out_zero_point"]
 
+    # NO MORE MATH COMPENSATION. Use standard scale_in.
     scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(b_folded, scale_bias, zp_bias, dtype=torch.int64)
+    q_bias = quantize_tensor(b_folded, scale_bias, zp_bias, dtype=torch.int32)
 
     q_M0, shift = compute_integer_multiplier(scale_w, scale_in, conv_scale_out)
 
-    return {
+    export_dict = {
         "q_weight": q_w.cpu(),
-        "zp_w": int(zp_w),
+        "zp_w": torch.tensor(zp_w, dtype=torch.int32),
         "q_bias": q_bias.cpu(),
-        "q_M0": int(q_M0),
-        "shift": int(shift),
+        "q_M0": q_M0.to(torch.int32),
+        "shift": shift.to(torch.int32),
         "conv_scale_out": float(conv_scale_out),
-        "conv_zp_out": int(conv_zp_out),
+        "conv_zp_out": torch.tensor(conv_zp_out, dtype=torch.int32),
         "act_scale_out": float(act_scale_out),
-        "act_zp_out": int(act_zp_out),
-        "stride": conv.stride[0],
-        "padding": conv.padding[0],
-    }, act_scale_out
+        "act_zp_out": torch.tensor(act_zp_out, dtype=torch.int32),
+        "stride": conv.stride[0] if hasattr(conv, 'stride') else 1,
+        "padding": conv.padding[0] if hasattr(conv, 'padding') else 0,
+    }
 
+    # --- NEW: Generate and Embed the LUT ---
+    # Since GELU acts on the output of the downscaler, its input grid is 'conv_scale_out'
+    q_min, q_max, lut = generate_layer_gelu_lut(
+        in_scale=conv_scale_out, 
+        in_zp=conv_zp_out, 
+        out_scale=act_scale_out, 
+        out_zp=act_zp_out
+    )
+    export_dict["gelu_q_min"] = q_min
+    export_dict["gelu_q_max"] = q_max
+    export_dict["gelu_lut"] = lut.cpu()
+
+    return export_dict, act_scale_out
 
 def process_fc(fc, layer_name, scale_in):
     weight_float = fc.weight.detach()
+    
+    # 8-bit weights for safe 32-bit accumulation
     scale_w, zp_w = get_quantization_params(weight_float, num_bits=WEIGHT_BITS)
     q_w = quantize_tensor(weight_float, scale_w, zp_w, dtype=torch.uint32)
 
@@ -98,23 +111,51 @@ def process_fc(fc, layer_name, scale_in):
     zp_out = out_range["out_zero_point"]
 
     bias_float = fc.bias.detach()
+    
+    # Calculate bias grid using the standard scale
     scale_bias, zp_bias = get_bias_quantization_params(scale_w, scale_in)
-    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int64)
+    
+    # Cast bias strictly to int32 bounds
+    q_bias = quantize_tensor(bias_float, scale_bias, zp_bias, dtype=torch.int32)
 
+    # Compute M0 and shift
     q_M0, shift = compute_integer_multiplier(scale_w, scale_in, scale_out)
 
+    # Return standard dictionary WITHOUT a GELU LUT, as this layer outputs raw logits
     return {
         "q_weight": q_w.cpu(),
-        "zp_w": int(zp_w),
+        "zp_w": torch.tensor(zp_w, dtype=torch.int32),
         "q_bias": q_bias.cpu(),
-        "q_M0": int(q_M0),
-        "shift": int(shift),
+        "q_M0": q_M0.to(torch.int32),
+        "shift": shift.to(torch.int32),
         "scale_out": float(scale_out),
-        "zp_out": int(zp_out),
+        "zp_out": torch.tensor(zp_out, dtype=torch.int32),
         "scale_in": float(scale_in),
-        "zp_in": int(activation_ranges[layer_name]["in_zero_point"]),
+        "zp_in": torch.tensor(activation_ranges[layer_name]["in_zero_point"], dtype=torch.int32),
     }, scale_out
 
+def generate_layer_gelu_lut(in_scale, in_zp, out_scale, out_zp):
+    """
+    Generates a localized integer-to-integer LUT for GELU mapped between [-10.0, 10.0].
+    """
+    # 1. Calculate what integers correspond to the float bounds -10.0 and 10.0
+    in_zp_32 = torch.tensor(in_zp, dtype=torch.int32)
+    q_min_bound = torch.round(torch.tensor(-10.0 / in_scale, dtype=torch.float32)).to(torch.int32) + in_zp_32
+    q_max_bound = torch.round(torch.tensor(10.0 / in_scale, dtype=torch.float32)).to(torch.int32) + in_zp_32
+    
+    # 2. Create an array of every single integer in that range
+    q_inputs = torch.arange(q_min_bound.item(), q_max_bound.item() + 1, dtype=torch.float64)
+    
+    # 3. Execute the complex Float Math offline
+    f_inputs = in_scale * (q_inputs - in_zp)
+    f_act = torch.nn.functional.gelu(f_inputs)
+    f_act = torch.clamp(f_act, -10.0, 10.0)
+    
+    # 4. Requantize the answers back to integers targeting the output grid
+    q_outputs = torch.round(f_act / out_scale) + out_zp
+    q_outputs = torch.clamp(q_outputs, 0, 4294967295).to(torch.uint32)
+    
+    return q_min_bound, q_max_bound, q_outputs
 
 def main(model_path, activation="relu"):
     filename = os.path.basename(model_path).lower()
@@ -150,7 +191,7 @@ def main(model_path, activation="relu"):
     int32_state = {"meta": {}}
     scale_in = activation_ranges["conv1"]["in_scale"]
     int32_state["meta"]["in_scale"] = scale_in
-    int32_state["meta"]["in_zp"] = activation_ranges["conv1"]["in_zero_point"]
+    int32_state["meta"]["in_zp"] = torch.tensor(activation_ranges["conv1"]["in_zero_point"], dtype=torch.int32)
 
     print(f"Quantizing Model to INT32 (WEIGHT_BITS={WEIGHT_BITS}): {filename}...")
 
@@ -186,12 +227,25 @@ def main(model_path, activation="relu"):
             out_range = activation_ranges[
                 _activation_label(f"{prefix}_out", activation)
             ]
+            # 1. Generate the localized LUT for the addition block's output
+            add_q_min, add_q_max, add_lut = generate_layer_gelu_lut(
+                in_scale=out_range["in_scale"], 
+                in_zp=out_range["in_zero_point"], 
+                out_scale=out_range["out_scale"], 
+                out_zp=out_range["out_zero_point"]
+            )
+            
+            # 2. Embed it into the dictionary
             block_data["add"] = {
                 "conv_scale_out": out_range["in_scale"],
                 "conv_zp_out": out_range["in_zero_point"],
                 "act_scale_out": out_range["out_scale"],
                 "act_zp_out": out_range["out_zero_point"],
+                "gelu_q_min": add_q_min,
+                "gelu_q_max": add_q_max,
+                "gelu_lut": add_lut.cpu(),
             }
+            
             int32_state[prefix] = block_data
             s_out = out_range["out_scale"]
 

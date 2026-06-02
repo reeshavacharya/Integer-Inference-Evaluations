@@ -19,17 +19,18 @@ import resnet18 as train_mod
 from resnet18 import ResNet18
 
 from utils import (
-    dequantize_tensor,
+    integer_gelu_lut,
     quantize_tensor,
     # integer_conv2d,
     # integer_linear,
     add_bias,
+    add_bias_with_clamp,
     downscale_and_cast,
     quantized_relu,
     integer_add,
     integer_global_avg_pool2d,
 )
-from safe_int_ops import safe_integer_conv2d, safe_integer_linear
+from strict_int_ops import strict_integer_conv2d, strict_integer_linear
 
 # -----------------------------
 # Debug / trace storage
@@ -39,6 +40,10 @@ debug_trace = {"input": {}, "layers": [], "pooling": []}
 # MNIST-only integer trace (no floats) for inspecting quantized path
 INT_TRACE_ENABLED = False
 int_trace = {"input": {}, "layers": []}
+
+
+def _as_int32_tensor(value, device):
+    return torch.as_tensor(value, dtype=torch.int32, device=device)
 
 
 # -----------------------------
@@ -257,7 +262,7 @@ def get_random_sample(dataset_name: str, setup_fn):
             f"Could not resolve test split dataset for inference target: {dataset_name}"
         )
 
-    idx = random.randint(0, len(test_dataset) - 1)
+    idx = torch.randint(0, len(test_dataset), (1,), device="cpu").item()
     image_tensor, label = test_dataset[idx]
     train_mod.validate_preprocessed_batch(
         image_tensor.unsqueeze(0), dataset_name, stage="inference"
@@ -266,7 +271,7 @@ def get_random_sample(dataset_name: str, setup_fn):
     label_text = str(label)
     if isinstance(label, torch.Tensor):
         if label.dim() == 0:
-            label_text = str(int(label.item()))
+            label_text = str(torch.as_tensor(label, dtype=torch.int32).item())
         else:
             active_idx = torch.where(label > 0.5)[0].tolist()
             label_text = str(active_idx)
@@ -321,7 +326,7 @@ def _evaluate_float_mean_auroc(model, loader, dataset_name: str):
     return score
 
 
-def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: str):
+def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: str, clamp: bool = True):
     # 1. Load the offline compiled integer dictionary
     cfg = _resolve_infer_config(dataset_name, activation)
     int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
@@ -343,7 +348,7 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: s
 
         # Traverse Conv1
         q_x, s_out, z_out = run_integer_conv_block(
-            q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation
+            q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation, clamp=clamp
         )
 
         # Traverse Residual Blocks
@@ -351,18 +356,18 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: s
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
                 q_x, s_out, z_out = run_integer_basic_block(
-                    q_x, int32_state[prefix], z_out, s_out, act_name=activation
+                    q_x, int32_state[prefix], z_out, s_out, act_name=activation, clamp=clamp
                 )
 
         # Global Average Pool
         fc_in_scale = int32_state["fc"]["scale_in"]
         fc_in_zp = int32_state["fc"]["zp_in"]
 
-        q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+        q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         # Final FC
-        q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
+        q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp, clamp=clamp)
 
         # Dequantize & format probabilities
         int_logits = q_out.to(torch.float32)
@@ -533,101 +538,106 @@ def fold_conv_bn_eval(conv, bn):
     return w_folded, b_folded
 
 
-def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name="relu"):
+def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name="relu", clamp=True):
     q_w = layer_data["q_weight"].to(q_input.device)
-    zp_w = layer_data["zp_w"]
+    zp_w = _as_int32_tensor(layer_data["zp_w"], q_input.device)
     q_bias = layer_data["q_bias"].to(q_input.device)
-    q_M0 = layer_data["q_M0"]
-    shift = layer_data["shift"]
+    q_M0 = _as_int32_tensor(layer_data["q_M0"], q_input.device)
+    shift = _as_int32_tensor(layer_data["shift"], q_input.device)
 
     conv_s = layer_data["conv_scale_out"]
-    conv_z = layer_data["conv_zp_out"]
+    conv_z = _as_int32_tensor(layer_data["conv_zp_out"], q_input.device)
 
-    int64_accum = safe_integer_conv2d(
+    int32_accum = strict_integer_conv2d(
         q_input,
         q_w,
         zp_in,
         zp_w,
         stride=layer_data["stride"],
         padding=layer_data["padding"],
+        clamp=clamp,
     )
-    int64_accum = add_bias(int64_accum, q_bias)
-    q_out = downscale_and_cast(int64_accum, q_M0, shift, conv_z)
+
+    int32_accum = add_bias_with_clamp(int32_accum, q_bias, clamp=clamp)
+    
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, conv_z, clamp=clamp)
 
     if not apply_act:
         return q_out, conv_s, conv_z
 
     act_s = layer_data["act_scale_out"]
-    act_z = layer_data["act_zp_out"]
+    act_z = _as_int32_tensor(layer_data["act_zp_out"], q_out.device)
 
     if act_name == "relu":
         q_out = quantized_relu(q_out, act_z)
     elif act_name == "gelu":
-        f_accum = dequantize_tensor(q_out, conv_s, conv_z)
-        f_act = torch.nn.functional.gelu(f_accum)
-        f_act = torch.clamp(f_act, min=-10.0, max=10.0)
-        q_out = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint32)
+        lut = layer_data["gelu_lut"].to(q_out.device)
+        q_min = layer_data["gelu_q_min"]
+        q_max = layer_data["gelu_q_max"]
+        q_out = integer_gelu_lut(q_out, lut, q_min, q_max)
     elif act_name == "leaky_relu":
-        f_accum = dequantize_tensor(q_out, conv_s, conv_z)
-        f_act = torch.nn.functional.leaky_relu(f_accum, negative_slope=1.0)
-        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-        q_out = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint32)
+        # since the model was trained with negative_slope=1, the output is basically the input. f(x)=x
+        q_out = q_out
 
     return q_out, act_s, act_z
 
 
-def run_integer_fc(q_input, fc_data, zp_in):
+def run_integer_fc(q_input, fc_data, zp_in, clamp=True):
     q_w = fc_data["q_weight"].to(q_input.device)
-    zp_w = fc_data["zp_w"]
+    zp_w = _as_int32_tensor(fc_data["zp_w"], q_input.device)
     q_bias = fc_data["q_bias"].to(q_input.device)
-    q_M0 = fc_data["q_M0"]
-    shift = fc_data["shift"]
-    zp_out = fc_data["zp_out"]
+    q_M0 = _as_int32_tensor(fc_data["q_M0"], q_input.device)
+    shift = _as_int32_tensor(fc_data["shift"], q_input.device)
+    zp_out = _as_int32_tensor(fc_data["zp_out"], q_input.device)
 
-    int64_accum = safe_integer_linear(q_input, q_w, zp_in, zp_w)
-    int64_accum = add_bias(int64_accum, q_bias)
-    q_out = downscale_and_cast(int64_accum, q_M0, shift, zp_out)
+    int32_accum = strict_integer_linear(q_input, q_w, zp_in, zp_w, clamp=clamp)
+
+    int32_accum = add_bias_with_clamp(int32_accum, q_bias, clamp=clamp)
+    
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out, clamp=clamp)
 
     return q_out, fc_data["scale_out"], zp_out
 
 
-def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
+def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu", clamp=True):
     q_out1, s_out1, z_out1 = run_integer_conv_block(
-        q_x, block_data["conv1"], zp_in, apply_act=True, act_name=act_name
+        q_x, block_data["conv1"], zp_in, apply_act=True, act_name=act_name, clamp=clamp
     )
 
     q_out2, s_out2, z_out2 = run_integer_conv_block(
-        q_out1, block_data["conv2"], z_out1, apply_act=False
+        q_out1, block_data["conv2"], z_out1, apply_act=False, clamp=clamp
     )
 
     if "shortcut" not in block_data:
         q_short, s_short, z_short = q_x, s_in, zp_in
     else:
         q_short, s_short, z_short = run_integer_conv_block(
-            q_x, block_data["shortcut"], zp_in, apply_act=False
+            q_x, block_data["shortcut"], zp_in, apply_act=False, clamp=clamp
         )
 
     conv_s = block_data["add"]["conv_scale_out"]
-    conv_z = block_data["add"]["conv_zp_out"]
+    conv_z = _as_int32_tensor(block_data["add"]["conv_zp_out"], q_x.device)
     act_s = block_data["add"]["act_scale_out"]
-    act_z = block_data["add"]["act_zp_out"]
+    act_z = _as_int32_tensor(block_data["add"]["act_zp_out"], q_x.device)
 
     q_added = integer_add(
-        q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
+        q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s, clamp=clamp
     )
 
     if act_name == "relu":
         q_final = quantized_relu(q_added, act_z)
+        
     elif act_name == "gelu":
-        f_accum = dequantize_tensor(q_added, conv_s, conv_z)
-        f_act = torch.nn.functional.gelu(f_accum)
-        f_act = torch.clamp(f_act, min=-10.0, max=10.0)
-        q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint32)
+        # --- NEW: Pure Integer Execution using LUT ---
+        lut = block_data["add"]["gelu_lut"].to(q_added.device)
+        q_min = block_data["add"]["gelu_q_min"]
+        q_max = block_data["add"]["gelu_q_max"]
+        
+        q_final = integer_gelu_lut(q_added, lut, q_min, q_max)
+        
     elif act_name == "leaky_relu":
-        f_accum = dequantize_tensor(q_added, conv_s, conv_z)
-        f_act = torch.nn.functional.leaky_relu(f_accum, negative_slope=1.0)
-        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-        q_final = quantize_tensor(f_act, act_s, act_z, dtype=torch.uint32)
+        # since the model was trained with negative_slope=1, the output is basically the input. f(x)=x
+        q_final = q_added
 
     return q_final, act_s, act_z
 
@@ -635,7 +645,7 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
-def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = True):
+def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = True, clamp: bool = True):
     print("--- Starting ResNet18 Quantized Inference Pipeline ---")
 
     # Pass the dynamic activation string to resolve the correct config and weights
@@ -688,7 +698,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
             float_auroc = _evaluate_float_mean_auroc(model, loader, dataset_display)
 
         if run_integer:
-            int_auroc = _evaluate_integer_mean_auroc(model, loader, dataset_display, args.activation)
+            int_auroc = _evaluate_integer_mean_auroc(model, loader, dataset_display, args.activation, clamp=clamp)
 
         print("\n" + "=" * 40)
         print(" RESNET18 INFERENCE SUMMARY ")
@@ -740,7 +750,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
 
     # 1. Quantize Input using Offline Meta Config
     scale_in = int32_state["meta"]["in_scale"]
-    zp_in = int32_state["meta"]["in_zp"]
+    zp_in = _as_int32_tensor(int32_state["meta"]["in_zp"], device=torch.device("cpu"))
     q_x = quantize_tensor(image_tensor, scale_in, zp_in, dtype=torch.uint32)
 
     if INT_TRACE_ENABLED:
@@ -750,7 +760,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
 
     # 2. Traverse Conv1
     q_x, s_out, z_out = run_integer_conv_block(
-        q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=args.activation
+        q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=args.activation, clamp=clamp
     )
 
     # 3. Traverse Residual Blocks
@@ -758,18 +768,18 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
         for block_idx in range(2):
             prefix = f"layer{layer_idx}_block{block_idx}"
             q_x, s_out, z_out = run_integer_basic_block(
-                q_x, int32_state[prefix], z_out, s_out, act_name=args.activation
+                q_x, int32_state[prefix], z_out, s_out, act_name=args.activation, clamp=clamp
             )
 
     # 4. Global Average Pooling (Using IN_SCALE, not OUT_SCALE)
     fc_in_scale = int32_state["fc"]["scale_in"]
     fc_in_zp = int32_state["fc"]["zp_in"]
 
-    q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+    q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # 5. Final Fully Connected Layer
-    q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
+    q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp, clamp=clamp)
 
     # 6. Dequantize final logits
     int_logits = q_out.to(torch.float32)
@@ -830,6 +840,14 @@ if __name__ == "__main__":
         choices=["relu", "gelu", "leaky_relu"],
         help="Activation function the model was trained with",
     )
+    parser.add_argument(
+        "--clamp",
+        type=str,
+        required=False,
+        default="true",
+        choices=["true", "false", "True", "False"],
+        help="Whether to use saturation (clamping) or pure 32-bit modulo arithmetic.",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--int",
@@ -855,8 +873,11 @@ if __name__ == "__main__":
         run_floating_point = True
         run_integer = False
 
+    clamp_bool = args.clamp.lower() == "true"
+
     main(
         args.infer,
         run_floating_point=run_floating_point,
         run_integer=run_integer,
+        clamp=clamp_bool,
     )

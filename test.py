@@ -1,28 +1,19 @@
 import torch
 import numpy as np
-import warnings
 
-print("--- PyTorch uint8 Division-by-Zero Test ---")
-try:
-    # Force uint8 tensors
-    a_pt = torch.tensor([1], dtype=torch.uint8)
-    b_pt = torch.tensor([0], dtype=torch.uint8)
-    
-    # Use floor division to keep it in the integer domain
-    res_pt = a_pt // b_pt 
-    print(f"PyTorch Success: {res_pt}")
-except Exception as e:
-    print(f"PyTorch Exception Caught: {type(e).__name__}: {e}")
+# Two uint8 values
+a = torch.tensor(3, dtype=torch.uint8)
+a_bits = np.unpackbits(a.numpy())
+print("a =", a_bits)
 
+b = torch.tensor(100, dtype=torch.uint8)
+b_bits = np.unpackbits(b.numpy())
+print("b =", b_bits)
 
-print("\n--- NumPy uint8 Division-by-Zero Test ---")
-# Catch warnings as errors to see NumPy's internal handling
-warnings.filterwarnings("error") 
-try:
-    a_np = np.array([1], dtype=np.uint8)
-    b_np = np.array([0], dtype=np.uint8)
-    
-    res_np = a_np // b_np
-    print(f"NumPy Success: {res_np}")
-except Exception as e:
-    print(f"NumPy Exception Caught: {type(e).__name__}: {e}")
+# PyTorch automatically promotes the result
+product = a * b
+product_bits = np.unpackbits(product.numpy())
+print("a x b =", product_bits)
+
+c=int(a) * int(b)
+print("a x b (binary) =", bin(c))

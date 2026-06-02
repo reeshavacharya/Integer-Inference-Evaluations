@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Benchmark script supporting multiple modes, datasets, activations
-# Usage: ./benchmark.sh [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION]
+# Usage: ./benchmark.sh [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION] [--clamp true|false]
 
 set -euo pipefail
 
-ALL_DATASETS=("MNIST" "CIFAR10" "Brain-MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST")
+ALL_DATASETS=("CIFAR10" "Brain-MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST" "MNIST")
 ALL_MODES=("fp32" "int8" "int32" "fxp32" "fxp64")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 
@@ -12,14 +12,16 @@ ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 FILTER_DATASET=""
 FILTER_MODE=""
 FILTER_ACTIVATION=""
+FILTER_CLAMP=""
 NUM_DATA=""
 
 usage() {
-	echo "Usage: $0 [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION]"
+	echo "Usage: $0 [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION] [--clamp true|false]"
 	echo "  --bench DATASET       : single dataset to benchmark (default: all)"
 	echo "  --num_data N          : number of test images to use (default: full test split)"
 	echo "  --mode MODE           : one mode from ${ALL_MODES[*]} (default: all)"
 	echo "  --activation ACT      : one activation from ${ALL_ACTIVATIONS[*]} (default: all)"
+	echo "  --clamp true|false    : INT32/FXP32 clamp mode (default: both)"
 	exit 1
 }
 
@@ -39,6 +41,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--activation)
 			FILTER_ACTIVATION="$2"
+			shift 2
+			;;
+		--clamp)
+			FILTER_CLAMP="$2"
 			shift 2
 			;;
 		-h|--help)
@@ -88,6 +94,21 @@ if [ -n "$FILTER_ACTIVATION" ] && [ ${#ACTIVATIONS[@]} -eq 0 ]; then
 	exit 1
 fi
 
+CLAMPS=()
+if [ -n "$FILTER_CLAMP" ]; then
+	case "$FILTER_CLAMP" in
+		true|false|True|False)
+			CLAMPS+=("${FILTER_CLAMP,,}")
+			;;
+		*)
+			echo "ERROR: clamp '$FILTER_CLAMP' not recognized (use true or false)" >&2
+			exit 1
+			;;
+	esac
+else
+	CLAMPS+=("true" "false")
+fi
+
 cd "$(dirname "$0")/.."
 
 NUM_DATA_ARG=""
@@ -95,28 +116,29 @@ if [ -n "$NUM_DATA" ]; then
 	NUM_DATA_ARG="--num_data $NUM_DATA"
 fi
 
-echo "[*] Benchmark: datasets=${DATASETS[*]} modes=${MODES[*]} activations=${ACTIVATIONS[*]} num_data=${NUM_DATA:-full}"
+echo "[*] Benchmark: datasets=${DATASETS[*]} modes=${MODES[*]} activations=${ACTIVATIONS[*]} clamps=${CLAMPS[*]} num_data=${NUM_DATA:-full}"
 
 # Runner mapping for modes
 run_mode() {
 	local mode="$1"
 	local ds="$2"
 	local act="$3"
+	local clamp="$4"
 	case "$mode" in
 		fp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fp32
+			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fp32
 			;;
 		int8)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode int8
+			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode int8
 			;;
 		int32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode int32
+			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode int32
 			;;
 		fxp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fxp32
+			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fxp32
 			;;
 		fxp64)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fxp64
+			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fxp64
 			;;
 		*)
 			echo "Unknown mode: $mode" >&2
@@ -127,10 +149,12 @@ run_mode() {
 
 for ds in "${DATASETS[@]}"; do
 	for act in "${ACTIVATIONS[@]}"; do
-		for m in "${MODES[@]}"; do
-			echo ""
-			echo "[+] Benchmarking: $ds (activation=$act, mode=$m)"
-			run_mode "$m" "$ds" "$act"
+		for clamp in "${CLAMPS[@]}"; do
+			for m in "${MODES[@]}"; do
+				echo ""
+				echo "[+] Benchmarking: $ds (activation=$act, mode=$m, clamp=$clamp)"
+				run_mode "$m" "$ds" "$act" "$clamp"
+			done
 		done
 	done
 done
