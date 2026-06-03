@@ -26,7 +26,7 @@ from utils import (
     execute_and_shift_conv2d,
     execute_and_shift_linear,
     add_bias,
-    fixed_point_global_avg_pool2d,
+    fixed_point_max_pool2d,
     fixed_point_gelu_lut,
 )
 
@@ -141,7 +141,7 @@ class ResNet18Inference(nn.Module):
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2, activation=activation)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2, activation=activation)
 
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride, activation):
@@ -162,13 +162,13 @@ class ResNet18Inference(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
 
-        out = self.avgpool(out)
+        out = self.maxpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
 
 
-def _resolve_infer_config(infer_data: str, activation: str = "relu"):
+def _resolve_infer_config(infer_data: str, activation: str = "relu", batch_size: int = 64):
     name = infer_data.upper()
     activation = _normalize_activation_name(activation)
 
@@ -182,7 +182,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=10, in_channels=1, activation=activation),
             "model_path": _model_path("MNIST"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name in ("CIFR10", "CIFAR10"):
@@ -192,7 +192,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=10, in_channels=3, activation=activation),
             "model_path": _model_path("CIFAR10"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "BRAIN-MRI":
@@ -202,7 +202,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
             "model_path": _model_path("Brain-MRI"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "NIH-CHEST":
@@ -212,7 +212,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=15, in_channels=1, activation=activation),
             "model_path": _model_path("NIH_Chest_XRay"),
             "is_multilabel": True,
-            "eval_batch_size": 8,
+            "eval_batch_size": batch_size,
         }
 
     if name == "OCTMNIST":
@@ -222,7 +222,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
             "model_path": _model_path("OCTMNIST"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "BLOODMNIST":
@@ -232,7 +232,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=8, in_channels=3, activation=activation),
             "model_path": _model_path("BloodMNIST"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "ORGANAMNIST":
@@ -242,7 +242,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=11, in_channels=1, activation=activation),
             "model_path": _model_path("OrganAMNIST"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "PNEUMONIAMNIST":
@@ -252,7 +252,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=2, in_channels=1, activation=activation),
             "model_path": _model_path("PneumoniaMNIST"),
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     raise ValueError(f"Unknown dataset: {infer_data}")
@@ -352,7 +352,7 @@ def _evaluate_fixed_point_mean_auroc(model, loader, dataset_name: str):
             for block in stage:
                 q_x = run_static_fixed_point_basic_block(q_x, block)
 
-        q_pooled = fixed_point_global_avg_pool2d(q_x)
+        q_pooled = fixed_point_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         q_out, _, _ = run_static_fixed_point_fc(q_fc_in, model.fc)
@@ -426,16 +426,16 @@ def _get_layer_config(model: ResNet18Inference):
     }
 
 
-def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True, apply_act=None, act_name="relu", clamp=True, lut_dict=None):
+def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True, apply_act=None, act_name="relu", lut_dict=None):
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
     q_w = quantize_fixed_point(w_folded)
     q_bias = quantize_fixed_point(b_folded)
 
     q_accum = execute_and_shift_conv2d(
-        q_input, q_w, stride=conv.stride[0], padding=conv.padding[0], clamp=clamp
+        q_input, q_w, stride=conv.stride[0], padding=conv.padding[0]
     )
-    q_out = add_bias(q_accum, q_bias, clamp=clamp)
+    q_out = add_bias(q_accum, q_bias)
 
     should_apply_act = apply_act if apply_act is not None else apply_relu
     if should_apply_act:
@@ -448,12 +448,12 @@ def run_static_fixed_point_conv_block(q_input, conv, bn, apply_relu=True, apply_
     return q_out
 
 
-def run_static_fixed_point_basic_block(q_x, block, act_name="relu", clamp=True, lut_dict=None):
+def run_static_fixed_point_basic_block(q_x, block, act_name="relu", lut_dict=None):
     q_out1 = run_static_fixed_point_conv_block(
-        q_x, block.conv1, block.bn1, apply_relu=True, act_name=act_name, clamp=clamp, lut_dict=lut_dict
+        q_x, block.conv1, block.bn1, apply_relu=True, act_name=act_name, lut_dict=lut_dict
     )
     q_out2 = run_static_fixed_point_conv_block(
-        q_out1, block.conv2, block.bn2, apply_relu=False, act_name=act_name, clamp=clamp, lut_dict=lut_dict
+        q_out1, block.conv2, block.bn2, apply_relu=False, act_name=act_name, lut_dict=lut_dict
     )
 
     if isinstance(block.shortcut, nn.Identity):
@@ -461,15 +461,12 @@ def run_static_fixed_point_basic_block(q_x, block, act_name="relu", clamp=True, 
     else:
         short_conv, short_bn = block.shortcut[0], block.shortcut[1]
         q_short = run_static_fixed_point_conv_block(
-            q_x, short_conv, short_bn, apply_relu=False, act_name=act_name, clamp=clamp, lut_dict=lut_dict
+            q_x, short_conv, short_bn, apply_relu=False, act_name=act_name, lut_dict=lut_dict
         )
 
-    # Configurable Addition
-    if clamp:
-        sum_int64 = q_out2.to(torch.int64) + q_short.to(torch.int64)
-        q_added = torch.clamp(sum_int64, -2147483648, 2147483647).to(torch.int32)
-    else:
-        q_added = q_out2 + q_short
+    # Integer addition with 64-bit intermediate then downcast to int32
+    sum_int64 = q_out2.to(torch.int64) + q_short.to(torch.int64)
+    q_added = (sum_int64.to(torch.int32)).to(torch.int32)
 
     if act_name == "relu":
         return fixed_point_relu(q_added)
@@ -481,12 +478,12 @@ def run_static_fixed_point_basic_block(q_x, block, act_name="relu", clamp=True, 
         return fixed_point_relu(q_added)
 
 
-def run_static_fixed_point_fc(q_input, fc, clamp=True):
+def run_static_fixed_point_fc(q_input, fc):
     q_w = quantize_fixed_point(fc.weight.detach())
     q_bias = quantize_fixed_point(fc.bias.detach())
 
-    q_out, max_bits, max_rem = execute_and_shift_linear(q_input, q_w, clamp=clamp)
-    q_out = add_bias(q_out, q_bias, clamp=clamp)
+    q_out, max_bits, max_rem = execute_and_shift_linear(q_input, q_w)
+    q_out = add_bias(q_out, q_bias)
 
     return q_out, max_bits, max_rem
 
@@ -496,15 +493,15 @@ def run_static_fixed_point_fc(q_input, fc, clamp=True):
 # -----------------------------
 def main(
     infer_data: str,
+    batch_size: int = 64,
     activation: str = "relu",
-    clamp: bool = True,
     run_floating_point: bool = True,
     run_fixed_point: bool = True,
 ):
     print("--- Starting ResNet18 Quantized Inference Pipeline ---")
 
     activation = _normalize_activation_name(activation)
-    cfg = _resolve_infer_config(infer_data, activation=activation)
+    cfg = _resolve_infer_config(infer_data, activation=activation, batch_size=batch_size)
     name = infer_data.upper()
     dataset_display = cfg["display"]
     model = cfg["model"]
@@ -597,7 +594,7 @@ def main(
 
     # Initial conv1
     q_x = run_static_fixed_point_conv_block(
-        q_x, model.conv1, model.bn1, apply_relu=True, act_name=activation, clamp=clamp, lut_dict=global_gelu_lut
+        q_x, model.conv1, model.bn1, apply_relu=True, act_name=activation, lut_dict=global_gelu_lut
     )
 
     # Traverse all residual blocks
@@ -606,15 +603,15 @@ def main(
     ):
         for block_idx, block in enumerate(stage):
             q_x = run_static_fixed_point_basic_block(
-                q_x, block, act_name=activation, clamp=clamp, lut_dict=global_gelu_lut
+                q_x, block, act_name=activation, lut_dict=global_gelu_lut
             )
 
     # Global Average Pooling
-    q_pooled = fixed_point_global_avg_pool2d(q_x, clamp=clamp)
+    q_pooled = fixed_point_max_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # Run Final FC Layer
-    q_out, max_bits_used, max_remainder = run_static_fixed_point_fc(q_fc_in, model.fc, clamp=clamp)
+    q_out, max_bits_used, max_remainder = run_static_fixed_point_fc(q_fc_in, model.fc)
 
     # Dequantize final output
     dequantized_logits = dequantize_fixed_point(q_out)
@@ -680,6 +677,12 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for inference (default: 64)",
+    )
+    parser.add_argument(
         "--activatoin",
         "--activation",
         dest="activation",
@@ -688,13 +691,7 @@ if __name__ == "__main__":
         choices=["relu", "gelu", "leaky_relu"],
         help="Activation function to use for checkpoint selection and inference",
     )
-    parser.add_argument(
-        "--clamp",
-        type=str,
-        required=True,
-        choices=["true", "false", "True", "False"],
-        help="Whether to use saturation (clamping) or pure 32-bit modulo arithmetic.",
-    )
+    
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--fixed-point",
@@ -711,8 +708,6 @@ if __name__ == "__main__":
     if args.nih_chest:
         args.infer = "NIH-CHEST"
 
-    clamp_bool = args.clamp.lower() == "true"
-
     run_floating_point = True
     run_fixed_point = True
     if args.fixed_point:
@@ -724,8 +719,8 @@ if __name__ == "__main__":
 
     main(
         args.infer,
+        batch_size=args.batch_size,
         activation=args.activation,
-        clamp=clamp_bool,
         run_floating_point=run_floating_point,
         run_fixed_point=run_fixed_point,
     )

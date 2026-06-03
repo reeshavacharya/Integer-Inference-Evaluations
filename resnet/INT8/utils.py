@@ -65,30 +65,9 @@ def integer_add(q1, z1, scale1, q2, z2, scale2, z_out, scale_out):
     
     # Cast back to uint8
     return torch.clamp(q_out, 0, 255).to(torch.uint8)
-
-
-def integer_global_avg_pool2d(q_in, z_in, scale_in, z_out, scale_out):
-    """
-    Integer implementation of global average pooling.
-    Accumulates in int32, multiplies by combined (Scale / N) multiplier, then downscales.
-    """
-    N = q_in.size(2) * q_in.size(3) # e.g., 7x7 spatial window = 49
-    
-    # 1. Shift to zero-centered int32 and sum all pixels
-    x = q_in.to(torch.int32) - z_in
-    accum = x.sum(dim=(2, 3), keepdim=True) # Accumulator is now int32
-    
-    # 2. Compute combined fixed-point multiplier
-    # ratio = Scale_in / (Scale_out * N)
-    ratio = scale_in / (scale_out * N)
-    M0, shift = quantize_multiplier(ratio)
-    
-    # 3. Simulate integer multiply-and-shift
-    pooled = torch.round((accum.double() * M0) / (2 ** shift)).to(torch.int32)
-    
-    # 4. Apply output zero-point and cast
-    q_out = pooled + z_out
-    return torch.clamp(q_out, 0, 255).to(torch.uint8)
+def integer_max_pool2d(q_in):
+    """Executes a pure integer MaxPool."""
+    return torch.amax(q_in, dim=(2, 3), keepdim=True)
 
 def compute_integer_multiplier(scale_w, scale_x, scale_out):
     """

@@ -33,7 +33,7 @@ from utils import (
     downscale_and_cast,
     quantized_relu,
     integer_add,
-    integer_global_avg_pool2d,
+    integer_max_pool2d,
 )
 
 
@@ -121,7 +121,7 @@ class ResNet18Inference(nn.Module):
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2, activation=activation)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2, activation=activation)
         
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride, activation):
@@ -142,7 +142,7 @@ class ResNet18Inference(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
         
-        out = self.avgpool(out)
+        out = self.maxpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
@@ -364,7 +364,7 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str):
         fc_in_scale = int8_state["fc"]["scale_in"]
         fc_in_zp = int8_state["fc"]["zp_in"]
 
-        q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+        q_pooled = integer_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         # Final FC
@@ -765,9 +765,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
     fc_in_scale = int8_state["fc"]["scale_in"]
     fc_in_zp = int8_state["fc"]["zp_in"]
     
-    q_pooled = integer_global_avg_pool2d(
-        q_x, z_out, s_out, fc_in_zp, fc_in_scale
-    )
+    q_pooled = integer_max_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # 5. Final Fully Connected Layer

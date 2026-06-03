@@ -73,12 +73,6 @@ def add_bias(q_accum, q_bias):
 def fixed_point_relu(q_tensor):
     return torch.clamp(q_tensor, min=0)
 
-def fixed_point_global_avg_pool2d(q_in):
-    """Sums spatial dimensions and divides by N using native integer division."""
-    q_int64 = q_in.to(torch.int64)
-    B, C, H, W = q_int64.shape
-    N = H * W
-    
-    accum = q_int64.sum(dim=(2, 3), keepdim=True)
-    pooled = torch.div(accum + (N // 2), N, rounding_mode='floor')
-    return torch.clamp(pooled, INT64_MIN, INT64_MAX).to(torch.int64)
+def fixed_point_max_pool2d(q_in):
+    """Executes a pure integer MaxPool."""
+    return torch.amax(q_in.to(torch.int64), dim=(2, 3), keepdim=True)

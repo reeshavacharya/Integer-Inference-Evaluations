@@ -10,7 +10,7 @@ set -euo pipefail
 # Define available options
 ALL_DATASETS=("MNIST" "CIFAR10" "Brain-MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
-ALL_MODES=("int8" "int32")
+ALL_MODES=("int32")
 
 # Default to all
 FILTER_MODE=""

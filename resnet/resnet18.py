@@ -121,7 +121,7 @@ class ResNet18(nn.Module):
             BasicBlock, 512, 2, stride=2, activation=activation
         )
 
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride, activation):
@@ -144,7 +144,7 @@ class ResNet18(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
 
-        out = self.avgpool(out)
+        out = self.maxpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out

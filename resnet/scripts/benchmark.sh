@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmark script supporting multiple modes, datasets, activations
-# Usage: ./benchmark.sh [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION] [--clamp true|false]
+# Usage: ./benchmark.sh [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION]
 
 set -euo pipefail
 
@@ -14,14 +14,16 @@ FILTER_MODE=""
 FILTER_ACTIVATION=""
 FILTER_CLAMP=""
 NUM_DATA=""
+BATCH_SIZE=""
 
 usage() {
-	echo "Usage: $0 [--bench DATASET] [--num_data N] [--mode MODE] [--activation ACTIVATION] [--clamp true|false]"
+	echo "Usage: $0 [--bench DATASET] [--num_data N] [--batch_size B] [--mode MODE] [--activation ACTIVATION]"
 	echo "  --bench DATASET       : single dataset to benchmark (default: all)"
 	echo "  --num_data N          : number of test images to use (default: full test split)"
+	echo "  --batch_size B        : batch size for inference (default: 64)"
 	echo "  --mode MODE           : one mode from ${ALL_MODES[*]} (default: all)"
 	echo "  --activation ACT      : one activation from ${ALL_ACTIVATIONS[*]} (default: all)"
-	echo "  --clamp true|false    : INT32/FXP32 clamp mode (default: both)"
+	# clamp argument removed
 	exit 1
 }
 
@@ -43,10 +45,11 @@ while [[ $# -gt 0 ]]; do
 			FILTER_ACTIVATION="$2"
 			shift 2
 			;;
-		--clamp)
-			FILTER_CLAMP="$2"
+		--batch_size)
+			BATCH_SIZE="$2"
 			shift 2
 			;;
+		# clamp argument removed
 		-h|--help)
 			usage
 			;;
@@ -94,20 +97,7 @@ if [ -n "$FILTER_ACTIVATION" ] && [ ${#ACTIVATIONS[@]} -eq 0 ]; then
 	exit 1
 fi
 
-CLAMPS=()
-if [ -n "$FILTER_CLAMP" ]; then
-	case "$FILTER_CLAMP" in
-		true|false|True|False)
-			CLAMPS+=("${FILTER_CLAMP,,}")
-			;;
-		*)
-			echo "ERROR: clamp '$FILTER_CLAMP' not recognized (use true or false)" >&2
-			exit 1
-			;;
-	esac
-else
-	CLAMPS+=("true" "false")
-fi
+# clamp argument removed; run default behavior (unclamped modulo math)
 
 cd "$(dirname "$0")/.."
 
@@ -116,29 +106,33 @@ if [ -n "$NUM_DATA" ]; then
 	NUM_DATA_ARG="--num_data $NUM_DATA"
 fi
 
-echo "[*] Benchmark: datasets=${DATASETS[*]} modes=${MODES[*]} activations=${ACTIVATIONS[*]} clamps=${CLAMPS[*]} num_data=${NUM_DATA:-full}"
+BATCH_SIZE_ARG=""
+if [ -n "$BATCH_SIZE" ]; then
+	BATCH_SIZE_ARG="--batch_size $BATCH_SIZE"
+fi
+
+echo "[*] Benchmark: datasets=${DATASETS[*]} modes=${MODES[*]} activations=${ACTIVATIONS[*]} clamps=${CLAMPS[*]} num_data=${NUM_DATA:-full} batch_size=${BATCH_SIZE:-64}"
 
 # Runner mapping for modes
 run_mode() {
 	local mode="$1"
 	local ds="$2"
 	local act="$3"
-	local clamp="$4"
 	case "$mode" in
 		fp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fp32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fp32
 			;;
 		int8)
-			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode int8
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode int8
 			;;
 		int32)
-			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode int32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode int32
 			;;
 		fxp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fxp32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fxp32
 			;;
 		fxp64)
-			python3 benchmark.py --bench "$ds" --activation "$act" --clamp "$clamp" ${NUM_DATA_ARG} --mode fxp64
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fxp64
 			;;
 		*)
 			echo "Unknown mode: $mode" >&2
@@ -149,12 +143,10 @@ run_mode() {
 
 for ds in "${DATASETS[@]}"; do
 	for act in "${ACTIVATIONS[@]}"; do
-		for clamp in "${CLAMPS[@]}"; do
-			for m in "${MODES[@]}"; do
-				echo ""
-				echo "[+] Benchmarking: $ds (activation=$act, mode=$m, clamp=$clamp)"
-				run_mode "$m" "$ds" "$act" "$clamp"
-			done
+		for m in "${MODES[@]}"; do
+			echo ""
+			echo "[+] Benchmarking: $ds (activation=$act, mode=$m)"
+			run_mode "$m" "$ds" "$act"
 		done
 	done
 done

@@ -7,15 +7,12 @@ INT32_MAX = 2147483647
 def _as_int32(value, device):
     return torch.as_tensor(value, dtype=torch.int32, device=device)
 
-def strict_integer_conv2d(q_x, q_w, z_x, z_w, stride=1, padding=0, clamp=True):
+def strict_integer_conv2d(q_x, q_w, z_x, z_w, stride=1, padding=0):
     z_x_32 = _as_int32(z_x, q_x.device)
     z_w_32 = _as_int32(z_w, q_w.device)
-    if clamp:
-        x = torch.clamp(q_x.to(torch.int64) - z_x_32.to(torch.int64), INT32_MIN, INT32_MAX).to(torch.int32)
-        w = torch.clamp(q_w.to(torch.int64) - z_w_32.to(torch.int64), INT32_MIN, INT32_MAX).to(torch.int32)
-    else:
-        x = (q_x.to(torch.int32) - z_x_32).to(torch.int32)
-        w = (q_w.to(torch.int32) - z_w_32).to(torch.int32)
+    # Modulo Math (native 32-bit arithmetic with wrapping)
+    x = (q_x.to(torch.int32) - z_x_32).to(torch.int32)
+    w = (q_w.to(torch.int32) - z_w_32).to(torch.int32)
 
     B, C_in, H, W = x.shape
     C_out, _, kH, kW = w.shape
@@ -40,26 +37,18 @@ def strict_integer_conv2d(q_x, q_w, z_x, z_w, stride=1, padding=0, clamp=True):
             
             prod = x_slice.unsqueeze(1) * w_slice
             
-            if clamp:
-                # Saturation Math (prevent overflow by clamping accumulation)
-                accum_64 = accum.to(torch.int64) + prod.sum(dim=2).to(torch.int64)
-                accum = torch.clamp(accum_64, INT32_MIN, INT32_MAX).to(torch.int32)
-            else:
-                # Modulo Math (native 32-bit arithmetic with wrapping)
-                accum = accum + prod.sum(dim=2, dtype=torch.int32)
+            # Modulo Math (native 32-bit arithmetic with wrapping)
+            accum = accum + prod.sum(dim=2, dtype=torch.int32)
 
     return accum
 
 
-def strict_integer_linear(q_x, q_w, z_x, z_w, clamp=True):
+def strict_integer_linear(q_x, q_w, z_x, z_w):
     z_x_32 = _as_int32(z_x, q_x.device)
     z_w_32 = _as_int32(z_w, q_w.device)
-    if clamp:
-        x = torch.clamp(q_x.to(torch.int64) - z_x_32.to(torch.int64), INT32_MIN, INT32_MAX).to(torch.int32)
-        w = torch.clamp(q_w.to(torch.int64) - z_w_32.to(torch.int64), INT32_MIN, INT32_MAX).to(torch.int32)
-    else:
-        x = (q_x.to(torch.int32) - z_x_32).to(torch.int32)
-        w = (q_w.to(torch.int32) - z_w_32).to(torch.int32)
+    # Modulo Math (native 32-bit arithmetic with wrapping)
+    x = (q_x.to(torch.int32) - z_x_32).to(torch.int32)
+    w = (q_w.to(torch.int32) - z_w_32).to(torch.int32)
 
     B, in_f = x.shape
     out_f = w.shape[0]
@@ -71,12 +60,7 @@ def strict_integer_linear(q_x, q_w, z_x, z_w, clamp=True):
 
         prod = x_val * w_val
         
-        if clamp:
-            # Saturation Math
-            accum_64 = accum.to(torch.int64) + prod.to(torch.int64)
-            accum = torch.clamp(accum_64, INT32_MIN, INT32_MAX).to(torch.int32)
-        else:
-            # Modulo Math
-            accum = accum + prod.to(torch.int32)
+        # Modulo Math
+        accum = accum + prod.to(torch.int32)
 
     return accum

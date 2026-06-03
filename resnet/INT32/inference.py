@@ -24,11 +24,10 @@ from utils import (
     # integer_conv2d,
     # integer_linear,
     add_bias,
-    add_bias_with_clamp,
     downscale_and_cast,
     quantized_relu,
     integer_add,
-    integer_global_avg_pool2d,
+    integer_max_pool2d,
 )
 from strict_int_ops import strict_integer_conv2d, strict_integer_linear
 
@@ -118,7 +117,7 @@ class ResNet18Inference(nn.Module):
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2, activation=activation)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2, activation=activation)
         
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride, activation):
@@ -139,7 +138,7 @@ class ResNet18Inference(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
         
-        out = self.avgpool(out)
+        out = self.maxpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
@@ -150,7 +149,7 @@ class ResNet18Inference(nn.Module):
 # -----------------------------
 
 
-def _resolve_infer_config(infer_data: str, activation: str = "relu"):
+def _resolve_infer_config(infer_data: str, activation: str = "relu", batch_size: int = 64):
     name = infer_data.upper()
 
     if name == "MNIST":
@@ -160,7 +159,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=10, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_mnist.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name in ("CIFR10", "CIFAR10"):
@@ -170,7 +169,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=10, in_channels=3, activation=activation),
             "model_path": f"best_resnet18_{activation}_cifar10.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "BRAIN-MRI":
@@ -180,7 +179,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_brain_mri.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "OCTMNIST":
@@ -190,7 +189,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_octmnist.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "BLOODMNIST":
@@ -200,7 +199,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=8, in_channels=3, activation=activation),
             "model_path": f"best_resnet18_{activation}_bloodmnist.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "ORGANAMNIST":
@@ -210,7 +209,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=11, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_organamnist.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "PNEUMONIAMNIST":
@@ -220,7 +219,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=2, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_pneumoniamnist.pth",
             "is_multilabel": False,
-            "eval_batch_size": 64,
+            "eval_batch_size": batch_size,
         }
 
     if name == "NIH-CHEST":
@@ -230,7 +229,7 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "model": ResNet18Inference(num_classes=15, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_nih_chest_xray.pth",
             "is_multilabel": True,
-            "eval_batch_size": 8,
+            "eval_batch_size": batch_size,
         }
 
     raise ValueError(f"Unknown dataset: {infer_data}")
@@ -326,7 +325,7 @@ def _evaluate_float_mean_auroc(model, loader, dataset_name: str):
     return score
 
 
-def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: str, clamp: bool = True):
+def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: str):
     # 1. Load the offline compiled integer dictionary
     cfg = _resolve_infer_config(dataset_name, activation)
     int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
@@ -348,7 +347,7 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: s
 
         # Traverse Conv1
         q_x, s_out, z_out = run_integer_conv_block(
-            q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation, clamp=clamp
+            q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation
         )
 
         # Traverse Residual Blocks
@@ -356,18 +355,18 @@ def _evaluate_integer_mean_auroc(model, loader, dataset_name: str, activation: s
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
                 q_x, s_out, z_out = run_integer_basic_block(
-                    q_x, int32_state[prefix], z_out, s_out, act_name=activation, clamp=clamp
+                    q_x, int32_state[prefix], z_out, s_out, act_name=activation
                 )
 
         # Global Average Pool
         fc_in_scale = int32_state["fc"]["scale_in"]
         fc_in_zp = int32_state["fc"]["zp_in"]
 
-        q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp)
+        q_pooled = integer_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         # Final FC
-        q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp, clamp=clamp)
+        q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
 
         # Dequantize & format probabilities
         int_logits = q_out.to(torch.float32)
@@ -538,7 +537,7 @@ def fold_conv_bn_eval(conv, bn):
     return w_folded, b_folded
 
 
-def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name="relu", clamp=True):
+def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name="relu"):
     q_w = layer_data["q_weight"].to(q_input.device)
     zp_w = _as_int32_tensor(layer_data["zp_w"], q_input.device)
     q_bias = layer_data["q_bias"].to(q_input.device)
@@ -555,12 +554,11 @@ def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name=
         zp_w,
         stride=layer_data["stride"],
         padding=layer_data["padding"],
-        clamp=clamp,
     )
 
-    int32_accum = add_bias_with_clamp(int32_accum, q_bias, clamp=clamp)
+    int32_accum = add_bias(int32_accum, q_bias)
     
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, conv_z, clamp=clamp)
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, conv_z)
 
     if not apply_act:
         return q_out, conv_s, conv_z
@@ -582,7 +580,7 @@ def run_integer_conv_block(q_input, layer_data, zp_in, apply_act=True, act_name=
     return q_out, act_s, act_z
 
 
-def run_integer_fc(q_input, fc_data, zp_in, clamp=True):
+def run_integer_fc(q_input, fc_data, zp_in):
     q_w = fc_data["q_weight"].to(q_input.device)
     zp_w = _as_int32_tensor(fc_data["zp_w"], q_input.device)
     q_bias = fc_data["q_bias"].to(q_input.device)
@@ -590,29 +588,29 @@ def run_integer_fc(q_input, fc_data, zp_in, clamp=True):
     shift = _as_int32_tensor(fc_data["shift"], q_input.device)
     zp_out = _as_int32_tensor(fc_data["zp_out"], q_input.device)
 
-    int32_accum = strict_integer_linear(q_input, q_w, zp_in, zp_w, clamp=clamp)
+    int32_accum = strict_integer_linear(q_input, q_w, zp_in, zp_w)
 
-    int32_accum = add_bias_with_clamp(int32_accum, q_bias, clamp=clamp)
+    int32_accum = add_bias(int32_accum, q_bias)
     
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out, clamp=clamp)
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
 
     return q_out, fc_data["scale_out"], zp_out
 
 
-def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu", clamp=True):
+def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu"):
     q_out1, s_out1, z_out1 = run_integer_conv_block(
-        q_x, block_data["conv1"], zp_in, apply_act=True, act_name=act_name, clamp=clamp
+        q_x, block_data["conv1"], zp_in, apply_act=True, act_name=act_name
     )
 
     q_out2, s_out2, z_out2 = run_integer_conv_block(
-        q_out1, block_data["conv2"], z_out1, apply_act=False, clamp=clamp
+        q_out1, block_data["conv2"], z_out1, apply_act=False
     )
 
     if "shortcut" not in block_data:
         q_short, s_short, z_short = q_x, s_in, zp_in
     else:
         q_short, s_short, z_short = run_integer_conv_block(
-            q_x, block_data["shortcut"], zp_in, apply_act=False, clamp=clamp
+            q_x, block_data["shortcut"], zp_in, apply_act=False
         )
 
     conv_s = block_data["add"]["conv_scale_out"]
@@ -620,8 +618,14 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu", clamp
     act_s = block_data["add"]["act_scale_out"]
     act_z = _as_int32_tensor(block_data["add"]["act_zp_out"], q_x.device)
 
+    add_M0_1 = _as_int32_tensor(block_data["add"]["add_M0_1"], q_x.device)
+    add_shift_1 = _as_int32_tensor(block_data["add"]["add_shift_1"], q_x.device)
+    add_M0_2 = _as_int32_tensor(block_data["add"]["add_M0_2"], q_x.device)
+    add_shift_2 = _as_int32_tensor(block_data["add"]["add_shift_2"], q_x.device)
+
     q_added = integer_add(
-        q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s, clamp=clamp
+        q_out2, z_out2, q_short, z_short, conv_z,
+        add_M0_1, add_shift_1, add_M0_2, add_shift_2,
     )
 
     if act_name == "relu":
@@ -645,11 +649,11 @@ def run_integer_basic_block(q_x, block_data, zp_in, s_in, act_name="relu", clamp
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
-def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = True, clamp: bool = True):
+def main(infer_data: str, batch_size: int = 64, run_floating_point: bool = True, run_integer: bool = True):
     print("--- Starting ResNet18 Quantized Inference Pipeline ---")
 
     # Pass the dynamic activation string to resolve the correct config and weights
-    cfg = _resolve_infer_config(infer_data, args.activation)
+    cfg = _resolve_infer_config(infer_data, args.activation, batch_size=batch_size)
     name = infer_data.upper()
     dataset_display = cfg["display"]
     model = cfg["model"]
@@ -698,7 +702,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
             float_auroc = _evaluate_float_mean_auroc(model, loader, dataset_display)
 
         if run_integer:
-            int_auroc = _evaluate_integer_mean_auroc(model, loader, dataset_display, args.activation, clamp=clamp)
+            int_auroc = _evaluate_integer_mean_auroc(model, loader, dataset_display, args.activation)
 
         print("\n" + "=" * 40)
         print(" RESNET18 INFERENCE SUMMARY ")
@@ -760,7 +764,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
 
     # 2. Traverse Conv1
     q_x, s_out, z_out = run_integer_conv_block(
-        q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=args.activation, clamp=clamp
+        q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=args.activation
     )
 
     # 3. Traverse Residual Blocks
@@ -768,18 +772,18 @@ def main(infer_data: str, run_floating_point: bool = True, run_integer: bool = T
         for block_idx in range(2):
             prefix = f"layer{layer_idx}_block{block_idx}"
             q_x, s_out, z_out = run_integer_basic_block(
-                q_x, int32_state[prefix], z_out, s_out, act_name=args.activation, clamp=clamp
+                q_x, int32_state[prefix], z_out, s_out, act_name=args.activation
             )
 
     # 4. Global Average Pooling (Using IN_SCALE, not OUT_SCALE)
     fc_in_scale = int32_state["fc"]["scale_in"]
     fc_in_zp = int32_state["fc"]["zp_in"]
 
-    q_pooled = integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp)
+    q_pooled = integer_max_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # 5. Final Fully Connected Layer
-    q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp, clamp=clamp)
+    q_out, final_s, final_z = run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
 
     # 6. Dequantize final logits
     int_logits = q_out.to(torch.float32)
@@ -834,19 +838,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for inference (default: 64)",
+    )
+    parser.add_argument(
         "--activation",
         type=str,
         default="relu",
         choices=["relu", "gelu", "leaky_relu"],
         help="Activation function the model was trained with",
-    )
-    parser.add_argument(
-        "--clamp",
-        type=str,
-        required=False,
-        default="true",
-        choices=["true", "false", "True", "False"],
-        help="Whether to use saturation (clamping) or pure 32-bit modulo arithmetic.",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -872,12 +874,9 @@ if __name__ == "__main__":
     elif args.floating_point:
         run_floating_point = True
         run_integer = False
-
-    clamp_bool = args.clamp.lower() == "true"
-
     main(
         args.infer,
+        batch_size=args.batch_size,
         run_floating_point=run_floating_point,
         run_integer=run_integer,
-        clamp=clamp_bool,
     )

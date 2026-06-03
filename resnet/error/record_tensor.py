@@ -315,9 +315,7 @@ def record_and_validate(dataset_name: str, activation: str):
     fc_in_scale = int8_state["fc"]["scale_in"]
     fc_in_zp = int8_state["fc"]["zp_in"]
 
-    q_pooled = int8_utils.integer_global_avg_pool2d(
-        q_x, z_out, s_out, fc_in_zp, fc_in_scale
-    )
+    q_pooled = int8_utils.integer_max_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     q_out, final_s, final_z = int8_inference.run_integer_fc(

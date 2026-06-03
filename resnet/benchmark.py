@@ -365,7 +365,7 @@ def _int8_accuracy(
         fc_in_scale = int8_state["fc"]["scale_in"]
         fc_in_zp = int8_state["fc"]["zp_in"]
         
-        q_pooled = int8_utils.integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale)
+        q_pooled = int8_utils.integer_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         q_out, final_s, final_z = int8_inference.run_integer_fc(q_fc_in, int8_state["fc"], fc_in_zp)
@@ -411,7 +411,6 @@ def _int32_accuracy(
     dataset_name: str,
     num_data: Optional[int],
     activation: str,
-    clamp: bool,
 ):
     is_multi = _is_multilabel(dataset_name, activation)
     is_medmnist = _is_medmnist(dataset_name)
@@ -446,20 +445,20 @@ def _int32_accuracy(
             images, labels = images[:remaining], labels[:remaining]
 
         q_x = int32_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint32)
-        q_x, s_out, z_out = int32_inference.run_integer_conv_block(q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation, clamp=clamp)
+        q_x, s_out, z_out = int32_inference.run_integer_conv_block(q_x, int32_state["conv1"], zp_in, apply_act=True, act_name=activation)
 
         for layer_idx in range(1, 5):
             for block_idx in range(2):
                 prefix = f"layer{layer_idx}_block{block_idx}"
-                q_x, s_out, z_out = int32_inference.run_integer_basic_block(q_x, int32_state[prefix], z_out, s_out, act_name=activation, clamp=clamp)
+                q_x, s_out, z_out = int32_inference.run_integer_basic_block(q_x, int32_state[prefix], z_out, s_out, act_name=activation)
 
         fc_in_scale = int32_state["fc"]["scale_in"]
         fc_in_zp = int32_state["fc"]["zp_in"]
 
-        q_pooled = int32_utils.integer_global_avg_pool2d(q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp)
+        q_pooled = int32_utils.integer_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
-        q_out, final_s, final_z = int32_inference.run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp, clamp=clamp)
+        q_out, final_s, final_z = int32_inference.run_integer_fc(q_fc_in, int32_state["fc"], fc_in_zp)
 
         int_logits = q_out.to(torch.float64)
         dequantized_logits = final_s * (int_logits - final_z)
@@ -529,7 +528,7 @@ def _fxp64_accuracy(
             for block in stage:
                 q_x = fp64_inference.run_static_fixed_point_basic_block(q_x, block, act_name=activation)
 
-        q_pooled = fp64_utils.fixed_point_global_avg_pool2d(q_x)
+        q_pooled = fp64_utils.fixed_point_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         q_out, _, _ = fp64_inference.run_static_fixed_point_fc(q_fc_in, model.fc)
@@ -573,7 +572,6 @@ def _fxp32_accuracy(
     dataset_name: str,
     num_data: Optional[int],
     activation: str,
-    clamp: bool
 ):
     is_multi = _is_multilabel(dataset_name, activation)
     is_medmnist = _is_medmnist(dataset_name)
@@ -603,16 +601,16 @@ def _fxp32_accuracy(
 
         q_x = fp32_utils.quantize_fixed_point(images)
 
-        q_x = fp32_inference.run_static_fixed_point_conv_block(q_x, model.conv1, model.bn1, apply_act=True, act_name=activation, clamp=clamp, lut_dict=global_gelu_lut)
+        q_x = fp32_inference.run_static_fixed_point_conv_block(q_x, model.conv1, model.bn1, apply_act=True, act_name=activation, lut_dict=global_gelu_lut)
 
         for stage in [model.layer1, model.layer2, model.layer3, model.layer4]:
             for block in stage:
-                q_x = fp32_inference.run_static_fixed_point_basic_block(q_x, block, act_name=activation, clamp=clamp, lut_dict=global_gelu_lut)
+                q_x = fp32_inference.run_static_fixed_point_basic_block(q_x, block, act_name=activation, lut_dict=global_gelu_lut)
 
-        q_pooled = fp32_utils.fixed_point_global_avg_pool2d(q_x, clamp=clamp)
+        q_pooled = fp32_utils.fixed_point_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
-        q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc, clamp=clamp)
+        q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc)
         dequantized_logits = fp32_utils.dequantize_fixed_point(q_out)
 
         if is_multi:
@@ -647,7 +645,7 @@ def _fxp32_accuracy(
         return 100.0 * correct / max(total, 1)
 
 
-def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None, activation: str = "relu", clamp: bool = True):
+def benchmark(dataset_names=None, num_data: Optional[int] = None, batch_size: int = 64, mode: Optional[str] = None, activation: str = "relu"):
     _disable_heavy_debug_logs()
 
     targets = dataset_names or BENCHMARK_DATASETS
@@ -658,7 +656,7 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
         print(f"\n[bench] Dataset: {name}")
         _ensure_checkpoint(name, activation)
 
-        loader = _get_test_loader(name, activation)
+        loader = _get_test_loader(name, activation, batch_size=batch_size)
         model = _build_model(name, activation)
 
         per_dataset = {}
@@ -669,10 +667,10 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
             int8_acc = _int8_accuracy(model, loader, name, num_data, activation)
             per_dataset["int8"] = int8_acc
         if "int32" in selected_modes:
-            int32_acc = _int32_accuracy(model, loader, name, num_data, activation, clamp=clamp)
+            int32_acc = _int32_accuracy(model, loader, name, num_data, activation)
             per_dataset["int32"] = int32_acc
         if "fxp32" in selected_modes:
-            fxp32_acc = _fxp32_accuracy(model, loader, name, num_data, activation, clamp=clamp)
+            fxp32_acc = _fxp32_accuracy(model, loader, name, num_data, activation)
             per_dataset["fxp32"] = fxp32_acc
         if "fxp64" in selected_modes:
             fxp64_acc = _fxp64_accuracy(model, loader, name, num_data, activation)
@@ -693,17 +691,12 @@ def _mode_suffix(mode: Optional[str]) -> str:
     return mode.replace("-", "_")
 
 
-def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], activation: str, clamp: bool) -> str:
+def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], activation: str) -> str:
     mode_part = _mode_suffix(mode)
-    clamp_part = None if mode in ("fp32", "int8") else ("clamped" if clamp else "unclamped")
     if single_dataset_name is None:
-        if clamp_part is None:
-            return f"benchmark_results_{mode_part}_{activation}.json"
-        return f"benchmark_results_{mode_part}_{activation}_{clamp_part}.json"
+        return f"benchmark_results_{mode_part}_{activation}.json"
     ds_part = single_dataset_name.lower().replace("-", "_")
-    if clamp_part is None:
-        return f"benchmark_results_{ds_part}_{mode_part}_{activation}.json"
-    return f"benchmark_results_{ds_part}_{mode_part}_{activation}_{clamp_part}.json"
+    return f"benchmark_results_{ds_part}_{mode_part}_{activation}.json"
 
 
 if __name__ == "__main__":
@@ -743,16 +736,13 @@ if __name__ == "__main__":
         help="Activation function the model was trained with"
     )
     parser.add_argument(
-        "--clamp",
-        type=str,
-        required=False,
-        default=None,
-        choices=["true", "false", "True", "False"],
-        help="Whether to use saturation (clamping) or pure 32-bit modulo arithmetic.",
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for inference (default: 64)",
     )
     args = parser.parse_args()
-    clamp_bool = None if args.clamp is None else args.clamp.lower() == "true"
-    effective_clamp = True if clamp_bool is None else clamp_bool
+    
     
     if args.nih_chest:
         targets = ["NIH-CHEST"]
@@ -764,8 +754,8 @@ if __name__ == "__main__":
         single_name = _normalize_bench_name(args.bench)
         targets = [single_name]
 
-    metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode, activation=args.activation, clamp=effective_clamp)
-    results_file = _results_filename(single_name, args.mode, args.activation, clamp=effective_clamp)
+    metrics = benchmark(dataset_names=targets, num_data=args.num_data, batch_size=args.batch_size, mode=args.mode, activation=args.activation)
+    results_file = _results_filename(single_name, args.mode, args.activation)
 
     # Save all benchmark outputs under resnet/benchmark-results/
     bench_root = os.path.join(THIS_DIR, "benchmark-results")
@@ -776,7 +766,7 @@ if __name__ == "__main__":
         ds_part = ds.lower().replace("-", "_")
         per_ds_dir = os.path.join(bench_root, ds_part)
         os.makedirs(per_ds_dir, exist_ok=True)
-        per_file = _results_filename(ds, args.mode, args.activation, clamp=effective_clamp)
+        per_file = _results_filename(ds, args.mode, args.activation)
         per_path = os.path.join(per_ds_dir, per_file)
         with open(per_path, "w") as pf:
             json.dump(_json_safe({ds: vals}), pf, indent=2)

@@ -51,50 +51,103 @@ def compute_integer_multiplier(scale_w, scale_x, scale_out):
 
 def multiply_by_quantized_multiplier(int32_accumulator, q_M0, shift):
     """
-    Native 64-bit hardware scaling simulator.
-    Acc (~28 bits) * M0 (31 bits) = ~59 bits. Fits safely inside int64 ALU.
+    Strict 32-bit hardware scaling simulator using 16-bit limb decomposition.
+    No int64, no int16, no int8. Strictly torch.int32 arithmetic.
     """
-    # 1. Load into 64-bit ALU wire to prevent overflow during multiplication
-    acc_64 = int32_accumulator.to(torch.int64)
-    m0_64 = q_M0.to(torch.int64)
+    A = int32_accumulator.to(torch.int32)
+    B = q_M0.to(torch.int32)
 
-    # 2. Execute full hardware product (Max ~59 bits)
-    prod_64 = acc_64 * m0_64
+    # 1. Unsigned Limb Decomposition (16-bit limbs)
+    A_lo = A & 0xFFFF
+    A_hi = (A >> 16) & 0xFFFF
+    
+    B_lo = B & 0xFFFF
+    B_hi = (B >> 16) & 0xFFFF
 
-    # 3. Calculate target truncation shift
-    total_shift = 31 + shift
+    # 2. Cross Products (fits in 32-bit unsigned perfectly)
+    P0 = A_lo * B_lo
+    P1 = A_lo * B_hi
+    P2 = A_hi * B_lo
+    P3 = A_hi * B_hi
 
-    # 4. Inject hardware rounding bit (Standard DSP practice)
-    if total_shift > 0:
-        rounding_bit = 1 << (total_shift - 1)
-        prod_64 = prod_64 + rounding_bit
+    # 3. Aligned Accumulation (simulating 64-bit sum)
+    R0 = P0 & 0xFFFF
+    carry1 = (P0 >> 16) & 0xFFFF
 
-    # 5. Immediate Truncation -> Drop the LSBs to scale down!
-    result_64 = prod_64 >> total_shift
+    S1 = carry1 + (P1 & 0xFFFF) + (P2 & 0xFFFF)
+    R1 = S1 & 0xFFFF
+    carry2 = S1 >> 16
 
-    # Note: result_64 is now safely scaled down and mathematically 
-    # guaranteed to fit back inside an int32 register.
-    return result_64.to(torch.int32)
+    S2 = carry2 + ((P1 >> 16) & 0xFFFF) + ((P2 >> 16) & 0xFFFF) + (P3 & 0xFFFF)
+    R2 = S2 & 0xFFFF
+    carry3 = S2 >> 16
+
+    S3 = carry3 + ((P3 >> 16) & 0xFFFF)
+    R3 = S3 & 0xFFFF
+
+    # Recombine into 32-bit registers (R_lo, R_hi)
+    R_lo = R0 | (R1 << 16)
+    R_hi = R2 | (R3 << 16)
+
+    # 4. Apply Two's Complement Correction for Signed Multiplication
+    is_A_neg = (A < 0).to(torch.int32)
+    is_B_neg = (B < 0).to(torch.int32)
+    
+    R_hi = R_hi - (is_A_neg * B)
+    R_hi = R_hi - (is_B_neg * A)
+
+    # 5. Inject hardware rounding bit
+    total_shift = (31 + shift).to(torch.int32)
+    
+    one = torch.tensor(1, dtype=torch.int32, device=A.device)
+    zero = torch.tensor(0, dtype=torch.int32, device=A.device)
+    
+    round_shift = torch.clamp(total_shift - 1, min=0)
+    round_lo = torch.where(total_shift > 0, torch.where(round_shift < 32, one << round_shift, zero), zero)
+    round_hi = torch.where(total_shift > 0, torch.where(round_shift >= 32, one << (round_shift - 32), zero), zero)
+    
+    # Safe 64-bit addition for rounding bit
+    c_round = ((R_lo & 0xFFFF) + (round_lo & 0xFFFF)) >> 16
+    carry_round = (((R_lo >> 16) & 0xFFFF) + ((round_lo >> 16) & 0xFFFF) + c_round) >> 16
+    
+    R_lo = R_lo + round_lo
+    R_hi = R_hi + round_hi + carry_round
+
+    # 6. Apply 64-bit arithmetic right shift
+    shift_val = torch.clamp(total_shift, min=0)
+    s_ge_32 = shift_val >= 32
+    
+    shift_hi = torch.clamp(shift_val - 32, min=0)
+    shift_lo = torch.clamp(shift_val, max=31)
+    
+    thirty_two = torch.tensor(32, dtype=torch.int32, device=A.device)
+    k = shift_lo
+    mask = torch.where(
+        k > 0,
+        ~(torch.tensor(-1, dtype=torch.int32, device=A.device) << (thirty_two - k)),
+        torch.tensor(-1, dtype=torch.int32, device=A.device)
+    )
+    
+    R_lo_part = (R_lo >> k) & mask
+    R_hi_part = torch.where(k > 0, R_hi << (thirty_two - k), zero)
+    
+    res_lt_32 = R_hi_part | R_lo_part
+    res_ge_32 = R_hi >> shift_hi
+    
+    return torch.where(s_ge_32, res_ge_32, res_lt_32).to(torch.int32)
 
 # ---------------------------------------------------------
 # 2. Quantization / Arithmetic Logic
 # ---------------------------------------------------------
 
 
-def downscale_and_cast(int32_accumulator, q_M0, shift, z_out, clamp=True):
+def downscale_and_cast(int32_accumulator, q_M0, shift, z_out):
     scaled_accum = multiply_by_quantized_multiplier(int32_accumulator, q_M0, shift)
     
     z_out_32 = torch.as_tensor(z_out, dtype=torch.int32, device=scaled_accum.device)
     
-    if clamp:
-        # Saturation Math (Clamping to INT32 range)
-        q_out = scaled_accum + z_out_32.to(torch.int64)
-        q_out = torch.clamp(q_out, INT32_MIN, INT32_MAX)
-    else:
-        # Modulo Math (Native 32-bit arithmetic)
-        q_out = (scaled_accum.to(torch.int32) + z_out_32).to(torch.int64)
-    
-    return q_out.to(torch.int32)
+    # Modulo Math (Strict 32-bit arithmetic)
+    return (scaled_accum.to(torch.int32) + z_out_32).to(torch.int32)
 
 
 def quantize_tensor(tensor, scale, zero_point, dtype=torch.uint32):
@@ -123,28 +176,16 @@ def dequantize_tensor(q_tensor, scale, zero_point):
 #     w_int = q_w.to(torch.int64) - z_w
 #     return F.conv2d(x_int, w_int, stride=stride, padding=padding)
 
-
-def add_bias(int64_accumulator, q_bias):
-    bias_int64 = q_bias.to(torch.int64)
-    if int64_accumulator.dim() == 4:
-        bias_int64 = bias_int64.view(1, -1, 1, 1)
-    return int64_accumulator + bias_int64
-
-
-def add_bias_with_clamp(int32_accumulator, q_bias, clamp=True):
+def add_bias(int32_accumulator, q_bias):
     bias_32 = q_bias.to(torch.int32)
     if int32_accumulator.dim() == 4:
         bias_32 = bias_32.view(1, -1, 1, 1)
-
-    if clamp:
-        summed = int32_accumulator.to(torch.int64) + bias_32.to(torch.int64)
-        return torch.clamp(summed, INT32_MIN, INT32_MAX).to(torch.int32)
-
+    # Modulo Math
     return (int32_accumulator.to(torch.int32) + bias_32.to(torch.int32)).to(torch.int32)
 
 
-def integer_add(q1, z1, scale1, q2, z2, scale2, z_out, scale_out, clamp=True):
-    # Enforce pure 32-bit subtraction
+def integer_add(q1, z1, q2, z2, z_out, add_M0_1, add_shift_1, add_M0_2, add_shift_2):
+    """Strict 32-bit integer requantized addition using precomputed multipliers."""
     z1_32 = torch.as_tensor(z1, dtype=torch.int32, device=q1.device)
     z2_32 = torch.as_tensor(z2, dtype=torch.int32, device=q2.device)
     z_out_32 = torch.as_tensor(z_out, dtype=torch.int32, device=q1.device)
@@ -152,43 +193,15 @@ def integer_add(q1, z1, scale1, q2, z2, scale2, z_out, scale_out, clamp=True):
     x1 = q1.to(torch.int32) - z1_32
     x2 = q2.to(torch.int32) - z2_32
 
-    M0_1, shift_1 = compute_integer_multiplier(scale1, 1.0, scale_out)
-    M0_2, shift_2 = compute_integer_multiplier(scale2, 1.0, scale_out)
-
-    val1 = multiply_by_quantized_multiplier(x1, M0_1, shift_1)
-    val2 = multiply_by_quantized_multiplier(x2, M0_2, shift_2)
-
-    if clamp:
-        # Saturation Math
-        q_out = val1 + val2 + z_out_32.to(torch.int64)
-        return torch.clamp(q_out, INT32_MIN, INT32_MAX).to(torch.int32)
-    else:
-        # Modulo Math
-        q_out = (val1.to(torch.int32) + val2.to(torch.int32) + z_out_32).to(torch.int64)
-        return q_out.to(torch.int32)
+    val1 = multiply_by_quantized_multiplier(x1, add_M0_1, add_shift_1)
+    val2 = multiply_by_quantized_multiplier(x2, add_M0_2, add_shift_2)
+    # Modulo Math (Strict 32-bit addition)
+    return (val1.to(torch.int32) + val2.to(torch.int32) + z_out_32).to(torch.int32)
 
 
-def integer_global_avg_pool2d(q_in, z_in, scale_in, z_out, scale_out, clamp=True):
-    N = q_in.size(2) * q_in.size(3)
-    
-    # Enforce pure 32-bit subtraction
-    z_in_32 = torch.as_tensor(z_in, dtype=torch.int32, device=q_in.device)
-    z_out_32 = torch.as_tensor(z_out, dtype=torch.int32, device=q_in.device)
-
-    x = q_in.to(torch.int32) - z_in_32
-    accum = x.sum(dim=(2, 3), keepdim=True)
-
-    M0, shift = compute_integer_multiplier(scale_in, 1.0, scale_out * N)
-    pooled = multiply_by_quantized_multiplier(accum, M0, shift)
-
-    if clamp:
-        # Saturation Math
-        q_out = pooled + z_out_32.to(torch.int64)
-        return torch.clamp(q_out, INT32_MIN, INT32_MAX).to(torch.int32)
-    else:
-        # Modulo Math
-        q_out = (pooled.to(torch.int32) + z_out_32).to(torch.int64)
-        return q_out.to(torch.int32)
+def integer_max_pool2d(q_in):
+    """Pure int32 comparison — no arithmetic, no float."""
+    return torch.amax(q_in.to(torch.int32), dim=(2, 3), keepdim=True)
 
 
 def quantized_relu(q_tensor, z_out):

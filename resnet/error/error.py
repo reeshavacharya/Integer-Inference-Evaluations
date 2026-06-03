@@ -185,7 +185,6 @@ def evaluate_error(
     batch_size: int = 64,
     activation: str = "relu",
     mode: str = "int8",
-    clamp: bool = True,
 ):
     print(f"\n[error] Starting Layer-by-Layer Error Analysis on {dataset_name} ({activation} | {mode})...")
 
@@ -292,7 +291,6 @@ def evaluate_error(
                 model.bn1,
                 apply_act=False,
                 act_name=activation,
-                clamp=clamp,
                 lut_dict=global_gelu_lut,
             )
             _evaluate_step(q_pre_act, fxp_scale, fxp_zp, "conv1_pre_act")
@@ -311,7 +309,6 @@ def evaluate_error(
                         block.bn1,
                         apply_act=False,
                         act_name=activation,
-                        clamp=clamp,
                         lut_dict=global_gelu_lut,
                     )
                     _evaluate_step(q_out1_pre, fxp_scale, fxp_zp, f"{prefix}_conv1_pre_act")
@@ -324,7 +321,6 @@ def evaluate_error(
                         block.bn2,
                         apply_act=False,
                         act_name=activation,
-                        clamp=clamp,
                         lut_dict=global_gelu_lut,
                     )
                     _evaluate_step(q_out2, fxp_scale, fxp_zp, f"{prefix}_conv2_out")
@@ -338,33 +334,26 @@ def evaluate_error(
                             block.shortcut[1],
                             apply_act=False,
                             act_name=activation,
-                            clamp=clamp,
                             lut_dict=global_gelu_lut,
                         )
                         _evaluate_step(q_short, fxp_scale, fxp_zp, f"{prefix}_shortcut_out")
 
-                    if clamp:
-                        q_added = torch.clamp(
-                            q_out2.to(torch.int64) + q_short.to(torch.int64),
-                            -2147483648,
-                            2147483647,
-                        ).to(torch.int32)
-                    else:
-                        q_added = q_out2 + q_short
+                    # Use native 32-bit modulo arithmetic (no saturation)
+                    q_added = (q_out2 + q_short).to(torch.int32)
                     _evaluate_step(q_added, fxp_scale, fxp_zp, f"{prefix}_add_pre_act")
 
                     q_x = _apply_activation(q_added, activation)
                     s_out, z_out = fxp_scale, fxp_zp
                     _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))
 
-            q_pooled = fp32_utils.fixed_point_global_avg_pool2d(q_x, clamp=clamp)
+            q_pooled = fp32_utils.fixed_point_max_pool2d(q_x)
             q_fc_in = q_pooled.view(q_pooled.size(0), -1)
-            q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc, clamp=clamp)
+            q_out, _, _ = fp32_inference.run_static_fixed_point_fc(q_fc_in, model.fc)
             _evaluate_step(q_out, fxp_scale, fxp_zp, "fc")
         else:
             # 1. Unroll Initial Conv1
             q_pre_act, conv_s, conv_z = infer_module.run_integer_conv_block(
-                q_x, int_state["conv1"], zp_in, apply_act=False, clamp=clamp if mode == "int32" else True
+                q_x, int_state["conv1"], zp_in, apply_act=False
             )
             _evaluate_step(q_pre_act, conv_s, conv_z, "conv1_pre_act")
 
@@ -401,7 +390,7 @@ def evaluate_error(
 
                     # 2. Unroll Block Conv1
                     q_out1_pre, conv_s1, conv_z1 = infer_module.run_integer_conv_block(
-                        q_x, block_data["conv1"], z_out, apply_act=False, clamp=clamp if mode == "int32" else True
+                        q_x, block_data["conv1"], z_out, apply_act=False
                     )
                     _evaluate_step(q_out1_pre, conv_s1, conv_z1, f"{prefix}_conv1_pre_act")
 
@@ -432,7 +421,7 @@ def evaluate_error(
                     s_out1, z_out1 = act_s1, act_z1
 
                     q_out2, s_out2, z_out2 = infer_module.run_integer_conv_block(
-                        q_out1, block_data["conv2"], z_out1, apply_act=False, clamp=clamp if mode == "int32" else True
+                        q_out1, block_data["conv2"], z_out1, apply_act=False
                     )
                     _evaluate_step(q_out2, s_out2, z_out2, f"{prefix}_conv2_out")
 
@@ -440,7 +429,7 @@ def evaluate_error(
                         q_short, s_short, z_short = q_x, s_out, z_out
                     else:
                         q_short, s_short, z_short = infer_module.run_integer_conv_block(
-                            q_x, block_data["shortcut"], z_out, apply_act=False, clamp=clamp if mode == "int32" else True
+                            q_x, block_data["shortcut"], z_out, apply_act=False
                         )
                         _evaluate_step(q_short, s_short, z_short, f"{prefix}_shortcut_out")
 
@@ -449,9 +438,18 @@ def evaluate_error(
                     act_s = block_data["add"]["act_scale_out"]
                     act_z = block_data["add"]["act_zp_out"]
 
-                    q_added = quant_utils.integer_add(
-                        q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s, clamp=clamp if mode == "int32" else True
-                    )
+                    if mode == "int32":
+                        q_added = quant_utils.integer_add(
+                            q_out2, z_out2, q_short, z_short, conv_z,
+                            block_data["add"]["add_M0_1"],
+                            block_data["add"]["add_shift_1"],
+                            block_data["add"]["add_M0_2"],
+                            block_data["add"]["add_shift_2"],
+                        )
+                    else:
+                        q_added = quant_utils.integer_add(
+                            q_out2, z_out2, s_out2, q_short, z_short, s_short, conv_z, conv_s
+                        )
                     _evaluate_step(q_added, conv_s, conv_z, f"{prefix}_add_pre_act")
 
                     if activation == "relu":
@@ -480,13 +478,11 @@ def evaluate_error(
             fc_in_scale = int_state["fc"]["scale_in"]
             fc_in_zp = int_state["fc"]["zp_in"]
 
-            q_pooled = quant_utils.integer_global_avg_pool2d(
-                q_x, z_out, s_out, fc_in_zp, fc_in_scale, clamp=clamp if mode == "int32" else True
-            )
+            q_pooled = quant_utils.integer_max_pool2d(q_x)
             q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
             q_out, final_s, final_z = infer_module.run_integer_fc(
-                q_fc_in, int_state["fc"], fc_in_zp, clamp=clamp if mode == "int32" else True
+                q_fc_in, int_state["fc"], fc_in_zp
             )
             _evaluate_step(q_out, final_s, final_z, "fc")
 
@@ -560,7 +556,8 @@ def plot_error_metrics(metrics_dict, dataset_name, activation: str = "relu", mod
         ax.set_xticklabels(valid_layers, rotation=45, ha="right", fontsize=8)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    graphs_dir = os.path.join(THIS_DIR, "graphs")
+    graphs_dir = os.path.join(THIS_DIR, "graphs", dataset_name.lower().replace(" ", "_").replace("-", "_"))
+    os.makedirs(graphs_dir, exist_ok=True)
     filename = os.path.join(graphs_dir, f"quantization_divergence_{dataset_name.lower()}_{activation}_{mode}.png")
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     print(f"[+] Saved error divergence graphs to {filename}")
@@ -585,29 +582,21 @@ if __name__ == "__main__":
         help="Inference mode used for error analysis",
     )
     parser.add_argument(
-        "--clamp",
-        type=str,
-        required=False,
-        default=None,
-        choices=["true", "false", "True", "False"],
-        help="Clamp mode for int32/fxp32 analysis.",
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for error analysis (default: 64)",
     )
     args = parser.parse_args()
 
-    clamp_bool = None if args.clamp is None else args.clamp.lower() == "true"
-    if args.mode == "int8":
-        clamp_bool = True
-    if clamp_bool is None:
-        clamp_bool = True
+    metrics = evaluate_error(args.dataset, args.num_data, batch_size=args.batch_size, activation=args.activation, mode=args.mode)
 
-    metrics = evaluate_error(args.dataset, args.num_data, activation=args.activation, mode=args.mode, clamp=clamp_bool)
+    data_dir = os.path.join(THIS_DIR, "json", args.dataset.lower().replace(" ", "_").replace("-", "_").lower())
+    os.makedirs(data_dir, exist_ok=True)
+    file_name = os.path.join(data_dir, f"error_accumulation_{args.dataset.lower()}_{args.activation}_{args.mode}.json")
 
-    data_dir = os.path.join(THIS_DIR, "json")
-    clamp_part = "" if args.mode == "int8" else f"_{'clamped' if clamp_bool else 'unclamped'}"
-    file_name = os.path.join(data_dir, f"error_accumulation_{args.dataset.lower()}_{args.activation}_{args.mode}{clamp_part}.json")
-    
     with open(file_name, "w") as f:
-        json.dump({"dataset": args.dataset, "activation": args.activation, "mode": args.mode, "clamp": clamp_bool, "layer_metrics": metrics}, f, indent=2)
+        json.dump({"dataset": args.dataset, "activation": args.activation, "mode": args.mode, "layer_metrics": metrics}, f, indent=2)
 
     print(f"\n[+] Saved error accumulation log to {file_name}")
-    plot_error_metrics(metrics, args.dataset, args.activation, f"{args.mode}{clamp_part}")
+    plot_error_metrics(metrics, args.dataset, args.activation, f"{args.mode}")

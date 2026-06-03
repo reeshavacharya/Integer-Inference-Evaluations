@@ -235,7 +235,17 @@ def main(model_path, activation="relu"):
                 out_zp=out_range["out_zero_point"]
             )
             
-            # 2. Embed it into the dictionary
+            # 2. Precompute addition requantization multipliers (offline, float-free at inference)
+            add_scale_out = out_range["in_scale"]
+            scale_conv2_out = block_data["conv2"]["conv_scale_out"]
+            if "shortcut" in block_data:
+                scale_short_out = block_data["shortcut"]["conv_scale_out"]
+            else:
+                scale_short_out = s_out
+            add_M0_1, add_shift_1 = compute_integer_multiplier(scale_conv2_out, 1.0, add_scale_out)
+            add_M0_2, add_shift_2 = compute_integer_multiplier(scale_short_out, 1.0, add_scale_out)
+
+            # 3. Embed into the dictionary
             block_data["add"] = {
                 "conv_scale_out": out_range["in_scale"],
                 "conv_zp_out": out_range["in_zero_point"],
@@ -244,6 +254,10 @@ def main(model_path, activation="relu"):
                 "gelu_q_min": add_q_min,
                 "gelu_q_max": add_q_max,
                 "gelu_lut": add_lut.cpu(),
+                "add_M0_1": add_M0_1.to(torch.int32),
+                "add_shift_1": add_shift_1.to(torch.int32),
+                "add_M0_2": add_M0_2.to(torch.int32),
+                "add_shift_2": add_shift_2.to(torch.int32),
             }
             
             int32_state[prefix] = block_data

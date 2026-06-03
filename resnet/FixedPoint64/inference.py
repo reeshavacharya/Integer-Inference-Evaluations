@@ -26,7 +26,7 @@ from utils import (
     execute_and_shift_conv2d,
     execute_and_shift_linear,
     add_bias,
-    fixed_point_global_avg_pool2d,
+    fixed_point_max_pool2d,
 )
 
 
@@ -117,7 +117,7 @@ class ResNet18Inference(nn.Module):
         self.layer3 = self._make_layer(BasicBlock, 256, 2, stride=2)
         self.layer4 = self._make_layer(BasicBlock, 512, 2, stride=2)
 
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.fc = nn.Linear(512, num_classes)
 
     def _make_layer(self, block, out_channels, num_blocks, stride):
@@ -138,7 +138,7 @@ class ResNet18Inference(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
 
-        out = self.avgpool(out)
+        out = self.maxpool(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
@@ -314,7 +314,7 @@ def _evaluate_fixed_point_mean_auroc(model, loader, dataset_name: str):
             for block in stage:
                 q_x = run_static_fixed_point_basic_block(q_x, block)
 
-        q_pooled = fixed_point_global_avg_pool2d(q_x)
+        q_pooled = fixed_point_max_pool2d(q_x)
         q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
         q_out, _, _ = run_static_fixed_point_fc(q_fc_in, model.fc)
@@ -562,7 +562,7 @@ def main(infer_data: str, run_floating_point: bool = True, run_fixed_point: bool
             q_x = run_static_fixed_point_basic_block(q_x, block)
 
     # Global Average Pooling
-    q_pooled = fixed_point_global_avg_pool2d(q_x)
+    q_pooled = fixed_point_max_pool2d(q_x)
     q_fc_in = q_pooled.view(q_pooled.size(0), -1)
 
     # Run Final FC Layer
