@@ -35,6 +35,7 @@ SUPPORTED_DATASETS = (
 	"OCTMNIST",
 	"BloodMNIST",
 	"OrganAMNIST",
+	"PneumoniaMNIST",
 )
 
 
@@ -60,6 +61,9 @@ def _load_module(module_name: str, file_path: str, prepend_dir: str):
 
 int8_utils = _load_module("vgg_int8_utils", os.path.join(INT8_DIR, "utils.py"), INT8_DIR)
 
+def _activation_label(base_name: str, activation: str) -> str:
+	return f"{base_name}_{activation.lower()}"
+
 
 def _normalize_dataset_name(dataset_name: str) -> str:
 	key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
@@ -79,71 +83,81 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 		return "BloodMNIST"
 	if key == "ORGANAMNIST":
 		return "OrganAMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
 	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
-def _dataset_config(dataset_name: str):
+def _dataset_config(dataset_name: str, activation: str):
 	display = _normalize_dataset_name(dataset_name)
 	if display == "MNIST":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_MNIST,
-			"model": train_mod.VGG19(num_classes=10, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_mnist.pth"),
+			"model": train_mod.VGG19(num_classes=10, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_mnist.pth"),
 			"download_name": "MNIST",
 		}
 	if display == "CIFAR10":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_CIFAR10,
-			"model": train_mod.VGG19(num_classes=10, in_channels=3),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_cifar10.pth"),
+			"model": train_mod.VGG19(num_classes=10, in_channels=3, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_cifar10.pth"),
 			"download_name": "CIFAR10",
 		}
 	if display == "Brain-MRI":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_Brain_MRI,
-			"model": train_mod.VGG19(num_classes=4, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_brain_mri.pth"),
+			"model": train_mod.VGG19(num_classes=4, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_brain_mri.pth"),
 			"download_name": "Brain-MRI",
 		}
 	if display == "NIH-CHEST":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_NIH_Chest,
-			"model": train_mod.VGG19(num_classes=15, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_NIH_Chest_XRay.pth"),
+			"model": train_mod.VGG19(num_classes=15, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"),
 			"download_name": "NIH-CHEST",
 		}
 	if display == "OCTMNIST":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_OCTMNIST,
-			"model": train_mod.VGG19(num_classes=4, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_octmnist.pth"),
+			"model": train_mod.VGG19(num_classes=4, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_octmnist.pth"),
 			"download_name": "OCTMNIST",
 		}
 	if display == "BloodMNIST":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_BloodMNIST,
-			"model": train_mod.VGG19(num_classes=8, in_channels=3),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_bloodmnist.pth"),
+			"model": train_mod.VGG19(num_classes=8, in_channels=3, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_bloodmnist.pth"),
 			"download_name": "BloodMNIST",
 		}
 	if display == "OrganAMNIST":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_OrganAMNIST,
-			"model": train_mod.VGG19(num_classes=11, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_vgg19_organamnist.pth"),
+			"model": train_mod.VGG19(num_classes=11, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_organamnist.pth"),
 			"download_name": "OrganAMNIST",
+		}
+	if display == "PneumoniaMNIST":
+		return {
+			"display": display,
+			"setup_fn": train_mod.setup_PneumoniaMNIST,
+			"model": train_mod.VGG19(num_classes=2, in_channels=1, activation=activation),
+			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_pneumoniamnist.pth"),
+			"download_name": "PneumoniaMNIST",
 		}
 	raise ValueError(f"Unsupported dataset: {dataset_name}")
 
 
-def _resolve_test_loader(cfg, batch_size: int):
+def _resolve_train_loader(cfg, batch_size: int):
 	train_mod.train_loader = None
 	train_mod.val_loader = None
 	train_mod.test_loader = None
@@ -152,21 +166,21 @@ def _resolve_test_loader(cfg, batch_size: int):
 
 	if (
 		isinstance(setup_result, tuple)
-		and len(setup_result) >= 3
-		and hasattr(setup_result[2], "dataset")
+		and len(setup_result) >= 1
+		and hasattr(setup_result[0], "dataset")
 	):
-		return setup_result[2]
+		return setup_result[0]
 
-	if train_mod.test_loader is not None:
-		return train_mod.test_loader
+	if train_mod.train_loader is not None:
+		return train_mod.train_loader
 
-	raise RuntimeError(f"Could not resolve test loader for dataset: {cfg['display']}")
+	raise RuntimeError(f"Could not resolve train loader for dataset: {cfg['display']}")
 
 
 activation_ranges: Dict[str, Dict[str, float]] = {}
 
 
-def _register_hooks(model: nn.Module):
+def _register_hooks(model: nn.Module, activation: str):
     handles = []
 
     def hook_in(name):
@@ -184,7 +198,13 @@ def _register_hooks(model: nn.Module):
 
     def hook_out(name):
         def hook(module, inputs, output):
-            out_min, out_max = float(output.min()), float(output.max())
+            out_tensor = output.detach()
+            if isinstance(module, torch.nn.GELU):
+                out_tensor = torch.clamp(out_tensor, min=-10.0, max=10.0)
+            elif isinstance(module, torch.nn.LeakyReLU):
+                out_tensor = torch.clamp(out_tensor, min=-50.0, max=50.0)
+
+            out_min, out_max = float(out_tensor.min()), float(out_tensor.max())
             if name not in activation_ranges:
                 activation_ranges[name] = {
                     "in_min": float('inf'), "in_max": float('-inf'), 
@@ -195,14 +215,14 @@ def _register_hooks(model: nn.Module):
                 activation_ranges[name]["out_max"] = max(activation_ranges[name]["out_max"], out_max)
         return hook
 
-    # 1. Hook Features (Grab input at Conv, grab output at following ReLU)
+    # 1. Hook Features (Grab input at Conv, grab output at following Activation)
     last_conv_name = None
     for idx, module in enumerate(model.features):
         if isinstance(module, nn.Conv2d):
             last_conv_name = f"features_{idx}"
             handles.append(module.register_forward_hook(hook_in(last_conv_name)))
-        elif isinstance(module, nn.ReLU) and last_conv_name:
-            handles.append(module.register_forward_hook(hook_out(last_conv_name)))
+        elif (isinstance(module, nn.ReLU) or isinstance(module, nn.GELU) or isinstance(module, nn.LeakyReLU)) and last_conv_name:
+            handles.append(module.register_forward_hook(hook_out(_activation_label(last_conv_name, activation))))
             last_conv_name = None
 
     # 2. Hook Adaptive Avg Pool
@@ -222,19 +242,19 @@ def _register_hooks(model: nn.Module):
         return hook
     handles.append(model.avgpool.register_forward_hook(pool_hook("avgpool")))
 
-    # 3. Hook Classifier (Grab input at Linear, grab output at following ReLU/Dropout)
+    # 3. Hook Classifier (Grab input at Linear, grab output at following Activation/Dropout)
     last_fc_name = None
     for idx, module in enumerate(model.classifier):
         if isinstance(module, nn.Linear):
             last_fc_name = f"classifier_{idx}"
             handles.append(module.register_forward_hook(hook_in(last_fc_name)))
             
-            # The final Linear layer has no ReLU after it, so we hook its own output
+            # The final Linear layer has no Activation after it, so we hook its own output
             if idx == len(model.classifier) - 1:
                 handles.append(module.register_forward_hook(hook_out(last_fc_name)))
                 
-        elif isinstance(module, nn.ReLU) and last_fc_name:
-            handles.append(module.register_forward_hook(hook_out(last_fc_name)))
+        elif (isinstance(module, nn.ReLU) or isinstance(module, nn.GELU) or isinstance(module, nn.LeakyReLU)) and last_fc_name:
+            handles.append(module.register_forward_hook(hook_out(_activation_label(last_fc_name, activation))))
             last_fc_name = None
 
     return handles
@@ -250,28 +270,33 @@ def _load_model(cfg):
 	return model
 
 
-def _output_file_name(dataset_name: str) -> str:
-	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+def _output_file_name(dataset_name: str, activation: str) -> str:
+	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
 
 
-def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None):
-	cfg = _dataset_config(dataset_name)
+def main(dataset_name: str, activation: str = "relu", batch_size: int = 1, out_dir: Optional[str] = None):
+	cfg = _dataset_config(dataset_name, activation)
 	display = cfg["display"]
 
-	print(f"[calib] Dataset: {display} - preparing calibration loader (batch_size={batch_size})")
+	print(f"[calib] Dataset: {display} | Activation: {activation} - preparing calibration loader (batch_size={batch_size})")
 	train_mod.datasetDownloader(cfg["download_name"])
-	loader = _resolve_test_loader(cfg, batch_size=batch_size)
+	loader = _resolve_train_loader(cfg, batch_size=batch_size)
 
 	model = _load_model(cfg)
 	aggregated: Dict[str, Dict[str, float]] = {}
 
 	total = len(loader.dataset)
-	print(f"[calib] Running forward passes over {total} test samples...")
+	# Cap at 1000 samples for calibration
+	max_samples = 1000
+	total_samples = min(total, max_samples)
+	print(f"[calib] Running forward passes over {total_samples} train samples...")
 
 	with torch.no_grad():
 		for idx, (images, _labels) in enumerate(loader, 1):
+			if idx > total_samples:
+				break
 			activation_ranges.clear()
-			handles = _register_hooks(model)
+			handles = _register_hooks(model, activation)
 			_ = model(images)
 			for handle in handles:
 				handle.remove()
@@ -314,7 +339,7 @@ def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None):
 
 	out_dir = out_dir or os.path.join(THIS_DIR, "calibration")
 	os.makedirs(out_dir, exist_ok=True)
-	out_path = os.path.join(out_dir, _output_file_name(display))
+	out_path = os.path.join(out_dir, _output_file_name(display, activation))
 	with open(out_path, "w") as f:
 		json.dump({"dataset": display, "layers": calib}, f, indent=2)
 
@@ -397,6 +422,19 @@ if __name__ == "__main__":
 		help="Calibrate the OrganAMNIST model",
 	)
 	parser.add_argument(
+		"--PneumoniaMNIST",
+		dest="pneumoniamnist",
+		action="store_true",
+		help="Calibrate the PneumoniaMNIST model",
+	)
+	parser.add_argument(
+		"--activation",
+		type=str,
+		default="relu",
+		choices=["relu", "gelu", "leaky_relu"],
+		help="Activation function to use",
+	)
+	parser.add_argument(
 		"--batch-size",
 		type=int,
 		default=1,
@@ -412,5 +450,5 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 
 	for dataset_name in _selected_datasets_from_args(args):
-		print(f"\n[calib] === Calibrating dataset: {dataset_name} ===")
-		main(dataset_name, batch_size=args.batch_size, out_dir=args.out_dir)
+		print(f"\n[calib] === Calibrating dataset: {dataset_name} | Activation: {args.activation} ===")
+		main(dataset_name, activation=args.activation, batch_size=args.batch_size, out_dir=args.out_dir)

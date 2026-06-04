@@ -58,6 +58,12 @@ calibration_mod = _load_module(
 export_mod = _load_module(
     "vgg_int8_export", os.path.join(INT8_DIR, "export_int8_model.py"), INT8_DIR
 )
+int32_utils = _load_module(
+    "vgg_int32_utils", os.path.join(INT32_DIR, "utils.py"), INT32_DIR
+)
+int32_inference = _load_module(
+    "vgg_int32_inference", os.path.join(INT32_DIR, "inference.py"), INT32_DIR
+)
 
 
 CONV_INDICES = [0, 3, 7, 10, 14, 17, 20, 23, 27, 30, 33, 36, 40, 43, 46, 49]
@@ -133,6 +139,8 @@ def _normalize_dataset_name(dataset_name: str) -> str:
         return "BloodMNIST"
     if key == "ORGANAMNIST":
         return "OrganAMNIST"
+    if key == "PNEUMONIAMNIST":
+        return "PneumoniaMNIST"
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
@@ -144,13 +152,13 @@ def _normalize_classification_labels(labels: torch.Tensor) -> torch.Tensor:
     return labels.long()
 
 
-def _calibration_file_name(dataset_display: str):
-    return f"{dataset_display.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+def _calibration_file_name(dataset_display: str, activation: str):
+    return f"{dataset_display.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
 
 
-def _calibration_file_path(dataset_display: str):
+def _calibration_file_path(dataset_display: str, activation: str):
     return os.path.join(
-        THIS_DIR, "calibration", _calibration_file_name(dataset_display)
+        THIS_DIR, "calibration", _calibration_file_name(dataset_display, activation)
     )
 
 
@@ -169,14 +177,21 @@ def _data_dir_for_dataset(dataset_display: str) -> str:
         return train_mod.DATA_BLOODMNIST_DIR
     if dataset_display == "OrganAMNIST":
         return train_mod.DATA_ORGANAMNIST_DIR
+    if dataset_display == "PneumoniaMNIST":
+        return train_mod.DATA_PNEUMONIAMNIST_DIR
     raise ValueError(f"Unsupported dataset: {dataset_display}")
 
 
-def _prepare_artifacts(cfg, batch_size: int):
+def _prepare_artifacts(cfg, batch_size: int, activation: str, mode: str):
     dataset_display = cfg["display"]
-    model_path = cfg["model_path"]
-    int8_path = model_path.replace(".pth", "_int8.pth")
-    calib_path = _calibration_file_path(dataset_display)
+    slug = dataset_display.lower().replace(" ", "_").replace("-", "_")
+    if dataset_display == "NIH-CHEST":
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
+    else:
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
+        
+    quant_path = model_path.replace(".pth", f"_{mode}.pth")
+    calib_path = _calibration_file_path(dataset_display, activation)
 
     if not os.path.exists(model_path):
         print(f"[error] Missing checkpoint for {dataset_display}; training it first.")
@@ -195,16 +210,11 @@ def _prepare_artifacts(cfg, batch_size: int):
 
     if not os.path.exists(calib_path):
         print(f"[error] Missing calibration for {dataset_display}; generating it now.")
-        calibration_mod.main(dataset_display, batch_size=1)
+        calibration_mod.main(dataset_display, activation=activation, batch_size=1)
 
-    if not os.path.exists(int8_path):
-        print(
-            f"[error] Missing INT8 checkpoint for {dataset_display}; exporting it now."
-        )
-        export_mod.main(dataset_display)
-
-    if not os.path.exists(int8_path):
-        raise FileNotFoundError(f"Missing INT8 checkpoint after export: {int8_path}")
+    if not os.path.exists(quant_path):
+        print(f"[error] Missing {mode} checkpoint for {dataset_display}; please export it.")
+        raise FileNotFoundError(f"Missing {mode} checkpoint: {quant_path}")
 
 
 def _resolve_test_loader(setup_fn, batch_size: int, dataset_name: str):
@@ -232,9 +242,10 @@ def _resolve_test_loader(setup_fn, batch_size: int, dataset_name: str):
     raise RuntimeError("Could not resolve test loader")
 
 
-def _load_model(cfg):
+def _load_model(cfg, model_path: str, activation: str):
     model = cfg["model"]
-    state = torch.load(cfg["model_path"], map_location="cpu")
+    model.activation = activation
+    state = torch.load(model_path, map_location="cpu")
     if len(state) > 0 and list(state.keys())[0].startswith("module."):
         state = {key[7:]: value for key, value in state.items()}
     model.load_state_dict(state)
@@ -267,7 +278,7 @@ def _run_fp32_trace(model, images):
             last_fc_idx = idx
             if idx == len(model.classifier) - 1:
                 traces[f"classifier_{idx}"] = x.detach().clone()
-        elif isinstance(module, torch.nn.ReLU) and last_fc_idx is not None:
+        elif (isinstance(module, torch.nn.ReLU) or isinstance(module, torch.nn.GELU) or isinstance(module, torch.nn.LeakyReLU)) and last_fc_idx is not None:
             traces[f"classifier_{last_fc_idx}"] = x.detach().clone()
 
     return traces
@@ -316,30 +327,92 @@ def _run_int8_trace(model, images, int8_state):
             layer_type="linear",
             apply_relu=(fc_idx != FC_INDICES[-1]),
             apply_maxpool=False,
+            activation="relu",
         )
         traces[layer_key] = s_out * (q_fc_in.to(torch.float32) - z_out)
 
     return traces
 
 
-def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64):
+def _run_int32_trace(model, images, int32_state, activation):
+    traces = {}
+
+    scale_in = int32_state["meta"]["in_scale"]
+    zp_in = int32_state["meta"]["in_zp"]
+    q_x = int32_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint32)
+
+    s_out, z_out = scale_in, zp_in
+    for conv_idx in CONV_INDICES:
+        layer_name = f"features_{conv_idx}"
+        layer_data = int32_state[layer_name]
+        if activation == "gelu":
+            layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+        
+        q_x, s_out, z_out = int32_inference.run_integer_layer(
+            q_x,
+            layer_data,
+            z_out,
+            layer_type="conv",
+            apply_relu=True,
+            apply_maxpool=False,
+            activation=activation,
+        )
+        traces[f"features_{conv_idx}"] = s_out * (q_x.to(torch.float64) - z_out)
+
+        if conv_idx in POOL_AFTER_CONV:
+            q_x = int32_utils.integer_max_pool2d(q_x, kernel_size=2, stride=2)
+            traces[f"features_{conv_idx}_pool"] = s_out * (
+                q_x.to(torch.float64) - z_out
+            )
+
+    q_pooled = torch.nn.functional.adaptive_max_pool2d(q_x.to(torch.float32), (7, 7)).to(torch.int32)
+    q_fc_in = torch.flatten(q_pooled, 1)
+
+    fc_in_scale = int32_state["classifier_0"]["scale_in"]
+    fc_in_zp = int32_state["classifier_0"]["zp_in"]
+    traces["avgpool"] = fc_in_scale * (q_pooled.to(torch.float64) - fc_in_zp)
+
+    s_out, z_out = fc_in_scale, fc_in_zp
+    for fc_idx in FC_INDICES:
+        layer_name = f"classifier_{fc_idx}"
+        is_last = (fc_idx == FC_INDICES[-1])
+        layer_data = int32_state[layer_name]
+        
+        if not is_last and activation == "gelu":
+            layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+            
+        q_fc_in, s_out, z_out = int32_inference.run_integer_layer(
+            q_fc_in,
+            layer_data,
+            z_out,
+            layer_type="linear",
+            apply_relu=not is_last,
+            apply_maxpool=False,
+            activation=activation,
+        )
+        traces[layer_name] = s_out * (q_fc_in.to(torch.float64) - z_out)
+
+    return traces
+
+
+def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64, activation: str = "relu", mode: str = "int8"):
     dataset_display = _normalize_dataset_name(dataset_name)
     cfg = int8_inference._resolve_infer_config(dataset_display)
-    _prepare_artifacts(cfg, batch_size=batch_size)
-    model = _load_model(cfg)
+    slug = dataset_display.lower().replace(" ", "_").replace("-", "_")
+    if dataset_display == "NIH-CHEST":
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
+    else:
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
 
-    state = torch.load(cfg["model_path"], map_location="cpu")
-    if len(state) > 0 and list(state.keys())[0].startswith("module."):
-        state = {key[7:]: value for key, value in state.items()}
-    model.load_state_dict(state)
-    model.eval()
+    _prepare_artifacts(cfg, batch_size=batch_size, activation=activation, mode=mode)
+    model = _load_model(cfg, model_path, activation)
 
-    int8_path = cfg["model_path"].replace(".pth", "_int8.pth")
-    if not os.path.exists(int8_path):
+    quant_path = model_path.replace(".pth", f"_{mode}.pth")
+    if not os.path.exists(quant_path):
         raise FileNotFoundError(
-            f"Missing compiled model: {int8_path}. Run VGGNet/INT8/export_int8_model.py first."
+            f"Missing compiled model: {quant_path}. Run export script first."
         )
-    int8_state = torch.load(int8_path, map_location="cpu")
+    quant_state = torch.load(quant_path, map_location="cpu")
 
     train_mod.datasetDownloader(dataset_display)
     loader = _resolve_test_loader(
@@ -361,14 +434,19 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
                 images = images[:remaining]
 
             fp32_traces = _run_fp32_trace(model, images)
-            int8_traces = _run_int8_trace(model, images, int8_state)
+            if mode == "int8":
+                quant_traces = _run_int8_trace(model, images, quant_state)
+            elif mode == "int32":
+                quant_traces = _run_int32_trace(model, images, quant_state, activation)
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
 
             for name in fp32_traces.keys():
-                if name not in int8_traces:
+                if name not in quant_traces:
                     continue
                 if name not in layer_trackers:
                     layer_trackers[name] = LayerMetrics()
-                layer_trackers[name].update(fp32_traces[name], int8_traces[name])
+                layer_trackers[name].update(fp32_traces[name], quant_traces[name])
 
             processed_images += images.size(0)
             print(f"[error] Processed {processed_images}/{target_images} images...")
@@ -376,7 +454,7 @@ def evaluate_error(dataset_name: str, num_data: int = None, batch_size: int = 64
     return {name: tracker.finalize() for name, tracker in layer_trackers.items()}
 
 
-def plot_error_metrics(metrics_dict, dataset_name):
+def plot_error_metrics(metrics_dict, dataset_name, activation, mode):
     layers = list(metrics_dict.keys())
     valid_layers = [layer for layer in layers if metrics_dict[layer]]
     if not valid_layers:
@@ -437,7 +515,9 @@ def plot_error_metrics(metrics_dict, dataset_name):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     safe_name = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    filename = os.path.join(THIS_DIR, f"quantization_divergence_{safe_name}.png")
+    results_dir = os.path.join(THIS_DIR, "error-results", safe_name)
+    os.makedirs(results_dir, exist_ok=True)
+    filename = os.path.join(results_dir, f"quantization_divergence_{safe_name}_{activation}_{mode}.png")
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     print(f"[+] Saved error divergence graphs to {filename}")
 
@@ -478,6 +558,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch-size", type=int, default=64, help="Batch size for evaluation"
     )
+    parser.add_argument(
+        "--activation", type=str, default="relu", choices=["relu", "gelu", "leaky_relu"],
+    )
+    parser.add_argument(
+        "--mode", type=str, default="int8", choices=["int8", "int32", "fxp32"],
+    )
     args = parser.parse_args()
 
     selected = []
@@ -504,18 +590,21 @@ if __name__ == "__main__":
             "OCTMNIST",
             "BloodMNIST",
             "OrganAMNIST",
+            "PneumoniaMNIST",
         ]
 
     for dataset_name in selected:
-        print(f"\n[error] === Evaluating dataset: {dataset_name} ===")
+        print(f"\n[error] === Evaluating dataset: {dataset_name} | Activation: {args.activation} | Mode: {args.mode} ===")
         metrics = evaluate_error(
-            dataset_name, args.num_data, batch_size=args.batch_size
+            dataset_name, args.num_data, batch_size=args.batch_size, activation=args.activation, mode=args.mode
         )
 
         safe_name = dataset_name.lower().replace(" ", "_").replace("-", "_")
-        file_name = os.path.join(THIS_DIR, f"error_accumulation_{safe_name}.json")
+        results_dir = os.path.join(THIS_DIR, "error-results", safe_name)
+        os.makedirs(results_dir, exist_ok=True)
+        file_name = os.path.join(results_dir, f"error_accumulation_{safe_name}_{args.activation}_{args.mode}.json")
         with open(file_name, "w") as f:
-            json.dump({"dataset": dataset_name, "layer_metrics": metrics}, f, indent=2)
+            json.dump({"dataset": dataset_name, "activation": args.activation, "mode": args.mode, "layer_metrics": metrics}, f, indent=2)
 
         print(f"\n[+] Saved error accumulation log to {file_name}")
-        plot_error_metrics(metrics, dataset_name)
+        plot_error_metrics(metrics, dataset_name, args.activation, args.mode)

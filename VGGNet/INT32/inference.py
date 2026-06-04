@@ -16,10 +16,11 @@ sys.path.pop(0)
 
 from utils import (
     quantize_tensor, integer_conv2d, integer_linear, add_bias,
-    downscale_and_cast, quantized_relu, integer_max_pool2d, integer_adaptive_avg_pool
+    downscale_and_cast, quantized_relu, integer_max_pool2d, integer_gelu_lut
 )
+import torch.nn.functional as F
 
-def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=True, apply_maxpool=False):
+def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=True, apply_maxpool=False, activation="relu"):
     q_w = layer_data["q_weight"].to(q_input.device)
     zp_w = layer_data["zp_w"]
     q_bias = layer_data["q_bias"].to(q_input.device)
@@ -36,7 +37,12 @@ def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
     
     if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
+        if activation == "gelu":
+            q_out = integer_gelu_lut(q_out, layer_data["gelu_lut"], zp_out)
+        elif activation == "leaky_relu":
+            q_out = q_out
+        else:
+            q_out = quantized_relu(q_out, zp_out)
         
     if apply_maxpool:
         q_out = integer_max_pool2d(q_out, kernel_size=2, stride=2)
@@ -44,13 +50,13 @@ def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=
     return q_out, layer_data["scale_out"], zp_out
 
 
-def main(infer_data: str):
-    print("--- Starting VGG19 INT32 (Overflow Prone) Pipeline ---")
-    device = torch.device("cpu") 
+def main(infer_data: str, activation: str):
+    print(f"--- Starting VGG19 INT32 (Overflow Prone) Pipeline | Activation: {activation} ---")
+    device = torch.device("cpu")
     
     cfg = _resolve_infer_config(infer_data)
     dataset_key = cfg["display"]
-    int32_path = cfg["model_path"].replace(".pth", "_int32.pth")
+    int32_path = os.path.join(VGG_DIR, f"best_vgg19_{activation}_{dataset_key.lower().replace(' ', '_').replace('-', '_')}_int32.pth")
 
     if not os.path.exists(int32_path):
         print(f"\n[!] Missing offline dictionary: {int32_path}")
@@ -78,16 +84,23 @@ def main(infer_data: str):
         layer_name = f"features_{conv_idx}"
         apply_pool = (conv_idx + 3) in maxpool_indices 
         
+        # Inject LUT into layer_data if GELU
+        layer_data = int32_state[layer_name]
+        if apply_relu and activation == "gelu":
+            layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+        
         q_x, s_out, z_out = run_integer_layer(
-            q_x, int32_state[layer_name], z_out, 
-            layer_type="conv", apply_relu=True, apply_maxpool=apply_pool
+            q_x, layer_data, z_out, 
+            layer_type="conv", apply_relu=True, apply_maxpool=apply_pool, activation=activation
         )
 
-    # 3. Adaptive Avg Pool Bridging
+    # 3. Adaptive Max Pool Bridging
+    q_pooled = F.adaptive_max_pool2d(q_x.to(torch.float32), (7, 7)).to(torch.int32)
+    q_fc_in = torch.flatten(q_pooled, 1)
+
+    # Note: Since there's no arithmetic inside max pool, the output scale/zp remain identical to the input
     fc_in_scale = int32_state["classifier_0"]["scale_in"]
     fc_in_zp = int32_state["classifier_0"]["zp_in"]
-    q_pooled = integer_adaptive_avg_pool(q_x, z_out, s_out, fc_in_zp, fc_in_scale, output_size=(7,7))
-    q_fc_in = torch.flatten(q_pooled, 1)
 
     # 4. Traverse VGG Classifier 
     s_out, z_out = fc_in_scale, fc_in_zp
@@ -97,9 +110,13 @@ def main(infer_data: str):
         layer_name = f"classifier_{fc_idx}"
         is_last = (i == len(fc_indices) - 1)
         
+        layer_data = int32_state[layer_name]
+        if apply_relu and activation == "gelu":
+            layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+            
         q_fc_in, s_out, z_out = run_integer_layer(
-            q_fc_in, int32_state[layer_name], z_out, 
-            layer_type="linear", apply_relu=not is_last, apply_maxpool=False
+            q_fc_in, layer_data, z_out, 
+            layer_type="linear", apply_relu=not is_last, apply_maxpool=False, activation=activation
         )
 
     # 5. Dequantize Logits
@@ -114,5 +131,6 @@ def main(infer_data: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--infer", type=str, default="MNIST")
+    parser.add_argument("--activation", type=str, default="relu", choices=["relu", "gelu", "leaky_relu"])
     args = parser.parse_args()
-    main(args.infer)
+    main(args.infer, args.activation)

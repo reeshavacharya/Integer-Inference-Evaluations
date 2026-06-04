@@ -12,7 +12,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset, ConcatDataset, Dataset
 from torchvision import datasets, transforms
 from PIL import Image
-from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST
+from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
@@ -23,6 +23,7 @@ DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
 DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
 DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
 DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
+DATA_PNEUMONIAMNIST_DIR = os.path.join(DATA_ROOT, "PneumoniaMNIST")
 
 # -----------------------------
 # Device
@@ -35,16 +36,25 @@ print(f"Using device: {device}")
 # VGG-19 Architecture
 # -----------------------------
 class VGG19(nn.Module):
-    def __init__(self, num_classes=10, in_channels=3):
+    def __init__(self, num_classes=10, in_channels=3, activation="relu"):
         super(VGG19, self).__init__()
+        self.activation = activation
         self.features = self._make_layers(in_channels)
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.avgpool = nn.AdaptiveMaxPool2d((7, 7))
+        
+        if self.activation == "gelu":
+            act_layer = nn.GELU
+        elif self.activation == "leaky_relu":
+            act_layer = lambda: nn.LeakyReLU(negative_slope=1.0, inplace=True)
+        else:
+            act_layer = lambda: nn.ReLU(inplace=True)
+
         self.classifier = nn.Sequential(
             nn.Linear(512 * 7 * 7, 4096),
-            nn.ReLU(True),
+            act_layer(),
             nn.Dropout(),
             nn.Linear(4096, 4096),
-            nn.ReLU(True),
+            act_layer(),
             nn.Dropout(),
             nn.Linear(4096, num_classes),
         )
@@ -60,8 +70,15 @@ class VGG19(nn.Module):
             if v == 'M':
                 layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
             else:
+                if self.activation == "gelu":
+                    act_layer = nn.GELU()
+                elif self.activation == "leaky_relu":
+                    act_layer = nn.LeakyReLU(negative_slope=1.0, inplace=True)
+                else:
+                    act_layer = nn.ReLU(inplace=True)
+                    
                 conv2d = nn.Conv2d(in_c, v, kernel_size=3, padding=1, bias=False)
-                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                layers += [conv2d, nn.BatchNorm2d(v), act_layer]
                 in_c = v
         return nn.Sequential(*layers)
 
@@ -95,12 +112,15 @@ PREPROCESS_SPECS = {
     "OCTMNIST": {"channels": 1, "height": 32, "width": 32},
     "BLOODMNIST": {"channels": 3, "height": 32, "width": 32},
     "ORGANAMNIST": {"channels": 1, "height": 32, "width": 32},
+    "PNEUMONIAMNIST": {"channels": 1, "height": 32, "width": 32},
 }
 
 def _normalize_dataset_key(dataset_name: str) -> str:
     key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
     if key == "CIFR10":
         return "CIFAR10"
+    if key == "PNEUMONIAMNIST":
+        return "PneumoniaMNIST"
     return key
 
 
@@ -288,6 +308,28 @@ def setup_OrganAMNIST(batch_size: int = 64):
 
     validate_loader_preprocessing(train_loader, "OrganAMNIST", stage="training")
     validate_loader_preprocessing(test_loader, "OrganAMNIST", stage="training")
+
+def setup_PneumoniaMNIST(batch_size: int = 64):
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose([
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+
+    train_dataset = PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="train", download=True, transform=transform)
+    val_dataset = PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="val", download=True, transform=transform)
+    test_dataset = PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="test", download=True, transform=transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    validate_loader_preprocessing(train_loader, "PneumoniaMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "PneumoniaMNIST", stage="training")
 
 
 def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
@@ -544,9 +586,9 @@ def main(args: argparse.Namespace):
     num_epochs = 10
 
     if args.data_dir == DATA_MNIST_DIR:
-        best_model_path = "best_vgg19_mnist.pth"
+        best_model_path = f"best_vgg19_{args.activation}_mnist.pth"
         setup_MNIST(args.batch_size)
-        model = VGG19(num_classes=10, in_channels=args.in_channels).to(device)
+        model = VGG19(num_classes=10, in_channels=args.in_channels, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -554,10 +596,10 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_CIFAR10_DIR:
-        best_model_path = "best_vgg19_cifar10.pth"
+        best_model_path = f"best_vgg19_{args.activation}_cifar10.pth"
         num_epochs = 50
         setup_CIFAR10(args.batch_size)
-        model = VGG19(num_classes=10, in_channels=3).to(device)
+        model = VGG19(num_classes=10, in_channels=3, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -565,10 +607,10 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_BRAIN_MRI_DIR:
-        best_model_path = "best_vgg19_brain_mri.pth"
+        best_model_path = f"best_vgg19_{args.activation}_brain_mri.pth"
         num_epochs = 30
         train_dataset = setup_Brain_MRI(args.batch_size)
-        model = VGG19(num_classes=4, in_channels=args.in_channels).to(device)
+        model = VGG19(num_classes=4, in_channels=args.in_channels, activation=args.activation).to(device)
         class_weights = _compute_class_weights_from_subset(train_dataset, num_classes=4)
         print(f"Using class weights: {class_weights.detach().cpu().tolist()}")
         criterion = nn.CrossEntropyLoss(weight=class_weights)
@@ -578,10 +620,10 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_OCTMNIST_DIR:
-        best_model_path = "best_vgg19_octmnist.pth"
+        best_model_path = f"best_vgg19_{args.activation}_octmnist.pth"
         num_epochs = 20
         setup_OCTMNIST(args.batch_size)
-        model = VGG19(num_classes=4, in_channels=1).to(device)
+        model = VGG19(num_classes=4, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -589,10 +631,10 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_BLOODMNIST_DIR:
-        best_model_path = "best_vgg19_bloodmnist.pth"
+        best_model_path = f"best_vgg19_{args.activation}_bloodmnist.pth"
         num_epochs = 20
         setup_BloodMNIST(args.batch_size)
-        model = VGG19(num_classes=8, in_channels=3).to(device)
+        model = VGG19(num_classes=8, in_channels=3, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -600,10 +642,21 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_ORGANAMNIST_DIR:
-        best_model_path = "best_vgg19_organamnist.pth"
+        best_model_path = f"best_vgg19_{args.activation}_organamnist.pth"
         num_epochs = 20
         setup_OrganAMNIST(args.batch_size)
-        model = VGG19(num_classes=11, in_channels=1).to(device)
+        model = VGG19(num_classes=11, in_channels=1, activation=args.activation).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_PNEUMONIAMNIST_DIR:
+        best_model_path = f"best_vgg19_{args.activation}_pneumoniamnist.pth"
+        num_epochs = 20
+        setup_PneumoniaMNIST(args.batch_size)
+        model = VGG19(num_classes=2, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -623,9 +676,9 @@ def main(args: argparse.Namespace):
 
     else:
         print(f"Training using default data directory: {DATA_MNIST_DIR}")
-        best_model_path = "best_vgg19_mnist.pth"
+        best_model_path = f"best_vgg19_{args.activation}_mnist.pth"
         setup_MNIST(args.batch_size)
-        model = VGG19(num_classes=10, in_channels=args.in_channels).to(device)
+        model = VGG19(num_classes=10, in_channels=args.in_channels, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -772,6 +825,12 @@ def datasetDownloader(dataset_name: str):
         OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="val", download=True)
         OrganAMNIST(root=DATA_ORGANAMNIST_DIR, split="test", download=True)
 
+    if dataset_name == "PneumoniaMNIST":
+        os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+        print("Downloading PneumoniaMNIST dataset...")
+        PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="train", download=True)
+        PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="val", download=True)
+        PneumoniaMNIST(root=DATA_PNEUMONIAMNIST_DIR, split="test", download=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -791,7 +850,14 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
+        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu", "leaky_relu"],
+        help="Activation function to use",
     )
     parser.add_argument(
         "--in_channels",

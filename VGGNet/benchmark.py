@@ -93,6 +93,7 @@ BENCHMARK_DATASETS = [
     "OCTMNIST",
     "BloodMNIST",
     "OrganAMNIST",
+    "PneumoniaMNIST",
 ]
 
 
@@ -145,6 +146,8 @@ def _normalize_bench_name(name: str) -> str:
         return "BloodMNIST"
     if name_upper == "ORGANAMNIST":
         return "OrganAMNIST"
+    if name_upper == "PNEUMONIAMNIST":
+        return "PneumoniaMNIST"
     raise ValueError(f"Unknown benchmark dataset: {name}")
 
 
@@ -160,9 +163,14 @@ def _format_metric_value(dataset_name: str, value) -> str:
     return f"{value:.2f}%"
 
 
-def _ensure_checkpoint(dataset_name: str) -> None:
+def _ensure_checkpoint(dataset_name: str, activation: str) -> None:
     cfg = int8_inference._resolve_infer_config(dataset_name)
-    model_path = os.path.abspath(cfg["model_path"])
+    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
+    
+    if dataset_name == "NIH-CHEST":
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
+    else:
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
 
     if os.path.exists(model_path):
         return
@@ -201,10 +209,18 @@ def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> Dat
     raise RuntimeError(f"Could not resolve test loader for dataset: {dataset_name}")
 
 
-def _build_model(dataset_name: str) -> torch.nn.Module:
+def _build_model(dataset_name: str, activation: str) -> torch.nn.Module:
     cfg = int8_inference._resolve_infer_config(dataset_name)
     model = cfg["model"]
-    state = torch.load(cfg["model_path"], map_location="cpu")
+    model.activation = activation
+    
+    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
+    if dataset_name == "NIH-CHEST":
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
+    else:
+        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
+
+    state = torch.load(model_path, map_location="cpu")
     if list(state.keys())[0].startswith("module."):
         state = {k[7:]: v for k, v in state.items()}
     model.load_state_dict(state)
@@ -238,9 +254,13 @@ def _format_metric_value(dataset_name: str, value) -> str:
     return f"{value:.2f}%"
 
 
-def _load_int8_state(dataset_name: str):
+def _load_int8_state(dataset_name: str, activation: str):
     cfg = int8_inference._resolve_infer_config(dataset_name)
-    int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
+    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
+    if dataset_name == "NIH-CHEST":
+        int8_model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay_int8.pth"))
+    else:
+        int8_model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}_int8.pth"))
 
     if not os.path.exists(int8_model_path):
         raise FileNotFoundError(
@@ -318,6 +338,7 @@ def _int8_accuracy(
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
+    activation: str,
 ):
     is_multi = _is_multilabel(dataset_name)
     is_medmnist = _is_medmnist(dataset_name)
@@ -328,7 +349,7 @@ def _int8_accuracy(
         f"[bench][{dataset_name}][int8] Starting benchmark over {target_images}/{total_images} images."
     )
 
-    int8_state = _load_int8_state(dataset_name)
+    int8_state = _load_int8_state(dataset_name, activation)
     all_targets, all_outputs = [], []
     correct, total, processed_images = 0.0, 0, 0
 
@@ -359,6 +380,7 @@ def _int8_accuracy(
                 layer_type="conv",
                 apply_relu=True,
                 apply_maxpool=apply_pool,
+                activation=activation,
             )
 
         fc_in_scale = int8_state["classifier_0"]["scale_in"]
@@ -379,6 +401,7 @@ def _int8_accuracy(
                 layer_type="linear",
                 apply_relu=not is_last,
                 apply_maxpool=False,
+                activation=activation,
             )
 
         int_logits = q_fc_in.to(torch.float32)
@@ -423,6 +446,7 @@ def _int32_accuracy(
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
+    activation: str,
 ):
     is_multi = _is_multilabel(dataset_name)
     is_medmnist = _is_medmnist(dataset_name)
@@ -433,8 +457,8 @@ def _int32_accuracy(
         f"[bench][{dataset_name}][int32] Starting benchmark over {target_images}/{total_images} images."
     )
 
-    cfg = int32_inference._resolve_infer_config(dataset_name)
-    int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
+    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
+    int32_model_path = os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}_int32.pth")
 
     if not os.path.exists(int32_model_path):
         raise FileNotFoundError(
@@ -465,33 +489,42 @@ def _int32_accuracy(
         for conv_idx in conv_indices:
             layer_name = f"features_{conv_idx}"
             apply_pool = (conv_idx + 3) in maxpool_indices
+            layer_data = int32_state[layer_name]
+            if activation == "gelu":
+                layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+                
             q_x, s_out, z_out = int32_inference.run_integer_layer(
                 q_x,
-                int32_state[layer_name],
+                layer_data,
                 z_out,
                 layer_type="conv",
                 apply_relu=True,
                 apply_maxpool=apply_pool,
+                activation=activation,
             )
+
+        q_pooled = torch.nn.functional.adaptive_max_pool2d(q_x.to(torch.float32), (7, 7)).to(torch.int32)
+        q_fc_in = torch.flatten(q_pooled, 1)
 
         fc_in_scale = int32_state["classifier_0"]["scale_in"]
         fc_in_zp = int32_state["classifier_0"]["zp_in"]
-        q_pooled = int32_utils.integer_adaptive_avg_pool(
-            q_x, z_out, s_out, fc_in_zp, fc_in_scale, output_size=(7, 7)
-        )
-        q_fc_in = torch.flatten(q_pooled, 1)
 
         s_out, z_out = fc_in_scale, fc_in_zp
         for i, fc_idx in enumerate([0, 3, 6]):
             layer_name = f"classifier_{fc_idx}"
             is_last = i == 2
+            layer_data = int32_state[layer_name]
+            if not is_last and activation == "gelu":
+                layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
+                
             q_fc_in, s_out, z_out = int32_inference.run_integer_layer(
                 q_fc_in,
-                int32_state[layer_name],
+                layer_data,
                 z_out,
                 layer_type="linear",
                 apply_relu=not is_last,
                 apply_maxpool=False,
+                activation=activation,
             )
 
         int_logits = q_fc_in.to(torch.float64)
@@ -666,7 +699,7 @@ def _fxp32_accuracy(
 
 
 def benchmark(
-    dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None
+    dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None, activation: str = "relu"
 ):
     _disable_heavy_debug_logs()
 
@@ -677,11 +710,11 @@ def benchmark(
 
     results = {}
     for name in targets:
-        print(f"\n[bench] Dataset: {name}")
-        _ensure_checkpoint(name)
+        print(f"\n[bench] Dataset: {name} | Activation: {activation}")
+        _ensure_checkpoint(name, activation)
 
         loader = _get_test_loader(name)
-        model = _build_model(name)
+        model = _build_model(name, activation)
 
         per_dataset = {}
         if "fp32" in selected_modes:
@@ -689,9 +722,9 @@ def benchmark(
                 model, loader, name, num_data
             )
         if "int8" in selected_modes:
-            per_dataset["int8"] = _int8_accuracy(model, loader, name, num_data)
+            per_dataset["int8"] = _int8_accuracy(model, loader, name, num_data, activation)
         if "int32" in selected_modes:
-            per_dataset["int32"] = _int32_accuracy(model, loader, name, num_data)
+            per_dataset["int32"] = _int32_accuracy(model, loader, name, num_data, activation)
         if "fxp32" in selected_modes:
             per_dataset["fxp32"] = _fxp32_accuracy(model, loader, name, num_data)
         if "fxp64" in selected_modes:
@@ -714,12 +747,16 @@ def _mode_suffix(mode: Optional[str]) -> str:
     return mode.replace("-", "_")
 
 
-def _results_filename(single_dataset_name: Optional[str], mode: Optional[str]) -> str:
+def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], activation: str) -> str:
     mode_part = _mode_suffix(mode)
     if single_dataset_name is None:
-        return f"benchmark_results_vgg19_{mode_part}.json"
+        return f"benchmark_results_vgg19_{mode_part}_{activation}.json"
     ds_part = single_dataset_name.lower().replace("-", "_")
-    return f"benchmark_results_vgg19_{ds_part}_{mode_part}.json"
+    
+    # Save into the specific dataset directory
+    results_dir = os.path.join(THIS_DIR, "benchmark-results", ds_part)
+    os.makedirs(results_dir, exist_ok=True)
+    return os.path.join(results_dir, f"benchmark_results_{ds_part}_{mode_part}_{activation}.json")
 
 
 if __name__ == "__main__":
@@ -749,6 +786,13 @@ if __name__ == "__main__":
         default=None,
         help="Benchmark a specific mode. If omitted, benchmarks all 5 modes.",
     )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu", "leaky_relu"],
+        help="Activation function to use",
+    )
     args = parser.parse_args()
 
     if args.nih_chest:
@@ -761,8 +805,8 @@ if __name__ == "__main__":
         single_name = _normalize_bench_name(args.bench)
         targets = [single_name]
 
-    metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode)
-    results_file = _results_filename(single_name, args.mode)
+    metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode, activation=args.activation)
+    results_file = _results_filename(single_name, args.mode, args.activation)
     with open(results_file, "w") as f:
         json.dump(metrics, f, indent=2)
 
