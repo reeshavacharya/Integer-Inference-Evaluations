@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+THIS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INT8_DIR = os.path.join(THIS_DIR, "INT8")
 if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
@@ -515,9 +515,9 @@ def plot_error_metrics(metrics_dict, dataset_name, activation, mode):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     safe_name = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    results_dir = os.path.join(THIS_DIR, "error-results", safe_name)
-    os.makedirs(results_dir, exist_ok=True)
-    filename = os.path.join(results_dir, f"quantization_divergence_{safe_name}_{activation}_{mode}.png")
+    graphs_dir = os.path.join(THIS_DIR, "graphs", safe_name)
+    os.makedirs(graphs_dir, exist_ok=True)
+    filename = os.path.join(graphs_dir, f"quantization_divergence_{safe_name}_{activation}_{mode}.png")
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     print(f"[+] Saved error divergence graphs to {filename}")
 
@@ -600,7 +600,7 @@ if __name__ == "__main__":
         )
 
         safe_name = dataset_name.lower().replace(" ", "_").replace("-", "_")
-        results_dir = os.path.join(THIS_DIR, "error-results", safe_name)
+        results_dir = os.path.join(THIS_DIR, "json", safe_name)
         os.makedirs(results_dir, exist_ok=True)
         file_name = os.path.join(results_dir, f"error_accumulation_{safe_name}_{args.activation}_{args.mode}.json")
         with open(file_name, "w") as f:

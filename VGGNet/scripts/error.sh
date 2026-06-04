@@ -119,7 +119,7 @@ for mode in "${MODES[@]}"; do
         for ds in "${DATASETS[@]}"; do
             echo ""
             echo "[+] Error analysis: $ds ($act, $mode)"
-            python3 error.py \
+            python3 error/error.py \
                 --dataset "$ds" \
                 --activation "$act" \
                 --mode "$mode" \
@@ -128,5 +128,18 @@ for mode in "${MODES[@]}"; do
     done
 done
 
+# 2. Run error_comparison.py for all combinations
 echo ""
-echo "[+] Error analysis complete!"
+echo "[*] Step 2: Running error comparison plots..."
+for mode in "${MODES[@]}"; do
+    for ds in "${DATASETS[@]}"; do
+        echo ""
+        echo "[+] Error comparison: $ds ($mode)"
+        python3 error/error_comparison.py \
+            --dataset "$ds" \
+            --mode "$mode"
+    done
+done
+
+echo ""
+echo "[+] Error analysis and comparison complete!"
