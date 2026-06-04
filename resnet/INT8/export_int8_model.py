@@ -90,7 +90,7 @@ def main(model_path, activation="relu"):
     elif "cifar" in filename or "cifar10" in filename:
         dataset = "CIFAR10"
     elif "brain" in filename or "brain_mri" in filename:
-        dataset = "BRAIN-MRI"
+        dataset = "BRAIN_MRI"
     elif "chest" in filename or "nih" in filename:
         dataset = "NIH-CHEST"
     elif "mnist" in filename:

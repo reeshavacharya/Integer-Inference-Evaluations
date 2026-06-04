@@ -3,12 +3,12 @@
 # Usage: ./export.sh [--mode MODE] [--activation ACTIVATION] [--dataset DATASET]
 # Valid modes: int8, int32 (default: both)
 # Valid activations: relu, gelu, leaky_relu (default: all)
-# Valid datasets: MNIST, CIFAR10, Brain-MRI, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST (default: all)
+# Valid datasets: MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST (default: all)
 
 set -euo pipefail
 
 # Define available options
-ALL_DATASETS=("MNIST" "CIFAR10" "Brain-MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST")
+ALL_DATASETS=("MNIST" "CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 ALL_MODES=("int32")
 

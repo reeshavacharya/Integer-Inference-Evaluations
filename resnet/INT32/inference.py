@@ -172,9 +172,9 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu", batch_size:
             "eval_batch_size": batch_size,
         }
 
-    if name == "BRAIN-MRI":
+    if name == "BRAIN_MRI":
         return {
-            "display": "Brain-MRI",
+            "display": "Brain_MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
             "model": ResNet18Inference(num_classes=4, in_channels=1, activation=activation),
             "model_path": f"best_resnet18_{activation}_brain_mri.pth",
@@ -834,7 +834,7 @@ if __name__ == "__main__":
         type=str,
         default="CIFAR10",
         help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST"
+            "Inference data to use: MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST"
         ),
     )
     parser.add_argument(

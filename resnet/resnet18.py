@@ -18,7 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
 DATA_MNIST_DIR = os.path.join(DATA_ROOT, "MNIST")
 DATA_CIFAR10_DIR = os.path.join(DATA_ROOT, "CIFAR10")
-DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain-MRI")
+DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain_MRI")
 DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
 DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
 DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
@@ -165,7 +165,7 @@ scheduler = None
 PREPROCESS_SPECS = {
     "MNIST": {"channels": 1, "height": 28, "width": 28},
     "CIFAR10": {"channels": 3, "height": 32, "width": 32},
-    "BRAIN-MRI": {"channels": 1, "height": 28, "width": 28},
+    "BRAIN_MRI": {"channels": 1, "height": 28, "width": 28},
     "NIH-CHEST": {"channels": 1, "height": 224, "width": 224},
     "OCTMNIST": {"channels": 1, "height": 28, "width": 28},
     "BLOODMNIST": {"channels": 3, "height": 28, "width": 28},
@@ -596,7 +596,7 @@ def setup_PneumoniaMNIST(batch_size: int):
 def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
     """
     Compute inverse-frequency class weights from a torch.utils.data.Subset
-    created from ImageFolder. This helps Brain-MRI if classes are imbalanced.
+    created from ImageFolder. This helps Brain_MRI if classes are imbalanced.
     """
     dataset = subset.dataset
 
@@ -631,11 +631,11 @@ def _compute_class_weights_from_subset(subset: Subset, num_classes: int):
 
 def setup_Brain_MRI(batch_size: int = 64):
     """
-    Prepare Brain-MRI loaders from the Training/Testing folder structure.
+    Prepare Brain_MRI loaders from the Training/Testing folder structure.
 
     Expected layout:
-        <project_root>/data/Brain-MRI/Training/{glioma, meningioma, notumor, pituitary}/...
-        <project_root>/data/Brain-MRI/Testing/{glioma, meningioma, notumor, pituitary}/...
+        <project_root>/data/Brain_MRI/Training/{glioma, meningioma, notumor, pituitary}/...
+        <project_root>/data/Brain_MRI/Testing/{glioma, meningioma, notumor, pituitary}/...
     """
 
     global train_loader, val_loader, test_loader
@@ -721,8 +721,8 @@ def setup_Brain_MRI(batch_size: int = 64):
         pin_memory=torch.cuda.is_available(),
     )
 
-    validate_loader_preprocessing(train_loader, "Brain-MRI", stage="training")
-    validate_loader_preprocessing(test_loader, "Brain-MRI", stage="training")
+    validate_loader_preprocessing(train_loader, "Brain_MRI", stage="training")
+    validate_loader_preprocessing(test_loader, "Brain_MRI", stage="training")
     return train_loader, val_loader, test_loader
 
 
@@ -1117,7 +1117,7 @@ def main(args: argparse.Namespace):
 
         train_dataset, _, _ = setup_Brain_MRI(args.batch_size)
 
-        # Brain-MRI has 4 classes
+        # Brain_MRI has 4 classes
         model = ResNet18(
             num_classes=4, in_channels=args.in_channels, activation=args.activation
         ).to(device)
@@ -1345,9 +1345,9 @@ def datasetDownloader(dataset_name: str):
             datasets.MNIST(root=DATA_ROOT, train=True, download=True)
             datasets.MNIST(root=DATA_ROOT, train=False, download=True)
 
-    if dataset_name == "Brain-MRI":
+    if dataset_name == "Brain_MRI":
         if not os.path.exists(DATA_BRAIN_MRI_DIR):
-            print("Downloading Brain-MRI dataset from Kaggle...")
+            print("Downloading Brain_MRI dataset from Kaggle...")
             kagglehub.dataset_download(
                 "masoudnickparvar/brain-tumor-mri-dataset",
                 output_dir=DATA_BRAIN_MRI_DIR,
@@ -1416,7 +1416,7 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
+        help="Training data to use: MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
     )
     parser.add_argument(
         "--in_channels",
@@ -1440,10 +1440,10 @@ if __name__ == "__main__":
         args.data_dir = DATA_MNIST_DIR
         args.dataset_name = "MNIST"
         datasetDownloader("MNIST")
-    elif train_data_key == "BRAIN-MRI":
+    elif train_data_key == "BRAIN_MRI":
         args.data_dir = DATA_BRAIN_MRI_DIR
-        args.dataset_name = "Brain-MRI"
-        datasetDownloader("Brain-MRI")
+        args.dataset_name = "Brain_MRI"
+        datasetDownloader("Brain_MRI")
     elif train_data_key in ("CIFR10", "CIFAR10"):
         args.data_dir = DATA_CIFAR10_DIR
         args.dataset_name = "CIFAR10"

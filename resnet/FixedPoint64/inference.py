@@ -167,9 +167,9 @@ def _resolve_infer_config(infer_data: str):
             "eval_batch_size": 64,
         }
 
-    if name == "BRAIN-MRI":
+    if name == "BRAIN_MRI":
         return {
-            "display": "Brain-MRI",
+            "display": "Brain_MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
             "model": ResNet18Inference(num_classes=4, in_channels=1),
             "model_path": "best_resnet18_brain_mri.pth",
@@ -631,7 +631,7 @@ if __name__ == "__main__":
         type=str,
         default="CIFAR10",
         help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
+            "Inference data to use: MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     mode_group = parser.add_mutually_exclusive_group()

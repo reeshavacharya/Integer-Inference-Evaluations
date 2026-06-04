@@ -116,7 +116,7 @@ fp32_inference = _load_module(
 BENCHMARK_DATASETS = [
     "MNIST",
     "CIFAR10",
-    "Brain-MRI",
+    "Brain_MRI",
     "NIH-CHEST",
     "OCTMNIST",
     "BloodMNIST",
@@ -139,7 +139,7 @@ def _disable_heavy_debug_logs():
 def _normalize_bench_name(name: str) -> str:
     name_upper = name.upper()
     if name_upper == "CIFR10": return "CIFAR10"
-    if name_upper == "BRAIN-MRI": return "Brain-MRI"
+    if name_upper == "BRAIN_MRI": return "Brain_MRI"
     if name_upper == "NIH-CHEST": return "NIH-CHEST"
     if name_upper == "MNIST": return "MNIST"
     if name_upper == "CIFAR10": return "CIFAR10"
@@ -166,7 +166,7 @@ def _train_dataset_for_checkpoint(dataset_name: str, activation: str) -> None:
     )
 
     if train_data_flag == "MNIST": args.data_dir = train_mod.DATA_MNIST_DIR
-    elif train_data_flag == "Brain-MRI": args.data_dir = train_mod.DATA_BRAIN_MRI_DIR
+    elif train_data_flag == "Brain_MRI": args.data_dir = train_mod.DATA_BRAIN_MRI_DIR
     elif train_data_flag in ("CIFR10", "CIFAR10"): args.data_dir = train_mod.DATA_CIFAR10_DIR
     elif train_data_flag == "OCTMNIST": args.data_dir = train_mod.DATA_OCTMNIST_DIR
     elif train_data_flag == "PneumoniaMNIST": args.data_dir = train_mod.DATA_PNEUMONIAMNIST_DIR
@@ -712,7 +712,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help=(
-            "Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
+            "Benchmark a single dataset: MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     parser.add_argument(

@@ -23,7 +23,7 @@ INT8_DIR = os.path.join(THIS_DIR, "INT8")
 CALIBRATION_DATASETS = [
     "MNIST",
     "CIFAR10",
-    "Brain-MRI",
+    "Brain_MRI",
     "NIH-CHEST",
     "OCTMNIST",
     "BloodMNIST",
@@ -264,7 +264,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
+        help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
     )
     parser.add_argument(
         "--batch-size",

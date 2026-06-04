@@ -3,13 +3,13 @@
 # Usage: ./error.sh [--dataset DATASET] [--activation ACTIVATION] [--mode MODE]
 # Valid activations: relu, gelu, leaky_relu (default: all)
 # Valid modes: int8, int32, fxp32 (default: all)
-# Valid datasets: MNIST, CIFAR10, Brain-MRI, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST (default: all)
+# Valid datasets: MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST (default: all)
 # If clamp is omitted, int32 and fxp32 run both clamped and unclamped variants.
 
 set -euo pipefail
 
 # Define available options
-ALL_DATASETS=("CIFAR10" "Brain-MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST" "MNIST")
+ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST" "MNIST")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 ALL_MODES=("int32" "fxp32")
 

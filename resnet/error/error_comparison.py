@@ -73,9 +73,9 @@ def main():
     ds = args.dataset
     slug = ds.lower()
     mode = args.mode
-    relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_relu_{mode}.json")
-    gelu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_gelu_{mode}.json")
-    leaky_relu_fname = os.path.join(DATA_DIR, f"error_accumulation_{slug}_leaky_relu_{mode}.json")
+    relu_fname = os.path.join(DATA_DIR, slug, f"error_accumulation_{slug}_relu_{mode}.json")
+    gelu_fname = os.path.join(DATA_DIR, slug, f"error_accumulation_{slug}_gelu_{mode}.json")
+    leaky_relu_fname = os.path.join(DATA_DIR, slug, f"error_accumulation_{slug}_leaky_relu_{mode}.json")
 
     if not os.path.exists(relu_fname):
         print(f"ERROR: Missing file: {relu_fname}")

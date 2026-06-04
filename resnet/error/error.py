@@ -375,10 +375,14 @@ def evaluate_error(
                     f_act = torch.clamp(f_act, min=-10.0, max=10.0)
                     q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
             elif activation == "leaky_relu":
-                f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
-                f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-                f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-                q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+                if mode == "int32":
+                    # Identity: negative_slope=1.0 means f(x)=x
+                    q_x = q_pre_act
+                else:
+                    f_accum = quant_utils.dequantize_tensor(q_pre_act, conv_s, conv_z)
+                    f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                    f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                    q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
 
             _evaluate_step(q_x, act_s, act_z, _activation_label("conv1", activation))
             s_out, z_out = act_s, act_z
@@ -412,10 +416,13 @@ def evaluate_error(
                             f_act = torch.clamp(f_act, min=-10.0, max=10.0)
                             q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
                     elif activation == "leaky_relu":
-                        f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
-                        f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-                        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-                        q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
+                        if mode == "int32":
+                            q_out1 = q_out1_pre
+                        else:
+                            f_accum = quant_utils.dequantize_tensor(q_out1_pre, conv_s1, conv_z1)
+                            f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                            f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                            q_out1 = quant_utils.quantize_tensor(f_act, act_s1, act_z1, dtype=target_dtype)
 
                     _evaluate_step(q_out1, act_s1, act_z1, _activation_label(f"{prefix}_conv1", activation))
                     s_out1, z_out1 = act_s1, act_z1
@@ -467,10 +474,13 @@ def evaluate_error(
                             f_act = torch.clamp(f_act, min=-10.0, max=10.0)
                             q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
                     elif activation == "leaky_relu":
-                        f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
-                        f_act = F.leaky_relu(f_accum, negative_slope=1.0)
-                        f_act = torch.clamp(f_act, min=-50.0, max=50.0)
-                        q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
+                        if mode == "int32":
+                            q_x = q_added
+                        else:
+                            f_accum = quant_utils.dequantize_tensor(q_added, conv_s, conv_z)
+                            f_act = F.leaky_relu(f_accum, negative_slope=1.0)
+                            f_act = torch.clamp(f_act, min=-50.0, max=50.0)
+                            q_x = quant_utils.quantize_tensor(f_act, act_s, act_z, dtype=target_dtype)
 
                     s_out, z_out = act_s, act_z
                     _evaluate_step(q_x, s_out, z_out, _activation_label(f"{prefix}_out", activation))

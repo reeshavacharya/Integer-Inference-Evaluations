@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ALL_DATASETS=("CIFAR10" "Brain-MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST" "MNIST")
+ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST" "MNIST")
 ALL_MODES=("fp32" "int8" "int32" "fxp32" "fxp64")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 
@@ -14,7 +14,7 @@ FILTER_MODE=""
 FILTER_ACTIVATION=""
 FILTER_CLAMP=""
 NUM_DATA=""
-BATCH_SIZE=""
+BATCH_SIZE="128"
 
 usage() {
 	echo "Usage: $0 [--bench DATASET] [--num_data N] [--batch_size B] [--mode MODE] [--activation ACTIVATION]"

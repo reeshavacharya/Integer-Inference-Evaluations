@@ -7,7 +7,7 @@ python3 benchmark.py \
 python3 benchmark.py \
     --mode int32 \
     --activation relu \
-    --bench Brain-MRI 
+    --bench Brain_MRI 
 
 python3 benchmark.py \
     --mode int32 \
@@ -44,7 +44,7 @@ python3 benchmark.py \
 # python3 benchmark.py \
 #     --mode int32 \
 #     --activation gelu \
-#     --bench Brain-MRI 
+#     --bench Brain_MRI 
 
 # python3 benchmark.py \
 #     --mode int32 \

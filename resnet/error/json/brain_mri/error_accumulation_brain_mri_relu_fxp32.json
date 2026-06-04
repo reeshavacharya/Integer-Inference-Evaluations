@@ -1,5 +1,5 @@
 {
-  "dataset": "Brain-MRI",
+  "dataset": "Brain_MRI",
   "activation": "relu",
   "mode": "fxp32",
   "layer_metrics": {
