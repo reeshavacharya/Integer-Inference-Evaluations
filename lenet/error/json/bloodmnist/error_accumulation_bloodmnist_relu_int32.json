@@ -1,0 +1,106 @@
+{
+  "dataset": "BloodMNIST",
+  "activation": "relu",
+  "mode": "int32",
+  "layer_metrics": {
+    "conv1_pre_act": {
+      "scale": 0.015305192797791724,
+      "zero_point": 0,
+      "cosine_similarity": 0.9999741137894014,
+      "sqnr_db": 42.51224178926065,
+      "mean_absolute_error": 0.007971129379552709,
+      "median_absolute_error": 0.007129091141270652,
+      "std_absolute_error": 0.005631004121307427,
+      "max_absolute_error": 0.03559173883176314,
+      "q_pct_negative": 39.41469565033913
+    },
+    "conv1_relu": {
+      "scale": 0.015305192797791724,
+      "zero_point": 0,
+      "cosine_similarity": 0.9999712251661534,
+      "sqnr_db": 41.12752253986503,
+      "mean_absolute_error": 0.00458037349332364,
+      "median_absolute_error": 0.0019797354023538116,
+      "std_absolute_error": 0.00573564008873835,
+      "max_absolute_error": 0.03559173883176314,
+      "q_pct_negative": 0.0
+    },
+    "conv2_pre_act": {
+      "scale": 0.028387052872601678,
+      "zero_point": 0,
+      "cosine_similarity": 0.9822974817668741,
+      "sqnr_db": 12.743327768319503,
+      "mean_absolute_error": 0.2959028501312966,
+      "median_absolute_error": 0.24577663225286142,
+      "std_absolute_error": 0.22837699320435828,
+      "max_absolute_error": 2.0623130798339844,
+      "q_pct_negative": 56.92787170410156
+    },
+    "conv2_relu": {
+      "scale": 0.028387052872601678,
+      "zero_point": 0,
+      "cosine_similarity": 0.977305212525361,
+      "sqnr_db": 11.91730132018613,
+      "mean_absolute_error": 0.11598793874143734,
+      "median_absolute_error": 0.0,
+      "std_absolute_error": 0.19472243953291318,
+      "max_absolute_error": 2.0623130798339844,
+      "q_pct_negative": 0.0
+    },
+    "fc1_pre_act": {
+      "scale": 0.05945130516501034,
+      "zero_point": 0,
+      "cosine_similarity": 0.9636388365885489,
+      "sqnr_db": 6.256462415898627,
+      "mean_absolute_error": 1.3293250050853531,
+      "median_absolute_error": 1.1314864824142525,
+      "std_absolute_error": 0.9485929340474858,
+      "max_absolute_error": 6.827378149593578,
+      "q_pct_negative": 55.97981810569763
+    },
+    "fc1_relu": {
+      "scale": 0.05945130516501034,
+      "zero_point": 0,
+      "cosine_similarity": 0.9533423224084424,
+      "sqnr_db": 6.332986685901738,
+      "mean_absolute_error": 0.5247664235641816,
+      "median_absolute_error": 0.0,
+      "std_absolute_error": 0.8431302185107652,
+      "max_absolute_error": 6.827378149593578,
+      "q_pct_negative": 0.0
+    },
+    "fc2_pre_act": {
+      "scale": 0.0997696970023361,
+      "zero_point": 0,
+      "cosine_similarity": 0.956329053836771,
+      "sqnr_db": 6.583924483674307,
+      "mean_absolute_error": 1.6599408232165145,
+      "median_absolute_error": 1.3790579256473805,
+      "std_absolute_error": 1.284910679700557,
+      "max_absolute_error": 10.286281645531748,
+      "q_pct_negative": 51.73921138048172
+    },
+    "fc2_relu": {
+      "scale": 0.0997696970023361,
+      "zero_point": 0,
+      "cosine_similarity": 0.9526311319689472,
+      "sqnr_db": 6.740300192370938,
+      "mean_absolute_error": 0.7814839580101157,
+      "median_absolute_error": 0.0294513049078923,
+      "std_absolute_error": 1.2291831023500805,
+      "max_absolute_error": 9.271315152037378,
+      "q_pct_negative": 0.0
+    },
+    "fc3": {
+      "scale": 0.2694003460454006,
+      "zero_point": 152,
+      "cosine_similarity": 0.6802787814277937,
+      "sqnr_db": -12.984763524876547,
+      "mean_absolute_error": 44.03787252664939,
+      "median_absolute_error": 43.88233494805355,
+      "std_absolute_error": 6.820082909334343,
+      "max_absolute_error": 73.753367023842,
+      "q_pct_negative": 100.0
+    }
+  }
+}

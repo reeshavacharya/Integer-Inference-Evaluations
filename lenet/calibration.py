@@ -58,6 +58,7 @@ SUPPORTED_DATASETS = (
 	"OCTMNIST",
 	"BloodMNIST",
 	"OrganAMNIST",
+	"PneumoniaMNIST",
 )
 
 
@@ -71,6 +72,8 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 		return "BloodMNIST"
 	if key == "ORGANAMNIST":
 		return "OrganAMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
 	if key == "BRAIN-MRI":
 		return "Brain-MRI"
 	if key == "NIH-CHEST":
@@ -81,6 +84,9 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 		return "CIFAR10"
 	raise ValueError(f"Unknown dataset: {dataset_name}")
 
+def _activation_label(base_name: str, activation: str) -> str:
+	return f"{base_name}_{activation.lower()}"
+
 
 def _dataset_config(dataset_name: str):
 	display = _normalize_dataset_name(dataset_name)
@@ -89,7 +95,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_MNIST,
 			"model": train_mod.LeNet5(num_classes=10, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_mnist.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_mnist.pth"),
 			"download_name": "MNIST",
 		}
 	if display == "CIFAR10":
@@ -97,7 +103,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_CIFAR10,
 			"model": train_mod.LeNet5(num_classes=10, in_channels=3),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_cifar10.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_cifar10.pth"),
 			"download_name": "CIFAR10",
 		}
 	if display == "Brain-MRI":
@@ -105,7 +111,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_Brain_MRI,
 			"model": train_mod.MedicalLeNet(num_classes=4, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_brain_mri.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_brain_mri.pth"),
 			"download_name": "Brain-MRI",
 		}
 	if display == "NIH-CHEST":
@@ -113,7 +119,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_NIH_Chest,
 			"model": train_mod.LeNet5(num_classes=15, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_NIH_Chest_XRay.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_NIH_Chest_XRay.pth"),
 			"download_name": "NIH-CHEST",
 		}
 	if display == "OCTMNIST":
@@ -121,7 +127,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_OCTMNIST,
 			"model": train_mod.LeNet5(num_classes=4, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_octmnist.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_octmnist.pth"),
 			"download_name": "OCTMNIST",
 		}
 	if display == "BloodMNIST":
@@ -129,7 +135,7 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_BloodMNIST,
 			"model": train_mod.LeNet5(num_classes=8, in_channels=3),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_bloodmnist.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_bloodmnist.pth"),
 			"download_name": "BloodMNIST",
 		}
 	if display == "OrganAMNIST":
@@ -137,13 +143,21 @@ def _dataset_config(dataset_name: str):
 			"display": display,
 			"setup_fn": train_mod.setup_OrganAMNIST,
 			"model": train_mod.LeNet5(num_classes=11, in_channels=1),
-			"model_path": os.path.join(THIS_DIR, "best_lenet5_organamnist.pth"),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_organamnist.pth"),
 			"download_name": "OrganAMNIST",
+		}
+	if display == "PneumoniaMNIST":
+		return {
+			"display": display,
+			"setup_fn": train_mod.setup_PneumoniaMNIST,
+			"model": train_mod.MedicalLeNet(num_classes=2, in_channels=1),
+			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_pneumoniamnist.pth"),
+			"download_name": "PneumoniaMNIST",
 		}
 	raise ValueError(f"Unsupported dataset: {dataset_name}")
 
 
-def _resolve_test_loader(cfg, batch_size: int):
+def _resolve_train_loader(cfg, batch_size: int):
 	train_mod.train_loader = None
 	train_mod.val_loader = None
 	train_mod.test_loader = None
@@ -153,14 +167,14 @@ def _resolve_test_loader(cfg, batch_size: int):
 	if (
 		isinstance(setup_result, tuple)
 		and len(setup_result) >= 3
-		and hasattr(setup_result[2], "dataset")
+		and hasattr(setup_result[0], "dataset")
 	):
-		return setup_result[2]
+		return setup_result[0]
 
-	if train_mod.test_loader is not None:
-		return train_mod.test_loader
+	if train_mod.train_loader is not None:
+		return train_mod.train_loader
 
-	raise RuntimeError(f"Could not resolve test loader for dataset: {cfg['display']}")
+	raise RuntimeError(f"Could not resolve train loader for dataset: {cfg['display']}")
 
 
 activation_ranges: Dict[str, Dict[str, float]] = {}
@@ -185,7 +199,7 @@ def _get_layer_config(model: nn.Module):
 	}
 
 
-def _register_hooks(model: nn.Module):
+def _register_hooks(model: nn.Module, activation: str):
 	handles = []
 	layer_cfg = _get_layer_config(model)
 
@@ -193,6 +207,14 @@ def _register_hooks(model: nn.Module):
 		def callback(module, inputs, output):
 			in_tensor = inputs[0].detach()
 			out_tensor = output.detach()
+
+			# --- NVIDIA GELU10 CLIPPING FOR PTQ ---
+			if isinstance(module, torch.nn.GELU):
+				out_tensor = torch.clamp(out_tensor, min=-10.0, max=10.0)
+
+			# --- LeakyReLU10 CLIPPING FOR PTQ ---
+			elif isinstance(module, torch.nn.LeakyReLU):
+				out_tensor = torch.clamp(out_tensor, min=-50.0, max=50.0)
 
 			if name not in activation_ranges:
 				activation_ranges[name] = {
@@ -212,46 +234,64 @@ def _register_hooks(model: nn.Module):
 		return callback
 
 	if isinstance(model, train_mod.MedicalLeNet):
-		handles.append(model.features[1].register_forward_hook(_hook("conv1")))
-		handles.append(model.features[5].register_forward_hook(_hook("conv2")))
+		handles.append(model.features[0].register_forward_hook(_hook("conv1")))
+		handles.append(model.features[2].register_forward_hook(_hook(_activation_label("conv1", activation))))
+		handles.append(model.features[4].register_forward_hook(_hook("conv2")))
+		handles.append(model.features[6].register_forward_hook(_hook(_activation_label("conv2", activation))))
 	else:
 		handles.append(layer_cfg["conv1"].register_forward_hook(_hook("conv1")))
+		handles.append(model.features[1].register_forward_hook(_hook(_activation_label("conv1", activation))))
 		handles.append(layer_cfg["conv2"].register_forward_hook(_hook("conv2")))
+		handles.append(model.features[4].register_forward_hook(_hook(_activation_label("conv2", activation))))
 
 	handles.append(layer_cfg["fc1"].register_forward_hook(_hook("fc1")))
+	handles.append(model.classifier[2].register_forward_hook(_hook(_activation_label("fc1", activation))))
 	handles.append(layer_cfg["fc2"].register_forward_hook(_hook("fc2")))
+	handles.append(model.classifier[4].register_forward_hook(_hook(_activation_label("fc2", activation))))
 	handles.append(layer_cfg["fc3"].register_forward_hook(_hook("fc3")))
 
 	return handles
 
 
-def _output_file_name(dataset_name: str) -> str:
-	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+def _output_file_name(dataset_name: str, activation: str) -> str:
+	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
 
 
-def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None):
+def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None, activation: str = "relu"):
 	cfg = _dataset_config(dataset_name)
 	display = cfg["display"]
+	
+	model_path = cfg["model_path"].format(activation=activation)
+	model = cfg["model"]
+	# manually set the activation since we instantiated the model directly above
+	model.activation = activation
+	for m in model.modules():
+		if isinstance(m, train_mod.MedicalLeNet) or isinstance(m, train_mod.LeNet5):
+			m.activation = activation
 
 	print(f"[calib] Dataset: {display} - preparing calibration loader (batch_size={batch_size})")
 	train_mod.datasetDownloader(cfg["download_name"])
-	loader = _resolve_test_loader(cfg, batch_size=batch_size)
+	loader = _resolve_train_loader(cfg, batch_size=batch_size)
 
-	model = cfg["model"]
-	state = torch.load(cfg["model_path"], map_location="cpu")
+	state = torch.load(model_path, map_location="cpu")
 	if len(state) > 0 and list(state.keys())[0].startswith("module."):
 		state = {key[7:]: value for key, value in state.items()}
 	model.load_state_dict(state)
 	model.eval()
 
 	aggregated: Dict[str, Dict[str, float]] = {}
-	total = len(loader.dataset)
-	print(f"[calib] Running forward passes over {total} test samples...")
+	total = min(len(loader.dataset), 1000)
+	print(f"[calib] Running forward passes over {total} training samples...")
 
+	processed_samples = 0
 	with torch.no_grad():
 		for idx, (images, _labels) in enumerate(loader, 1):
+			if processed_samples >= 1000:
+				break
+
+			batch_size_actual = images.size(0)
 			activation_ranges.clear()
-			handles = _register_hooks(model)
+			handles = _register_hooks(model, activation)
 			_ = model(images)
 			for handle in handles:
 				handle.remove()
@@ -272,8 +312,9 @@ def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None):
 				current["out_min"] = min(current["out_min"], float(ranges["out_min"]))
 				current["out_max"] = max(current["out_max"], float(ranges["out_max"]))
 
-			if idx % 100 == 0 or idx == total:
-				print(f"[calib] Processed {idx}/{total} samples")
+			processed_samples += batch_size_actual
+			if processed_samples % 100 == 0 or processed_samples >= total:
+				print(f"[calib] Processed {min(processed_samples, total)}/{total} samples")
 
 	calib = {}
 	for name, ranges in aggregated.items():
@@ -294,9 +335,9 @@ def main(dataset_name: str, batch_size: int = 1, out_dir: Optional[str] = None):
 
 	out_dir = out_dir or os.path.join(THIS_DIR, "calibration")
 	os.makedirs(out_dir, exist_ok=True)
-	out_path = os.path.join(out_dir, _output_file_name(display))
+	out_path = os.path.join(out_dir, _output_file_name(display, activation))
 	with open(out_path, "w") as f:
-		json.dump({"dataset": display, "layers": calib}, f, indent=2)
+		json.dump({"dataset": display, "activation": activation, "layers": calib}, f, indent=2)
 
 	print(f"[calib] Saved calibration to: {out_path}")
 
@@ -311,6 +352,7 @@ def _selected_datasets_from_args(args: argparse.Namespace) -> Iterable[str]:
 		(args.octmnist, "OCTMNIST"),
 		(args.bloodmnist, "BloodMNIST"),
 		(args.organamnist, "OrganAMNIST"),
+		(args.pneumoniamnist, "PneumoniaMNIST"),
 	]
 
 	for enabled, dataset_name in flag_map:
@@ -367,6 +409,19 @@ if __name__ == "__main__":
 		help="Calibrate OrganAMNIST",
 	)
 	parser.add_argument(
+		"--PneumoniaMNIST",
+		dest="pneumoniamnist",
+		action="store_true",
+		help="Calibrate PneumoniaMNIST",
+	)
+	parser.add_argument(
+		"--activation",
+		type=str,
+		default="relu",
+		choices=["relu", "gelu", "leaky_relu"],
+		help="Activation function to use",
+	)
+	parser.add_argument(
 		"--batch-size",
 		type=int,
 		default=1,
@@ -383,4 +438,4 @@ if __name__ == "__main__":
 
 	for dataset_name in _selected_datasets_from_args(args):
 		print(f"\n[calib] === Calibrating dataset: {dataset_name} ===")
-		main(dataset_name, batch_size=args.batch_size, out_dir=args.out_dir)
+		main(dataset_name, batch_size=args.batch_size, out_dir=args.out_dir, activation=args.activation)

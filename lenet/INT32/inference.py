@@ -27,14 +27,13 @@ from utils import (
     compute_integer_multiplier,
     get_quantization_params,
     get_bias_quantization_params,
-    compute_multiplier,
     quantize_tensor,
-    integer_conv2d,
-    integer_linear,
     add_bias,
     downscale_and_cast,
     quantized_relu,
+    integer_gelu_lut,
 )
+from strict_int_ops import strict_integer_conv2d, strict_integer_linear
 
 
 # -----------------------------
@@ -79,15 +78,15 @@ class LeNet5(nn.Module):
 # 2. Setup and Data Extraction
 # -----------------------------
 
-def _resolve_infer_config(infer_data: str):
+def _resolve_infer_config(infer_data: str, activation: str = "relu"):
     name = infer_data.upper()
 
     if name == "MNIST":
         return {
             "display": "MNIST",
             "setup_fn": train_mod.setup_MNIST,
-            "model": LeNet5(num_classes=10, in_channels=1),
-            "model_path": "best_lenet5_mnist.pth",
+            "model": train_mod.LeNet5(num_classes=10, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_mnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -96,18 +95,18 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "CIFAR10",
             "setup_fn": train_mod.setup_CIFAR10,
-            "model": LeNet5(num_classes=10, in_channels=3),
-            "model_path": "best_lenet5_cifar10.pth",
+            "model": train_mod.LeNet5(num_classes=10, in_channels=3, activation=activation),
+            "model_path": f"best_lenet5_{activation}_cifar10.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
 
-    if name == "BRAIN-MRI":
+    if name == "BRAIN-MRI" or name == "BRAIN_MRI":
         return {
             "display": "Brain-MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
-            "model": MedicalLeNet(num_classes=4, in_channels=1),
-            "model_path": "best_lenet5_brain_mri.pth",
+            "model": train_mod.MedicalLeNet(num_classes=4, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_brain_mri.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -116,8 +115,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "NIH-CHEST",
             "setup_fn": train_mod.setup_NIH_Chest,
-            "model": LeNet5(num_classes=15, in_channels=1),
-            "model_path": "best_lenet5_NIH_Chest_XRay.pth",
+            "model": train_mod.LeNet5(num_classes=15, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_NIH_Chest_XRay.pth",
             "is_multilabel": True,
             "eval_batch_size": 8,
         }
@@ -126,8 +125,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OCTMNIST",
             "setup_fn": train_mod.setup_OCTMNIST,
-            "model": LeNet5(num_classes=4, in_channels=1),
-            "model_path": "best_lenet5_octmnist.pth",
+            "model": train_mod.LeNet5(num_classes=4, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_octmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -136,8 +135,8 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "BloodMNIST",
             "setup_fn": train_mod.setup_BloodMNIST,
-            "model": LeNet5(num_classes=8, in_channels=3),
-            "model_path": "best_lenet5_bloodmnist.pth",
+            "model": train_mod.LeNet5(num_classes=8, in_channels=3, activation=activation),
+            "model_path": f"best_lenet5_{activation}_bloodmnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -146,8 +145,18 @@ def _resolve_infer_config(infer_data: str):
         return {
             "display": "OrganAMNIST",
             "setup_fn": train_mod.setup_OrganAMNIST,
-            "model": LeNet5(num_classes=11, in_channels=1),
-            "model_path": "best_lenet5_organamnist.pth",
+            "model": train_mod.LeNet5(num_classes=11, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_organamnist.pth",
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "PNEUMONIAMNIST":
+        return {
+            "display": "PneumoniaMNIST",
+            "setup_fn": train_mod.setup_PneumoniaMNIST,
+            "model": train_mod.MedicalLeNet(num_classes=2, in_channels=1, activation=activation),
+            "model_path": f"best_lenet5_{activation}_pneumoniamnist.pth",
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -203,16 +212,16 @@ def get_random_sample(dataset_name: str, setup_fn):
 activation_ranges = {}
 
 
-def _calibration_file_name(dataset_display: str):
-    return f"{dataset_display.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+def _calibration_file_name(dataset_display: str, activation: str = "relu"):
+    return f"{dataset_display.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
 
 
-def _calibration_file_path(dataset_display: str):
-    return os.path.join(CALIBRATION_DIR, _calibration_file_name(dataset_display))
+def _calibration_file_path(dataset_display: str, activation: str = "relu"):
+    return os.path.join(CALIBRATION_DIR, _calibration_file_name(dataset_display, activation))
 
 
-def load_calibration_ranges(dataset_display: str):
-    calibration_path = _calibration_file_path(dataset_display)
+def load_calibration_ranges(dataset_display: str, activation: str = "relu"):
+    calibration_path = _calibration_file_path(dataset_display, activation)
     if not os.path.exists(calibration_path):
         raise FileNotFoundError(
             f"Missing calibration file for {dataset_display}: {calibration_path}. "
@@ -308,35 +317,51 @@ def register_hooks(model):
 # 4. Core Integer Inference Engine
 # -----------------------------
 def run_integer_layer(
-    q_input, layer_data, layer_name, zp_in, apply_relu=True, is_conv=False
+    q_input, layer_data, layer_name, zp_in, apply_relu=True, is_conv=False, act_name="relu"
 ):
     """
     Executes a single layer entirely using the offline-compiled integer arithmetic.
     """
-    # 1. Extract purely quantized data from the offline dictionary
     q_w = layer_data["q_weight"].to(q_input.device)
-    zp_w = layer_data["zp_w"]
+    zp_w = layer_data["zp_w"].to(q_input.device)
     q_bias = layer_data["q_bias"].to(q_input.device)
-    q_M0 = layer_data["q_M0"]
-    shift = layer_data["shift"]
-    zp_out = layer_data["zp_out"]
-    scale_out = layer_data["scale_out"]
-
-    # 2. Execute Integer Math
-    if is_conv:
-        int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w)
+    q_M0 = layer_data["q_M0"].to(q_input.device)
+    shift = layer_data["shift"].to(q_input.device)
+    
+    # for final FC there might be no activation so we use act_scale_out or conv_scale_out
+    if "conv_zp_out" in layer_data:
+        conv_zp_out = layer_data["conv_zp_out"].to(q_input.device)
     else:
-        int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
+        conv_zp_out = layer_data["zp_out"].to(q_input.device)
+        
+    if "act_zp_out" in layer_data:
+        act_zp_out = layer_data["act_zp_out"].to(q_input.device)
+        act_scale_out = layer_data["act_scale_out"]
+    else:
+        act_zp_out = layer_data["zp_out"].to(q_input.device)
+        act_scale_out = layer_data["scale_out"]
+
+    if is_conv:
+        int32_accum = strict_integer_conv2d(q_input, q_w, zp_in, zp_w, stride=1, padding=0)
+    else:
+        int32_accum = strict_integer_linear(q_input, q_w, zp_in, zp_w)
         
     int32_accum = add_bias(int32_accum, q_bias)
 
-    # 3. Downscale back to INT8 limits
-    q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
+    q_out = downscale_and_cast(int32_accum, q_M0, shift, conv_zp_out)
 
     if apply_relu:
-        q_out = quantized_relu(q_out, zp_out)
+        if act_name == "relu":
+            q_out = quantized_relu(q_out, act_zp_out)
+        elif act_name == "gelu":
+            q_min = layer_data["gelu_q_min"].to(q_input.device)
+            q_max = layer_data["gelu_q_max"].to(q_input.device)
+            lut = layer_data["gelu_lut"].to(q_input.device)
+            q_out = integer_gelu_lut(q_out, lut, q_min, q_max)
+        elif act_name == "leaky_relu":
+            q_out = q_out # negative_slope=1.0 is identity
 
-    return q_out, scale_out, zp_out
+    return q_out, act_scale_out, act_zp_out
 
 
 def avg_pool_uint32(q_tensor, name=None):
@@ -367,12 +392,12 @@ def avg_pool_uint32(q_tensor, name=None):
 # -----------------------------
 # 5. Main Execution
 # -----------------------------
-def main(infer_data, run_floating_point=True, run_integer=True):
+def main(infer_data, run_floating_point=True, run_integer=True, activation="relu"):
     print("--- Starting Quantized Inference Pipeline ---")
 
-    cfg = _resolve_infer_config(infer_data)
+    cfg = _resolve_infer_config(infer_data, activation)
     model = cfg["model"]
-    model_path = cfg["model_path"]
+    model_path = os.path.join(LENET_DIR, cfg["model_path"])
     dataset_display = cfg["display"]
 
     print(f"[0] Inference target: {dataset_display}")
@@ -382,11 +407,18 @@ def main(infer_data, run_floating_point=True, run_integer=True):
         print(f"Error: '{model_path}' not found. Please train the model first.")
         return
 
-    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    state = torch.load(model_path, map_location="cpu")
+    if len(state) > 0 and list(state.keys())[0].startswith("module."):
+        state = {key[7:]: value for key, value in state.items()}
+    model.load_state_dict(state)
     model.eval()
 
     if run_integer:
-        load_calibration_ranges(dataset_display)
+        load_calibration_ranges(dataset_display, activation)
+        int32_model_path = os.path.join(LENET_DIR, cfg["model_path"].replace(".pth", "_int32.pth"))
+        if not os.path.exists(int32_model_path):
+            raise FileNotFoundError(f"Missing compiled model: {int32_model_path}")
+        int32_state = torch.load(int32_model_path, map_location="cpu")
 
     # Draw one random sample from the correct 10% test partition
     image_tensor, true_label, true_label_text = get_random_sample(
@@ -403,9 +435,10 @@ def main(infer_data, run_floating_point=True, run_integer=True):
 
     if run_floating_point or run_integer:
         float_output = model(image_tensor)
-
-    if run_integer:
-        pass
+        if cfg["is_multilabel"]:
+            float_pred = (torch.sigmoid(float_output) > 0.5).int().tolist()[0]
+        else:
+            float_pred = float_output.argmax(dim=1).item()
 
 
     if not run_integer:
@@ -449,28 +482,26 @@ def main(infer_data, run_floating_point=True, run_integer=True):
 
     print("\n[3] Executing Integer Inference...")
 
-    # Network Forward Pass (Indexing according to architecture config)
-    layer_cfg = _get_layer_config(model)
-
-    q_x, s_out, z_out= run_integer_layer(
+    # Network Forward Pass (using int32 compiled dict)
+    q_x, s_out, z_out = run_integer_layer(
         q_x,
-        layer_cfg["conv1"],
+        int32_state["conv1"],
         "conv1",
-        scale_in,
         zp_in,
         apply_relu=True,
         is_conv=True,
+        act_name=activation,
     )
     q_x = avg_pool_uint32(q_x, name="pool_after_conv1")
 
     q_x, s_out, z_out = run_integer_layer(
         q_x,
-        layer_cfg["conv2"],
+        int32_state["conv2"],
         "conv2",
-        s_out,
         z_out,
         apply_relu=True,
         is_conv=True,
+        act_name=activation,
     )
     q_x = avg_pool_uint32(q_x, name="pool_after_conv2")
 
@@ -478,32 +509,32 @@ def main(infer_data, run_floating_point=True, run_integer=True):
 
     q_x, s_out, z_out = run_integer_layer(
         q_x,
-        layer_cfg["fc1"],
+        int32_state["fc1"],
         "fc1",
-        s_out,
         z_out,
         apply_relu=True,
         is_conv=False,
+        act_name=activation,
     )
     q_x, s_out, z_out = run_integer_layer(
         q_x,
-        layer_cfg["fc2"],
+        int32_state["fc2"],
         "fc2",
-        s_out,
         z_out,
         apply_relu=True,
         is_conv=False,
+        act_name=activation,
     )
 
     # Final Layer (No ReLU)
     q_out, final_s, final_z = run_integer_layer(
         q_x,
-        layer_cfg["fc3"],
+        int32_state["fc3"],
         "fc3",
-        s_out,
         z_out,
         apply_relu=False,
         is_conv=False,
+        act_name=activation,
     )
 
     # Dequantize final output to get logits (for comparison/analysis)
@@ -542,38 +573,33 @@ def main(infer_data, run_floating_point=True, run_integer=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--infer",
+        "--data",
         type=str,
-        default="MNIST",
-        help=(
-            "Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, "
-            "OCTMNIST, BloodMNIST, OrganAMNIST"
-        ),
+        required=True,
+        help="Dataset key (MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST)",
     )
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--int",
+    parser.add_argument(
+        "--skip-float",
         action="store_true",
-        help="Run integer inference only",
+        help="Skip floating-point model inference.",
     )
-    mode_group.add_argument(
-        "--floating-point",
+    parser.add_argument(
+        "--skip-integer",
         action="store_true",
-        help="Run floating-point inference only",
+        help="Skip integer model inference.",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu", "leaky_relu"],
+        help="Activation function to use",
     )
     args = parser.parse_args()
 
-    run_floating_point = True
-    run_integer = True
-    if args.int:
-        run_floating_point = False
-        run_integer = True
-    elif args.floating_point:
-        run_floating_point = True
-        run_integer = False
-
     main(
-        args.infer,
-        run_floating_point=run_floating_point,
-        run_integer=run_integer,
+        args.data,
+        run_floating_point=not args.skip_float,
+        run_integer=not args.skip_integer,
+        activation=args.activation,
     )

@@ -11,7 +11,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset, Dataset
 from torchvision import datasets, transforms
 from PIL import Image
-from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST
+from medmnist import OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST
 from sklearn.metrics import roc_auc_score
 import numpy as np
 
@@ -25,6 +25,7 @@ DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
 DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
 DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
 DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
+DATA_PNEUMONIAMNIST_DIR = os.path.join(DATA_ROOT, "PneumoniaMNIST")
 
 
 # -----------------------------
@@ -34,28 +35,44 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 
+def _normalize_activation_name(activation: str) -> str:
+    name = activation.strip().lower()
+    if name not in {"relu", "gelu", "leaky_relu"}:
+        raise ValueError(f"Unsupported activation: {activation}")
+    return name
+
+def _build_activation(activation: str) -> nn.Module:
+    activation = _normalize_activation_name(activation)
+    if activation == "relu":
+        return nn.ReLU(inplace=True)
+    if activation == "gelu":
+        return nn.GELU()
+    return nn.LeakyReLU(inplace=True, negative_slope=1.0)
+
+
 # -----------------------------
 # Original LeNet-5 for MNIST
 # -----------------------------
 class LeNet5(nn.Module):
-    def __init__(self, num_classes: int = 10, in_channels: int = 1):
+    def __init__(self, num_classes: int = 10, in_channels: int = 1, activation: str = "relu"):
         super().__init__()
+        self.activation = _normalize_activation_name(activation)
 
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, 6, kernel_size=5, stride=1),  # 28x28 -> 24x24
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),  # 24x24 -> 12x12
+            _build_activation(self.activation),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 24x24 -> 12x12
             nn.Conv2d(6, 16, kernel_size=5, stride=1),  # 12x12 -> 8x8
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),  # 8x8 -> 4x4
+            _build_activation(self.activation),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 8x8 -> 4x4
         )
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(16 * 4 * 4, 120),
-            nn.ReLU(),
+            _build_activation(self.activation),
             nn.Linear(120, 84),
-            nn.ReLU(),
+            _build_activation(self.activation),
             nn.Linear(84, num_classes),
         )
 
@@ -70,27 +87,28 @@ class LeNet5(nn.Module):
 # Keeps the overall spirit simple, but improves regularization.
 # -----------------------------
 class MedicalLeNet(nn.Module):
-    def __init__(self, num_classes: int = 4, in_channels: int = 1):
+    def __init__(self, num_classes: int = 4, in_channels: int = 1, activation: str = "relu"):
         super().__init__()
+        self.activation = _normalize_activation_name(activation)
 
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, 16, kernel_size=5, stride=1),  # 28 -> 24
             nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),  # 24 -> 12
+            _build_activation(self.activation),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 24 -> 12
             nn.Conv2d(16, 32, kernel_size=5, stride=1),  # 12 -> 8
             nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),  # 8 -> 4
+            _build_activation(self.activation),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 8 -> 4
         )
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(32 * 4 * 4, 120),
-            nn.ReLU(),
+            _build_activation(self.activation),
             nn.Dropout(p=0.4),
             nn.Linear(120, 84),
-            nn.ReLU(),
+            _build_activation(self.activation),
             nn.Dropout(p=0.3),
             nn.Linear(84, num_classes),
         )
@@ -121,6 +139,7 @@ PREPROCESS_SPECS = {
     "OCTMNIST": {"channels": 1, "height": 28, "width": 28},
     "BLOODMNIST": {"channels": 3, "height": 28, "width": 28},
     "ORGANAMNIST": {"channels": 1, "height": 28, "width": 28},
+    "PNEUMONIAMNIST": {"channels": 1, "height": 28, "width": 28},
 }
 
 
@@ -755,6 +774,66 @@ def setup_NIH_Chest(batch_size: int = 16):
     return Subset(train_dataset, list(range(len(train_dataset))))
 
 
+def setup_PneumoniaMNIST(batch_size: int = 64):
+    """Prepare PneumoniaMNIST loaders using MedMNIST's predefined train/val/test splits."""
+    global train_loader, val_loader, test_loader
+
+    os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ]
+    )
+
+    train_dataset = PneumoniaMNIST(
+        split="train",
+        transform=transform,
+        download=True,
+        root=DATA_PNEUMONIAMNIST_DIR,
+    )
+    val_dataset = PneumoniaMNIST(
+        split="val",
+        transform=transform,
+        download=True,
+        root=DATA_PNEUMONIAMNIST_DIR,
+    )
+    test_dataset = PneumoniaMNIST(
+        split="test",
+        transform=transform,
+        download=True,
+        root=DATA_PNEUMONIAMNIST_DIR,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    validate_loader_preprocessing(train_loader, "PneumoniaMNIST", stage="training")
+    validate_loader_preprocessing(test_loader, "PneumoniaMNIST", stage="training")
+
+    return train_dataset
+
+
 def _compute_multilabel_pos_weight_from_subset(subset: Subset, num_classes: int):
     dataset = subset.dataset
     class_counts = torch.zeros(num_classes, dtype=torch.float32)
@@ -904,13 +983,18 @@ def evaluate(model, dataloader, criterion, is_multilabel: bool = False, is_medmn
     avg_loss = total_loss / len(dataloader.dataset)
 
     if is_multilabel:
-        all_targets = np.vstack(all_targets)
-        all_outputs = np.vstack(all_outputs)
-        metric_score = roc_auc_score(all_targets, all_outputs, average="macro")
+        targets = np.vstack(all_targets)
+        outputs = np.vstack(all_outputs)
+        metric_score = roc_auc_score(targets, outputs, average="macro")
     elif is_medmnist:
-        all_targets = np.concatenate(all_targets)
-        all_outputs = np.vstack(all_outputs)
-        auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
+        targets = np.concatenate(all_targets)
+        outputs = np.vstack(all_outputs)
+        if outputs.ndim == 2 and outputs.shape[1] == 2:
+            y_true = targets.ravel()
+            y_score = outputs[:, 1]
+            auc = roc_auc_score(y_true, y_score)
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
         acc = 100.0 * correct / total
         metric_score = (auc, acc)
     else:
@@ -932,23 +1016,23 @@ def main(args: argparse.Namespace):
     is_medmnist = False
 
     if args.data_dir == DATA_MNIST_DIR:
-        best_model_path = "best_lenet5_mnist.pth"
+        best_model_path = f"best_lenet5_{args.activation}_mnist.pth"
         setup_MNIST(args.batch_size)
 
         # Leave MNIST setup unchanged in spirit
-        model = LeNet5(num_classes=10, in_channels=1).to(device)
+        model = LeNet5(num_classes=10, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
 
     elif args.data_dir == DATA_CIFAR10_DIR:
-        best_model_path = "best_lenet5_cifar10.pth"
+        best_model_path = f"best_lenet5_{args.activation}_cifar10.pth"
         num_epochs = 100
 
         setup_CIFAR10(args.batch_size)
 
         # CIFAR-10 has 10 classes and 3-channel input
-        model = LeNet5(num_classes=10, in_channels=3).to(device)
+        model = LeNet5(num_classes=10, in_channels=3, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         # SGD with momentum and weight decay tends to work better on CIFAR-10
         optimizer = optim.SGD(
@@ -960,13 +1044,13 @@ def main(args: argparse.Namespace):
         scheduler = None
 
     elif args.data_dir == DATA_BRAIN_MRI_DIR:
-        best_model_path = "best_lenet5_brain_mri.pth"
+        best_model_path = f"best_lenet5_{args.activation}_brain_mri.pth"
         num_epochs = 100
 
         train_dataset = setup_Brain_MRI(args.batch_size)
 
         # Brain-MRI has 4 classes
-        model = MedicalLeNet(num_classes=4, in_channels=1).to(device)
+        model = MedicalLeNet(num_classes=4, in_channels=1, activation=args.activation).to(device)
 
         class_weights = _compute_class_weights_from_subset(train_dataset, num_classes=4)
         print(f"Using class weights: {class_weights.detach().cpu().tolist()}")
@@ -985,12 +1069,12 @@ def main(args: argparse.Namespace):
         )
 
     elif args.data_dir == DATA_NIH_CHEST_XRAY_DIR:
-        best_model_path = "best_lenet5_NIH_Chest_XRay.pth"
+        best_model_path = f"best_lenet5_{args.activation}_NIH_Chest_XRay.pth"
         num_epochs = 30
 
         train_dataset = setup_NIH_Chest(args.batch_size)
 
-        model = LeNet5(num_classes=15, in_channels=1).to(device)
+        model = LeNet5(num_classes=15, in_channels=1, activation=args.activation).to(device)
         pos_weight = _compute_multilabel_pos_weight_from_subset(train_dataset, num_classes=15)
         print(f"Using NIH-CHEST positive class weights: {pos_weight.detach().cpu().tolist()}")
 
@@ -1001,12 +1085,12 @@ def main(args: argparse.Namespace):
         is_medmnist = False
 
     elif args.data_dir == DATA_OCTMNIST_DIR:
-        best_model_path = "best_lenet5_octmnist.pth"
+        best_model_path = f"best_lenet5_{args.activation}_octmnist.pth"
         num_epochs = 30
 
         setup_OCTMNIST(args.batch_size)
 
-        model = LeNet5(num_classes=4, in_channels=1).to(device)
+        model = LeNet5(num_classes=4, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -1014,12 +1098,12 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_BLOODMNIST_DIR:
-        best_model_path = "best_lenet5_bloodmnist.pth"
+        best_model_path = f"best_lenet5_{args.activation}_bloodmnist.pth"
         num_epochs = 30
 
         setup_BloodMNIST(args.batch_size)
 
-        model = LeNet5(num_classes=8, in_channels=3).to(device)
+        model = LeNet5(num_classes=8, in_channels=3, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -1027,12 +1111,25 @@ def main(args: argparse.Namespace):
         is_medmnist = True
 
     elif args.data_dir == DATA_ORGANAMNIST_DIR:
-        best_model_path = "best_lenet5_organamnist.pth"
+        best_model_path = f"best_lenet5_{args.activation}_organamnist.pth"
         num_epochs = 30
 
         setup_OrganAMNIST(args.batch_size)
 
-        model = LeNet5(num_classes=11, in_channels=1).to(device)
+        model = LeNet5(num_classes=11, in_channels=1, activation=args.activation).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        scheduler = None
+        is_multilabel = False
+        is_medmnist = True
+
+    elif args.data_dir == DATA_PNEUMONIAMNIST_DIR:
+        best_model_path = f"best_lenet5_{args.activation}_pneumoniamnist.pth"
+        num_epochs = 30
+
+        setup_PneumoniaMNIST(args.batch_size)
+
+        model = MedicalLeNet(num_classes=2, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -1041,10 +1138,10 @@ def main(args: argparse.Namespace):
 
     else:
         print(f"Training using default data directory: {DATA_MNIST_DIR}")
-        best_model_path = "best_lenet5_mnist.pth"
+        best_model_path = f"best_lenet5_{args.activation}_mnist.pth"
         setup_MNIST(args.batch_size)
 
-        model = LeNet5(num_classes=10, in_channels=1).to(device)
+        model = LeNet5(num_classes=10, in_channels=1, activation=args.activation).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
         scheduler = None
@@ -1198,6 +1295,14 @@ def datasetDownloader(dataset_name: str):
         OrganAMNIST(split="test", download=True, root=DATA_ORGANAMNIST_DIR)
 
 
+    if dataset_name == "PneumoniaMNIST":
+        print("Downloading PneumoniaMNIST dataset (MedMNIST)...")
+        os.makedirs(DATA_PNEUMONIAMNIST_DIR, exist_ok=True)
+        PneumoniaMNIST(split="train", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+        PneumoniaMNIST(split="val", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+        PneumoniaMNIST(split="test", download=True, root=DATA_PNEUMONIAMNIST_DIR)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1216,7 +1321,14 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
+        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu", "leaky_relu"],
+        help="Activation function to use",
     )
 
     args = parser.parse_args()
@@ -1244,6 +1356,9 @@ if __name__ == "__main__":
     elif train_data_key == "ORGANAMNIST":
         args.data_dir = DATA_ORGANAMNIST_DIR
         datasetDownloader("OrganAMNIST")
+    elif train_data_key == "PNEUMONIAMNIST":
+        args.data_dir = DATA_PNEUMONIAMNIST_DIR
+        datasetDownloader("PneumoniaMNIST")
     else:
         print(f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}")
         args.data_dir = DATA_MNIST_DIR

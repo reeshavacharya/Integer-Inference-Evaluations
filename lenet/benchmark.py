@@ -22,6 +22,20 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.item()
+        return value.detach().cpu().tolist()
+    if hasattr(value, "item") and type(value).__module__.startswith("numpy"):
+        return value.item()
+    return value
+
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 INT8_DIR = os.path.join(THIS_DIR, "INT8")
 FP64_DIR = os.path.join(THIS_DIR, "FixedPoint64")
@@ -118,10 +132,14 @@ def _normalize_bench_name(name: str) -> str:
     name_upper = name.upper()
     if name_upper == "CIFR10":
         return "CIFAR10"
-    if name_upper == "BRAIN-MRI":
+    if name_upper in ("BRAIN-MRI", "BRAIN_MRI"):
         return "Brain-MRI"
-    if name_upper == "NIH-CHEST":
+    if name_upper in ("NIH-CHEST", "NIH_CHEST"):
         return "NIH-CHEST"
+    if name_upper == "ORGANAMNIST":
+        return "OrganAMNIST"
+    if name_upper == "PNEUMONIAMNIST":
+        return "PneumoniaMNIST"
     if name_upper == "MNIST":
         return "MNIST"
     if name_upper == "CIFAR10":
@@ -130,8 +148,6 @@ def _normalize_bench_name(name: str) -> str:
         return "OCTMNIST"
     if name_upper == "BLOODMNIST":
         return "BloodMNIST"
-    if name_upper == "ORGANAMNIST":
-        return "OrganAMNIST"
     raise ValueError(f"Unknown benchmark dataset: {name}")
 
 
@@ -172,7 +188,7 @@ def _train_dataset_for_checkpoint(dataset_name: str) -> None:
 
 
 def _ensure_checkpoint(dataset_name: str) -> None:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     model_path = cfg["model_path"]
 
     if os.path.exists(model_path):
@@ -187,7 +203,7 @@ def _ensure_checkpoint(dataset_name: str) -> None:
 
 
 def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> DataLoader:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     effective_batch_size = batch_size if batch_size is not None else cfg.get("eval_batch_size", 64)
 
     train_mod.train_loader = None
@@ -214,7 +230,7 @@ def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> Dat
 
 
 def _build_model(dataset_name: str) -> torch.nn.Module:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     model = cfg["model"]
     state = torch.load(cfg["model_path"], map_location="cpu")
     model.load_state_dict(state)
@@ -243,12 +259,22 @@ def _compute_batch_metrics(outputs: torch.Tensor, labels: torch.Tensor):
 
 
 def _is_multilabel(dataset_name: str) -> bool:
-    return bool(int8_inference._resolve_infer_config(dataset_name)["is_multilabel"])
+    return bool(int32_inference._resolve_infer_config(dataset_name)["is_multilabel"])
 
 
 def _is_medmnist(dataset_name: str) -> bool:
     name = dataset_name.upper()
-    return name in ["OCTMNIST", "BLOODMNIST", "ORGANAMNIST"]
+    return name in ["OCTMNIST", "BLOODMNIST", "ORGANAMNIST", "PNEUMONIAMNIST"]
+
+def _compute_auc_for_outputs(targets_np, outputs_np):
+    if outputs_np.ndim == 2 and outputs_np.shape[1] == 2:
+        if targets_np.ndim == 2 and targets_np.shape[1] == 2:
+            y_true = targets_np[:, 1]
+        else:
+            y_true = targets_np.ravel()
+        y_score = outputs_np[:, 1]
+        return roc_auc_score(y_true, y_score)
+    return roc_auc_score(targets_np, outputs_np, multi_class="ovr", average="macro")
 
 
 def _format_metric_value(dataset_name: str, value) -> str:
@@ -313,7 +339,7 @@ def _float_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        auc = _compute_auc_for_outputs(targets, outputs)
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
     else:
@@ -335,7 +361,7 @@ def _integer_accuracy(
     print(f"[bench][{dataset_name}][int] Starting benchmark over {target_images}/{total_images} images.")
 
     # Load configuration and the offline compiled integer dictionary
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     int8_model_path = cfg["model_path"].replace(".pth", "_int8.pth")
     
     if not os.path.exists(int8_model_path):
@@ -433,7 +459,7 @@ def _integer_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        auc = _compute_auc_for_outputs(targets, outputs)
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
     else:
@@ -530,7 +556,7 @@ def _fxp64_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        auc = _compute_auc_for_outputs(targets, outputs)
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
     else:
@@ -542,6 +568,7 @@ def _int32_accuracy(
     loader: DataLoader,
     dataset_name: str,
     num_data: Optional[int],
+    activation: str,
 ):
     is_multi = _is_multilabel(dataset_name)
     is_medmnist = _is_medmnist(dataset_name)
@@ -551,8 +578,8 @@ def _int32_accuracy(
 
     print(f"[bench][{dataset_name}][int32] Starting benchmark over {target_images}/{total_images} images.")
 
-    cfg = int32_inference._resolve_infer_config(dataset_name)
-    int32_model_path = cfg["model_path"].replace(".pth", "_int32.pth")
+    cfg = int32_inference._resolve_infer_config(dataset_name, activation)
+    int32_model_path = os.path.join(THIS_DIR, cfg["model_path"].replace(".pth", "_int32.pth"))
 
     if not os.path.exists(int32_model_path):
         raise FileNotFoundError(
@@ -580,26 +607,26 @@ def _int32_accuracy(
         q_x = int32_utils.quantize_tensor(images, scale_in, zp_in, dtype=torch.uint32)
 
         q_x, s_out, z_out = int32_inference.run_integer_layer(
-            q_x, int32_state["conv1"], "conv1", zp_in, apply_relu=True, is_conv=True
+            q_x, int32_state["conv1"], "conv1", zp_in, apply_relu=True, is_conv=True, act_name=activation
         )
         q_x = int32_inference.avg_pool_uint32(q_x, name="bench_pool_after_conv1")
 
         q_x, s_out, z_out = int32_inference.run_integer_layer(
-            q_x, int32_state["conv2"], "conv2", z_out, apply_relu=True, is_conv=True
+            q_x, int32_state["conv2"], "conv2", z_out, apply_relu=True, is_conv=True, act_name=activation
         )
         q_x = int32_inference.avg_pool_uint32(q_x, name="bench_pool_after_conv2")
 
         q_x = q_x.view(q_x.size(0), -1)
 
         q_x, s_out, z_out = int32_inference.run_integer_layer(
-            q_x, int32_state["fc1"], "fc1", z_out, apply_relu=True, is_conv=False
+            q_x, int32_state["fc1"], "fc1", z_out, apply_relu=True, is_conv=False, act_name=activation
         )
         q_x, s_out, z_out = int32_inference.run_integer_layer(
-            q_x, int32_state["fc2"], "fc2", z_out, apply_relu=True, is_conv=False
+            q_x, int32_state["fc2"], "fc2", z_out, apply_relu=True, is_conv=False, act_name=activation
         )
 
         q_out, final_s, final_z = int32_inference.run_integer_layer(
-            q_x, int32_state["fc3"], "fc3", z_out, apply_relu=False, is_conv=False
+            q_x, int32_state["fc3"], "fc3", z_out, apply_relu=False, is_conv=False, act_name=activation
         )
 
         int_logits = q_out.to(torch.float64)
@@ -630,7 +657,7 @@ def _int32_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        auc = _compute_auc_for_outputs(targets, outputs)
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
     else:
@@ -723,7 +750,7 @@ def _fxp32_accuracy(
         return 100.0 * correct / max(total, 1)
 
 
-def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None):
+def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None, activation: str = "relu"):
     _disable_heavy_debug_logs()
 
     targets = dataset_names or BENCHMARK_DATASETS
@@ -748,7 +775,7 @@ def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional
             fxp64_acc = _fxp64_accuracy(model, loader, name, num_data)
             per_dataset["fxp64"] = fxp64_acc
         if "int32" in selected_modes:
-            int32_acc = _int32_accuracy(model, loader, name, num_data)
+            int32_acc = _int32_accuracy(model, loader, name, num_data, activation=activation)
             per_dataset["int32"] = int32_acc
         if "fxp32" in selected_modes:
             fxp32_acc = _fxp32_accuracy(model, loader, name, num_data)
@@ -767,12 +794,14 @@ def _mode_suffix(mode: Optional[str]) -> str:
     return mode.replace("-", "_")
 
 
-def _results_filename(single_dataset_name: Optional[str], mode: Optional[str]) -> str:
+def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], activation: str) -> str:
     mode_part = _mode_suffix(mode)
+
     if single_dataset_name is None:
-        return f"benchmark_results_{mode_part}.json"
+        return f"benchmark_results_{mode_part}_{activation}.json"
+    
     ds_part = single_dataset_name.lower().replace("-", "_")
-    return f"benchmark_results_{ds_part}_{mode_part}.json"
+    return f"benchmark_results_{ds_part}_{mode_part}_{activation}.json"
 
 
 if __name__ == "__main__":
@@ -798,21 +827,43 @@ if __name__ == "__main__":
         default=None,
         help="Benchmark a specific mode. If omitted, benchmarks all 5 modes.",
     )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu", "leaky_relu"],
+        help="Activation function to evaluate (mainly used for int32 in this runner)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for inference",
+    )
     args = parser.parse_args()
 
-    if args.bench is None:
-        targets = None
-        single_name = None
-    else:
-        single_name = _normalize_bench_name(args.bench)
-        targets = [single_name]
+    targets = None
+    if args.bench:
+        targets = [_normalize_bench_name(args.bench)]
 
-    metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode)
-    results_file = _results_filename(single_name, args.mode)
-    with open(results_file, "w") as f:
-        json.dump(metrics, f, indent=2)
+    final_results = benchmark(targets, args.num_data, args.mode, args.activation)
 
-    print(f"\nSaved {results_file} with:")
-    for ds, vals in metrics.items():
+    bench_root = os.path.join(THIS_DIR, "benchmark-results")
+    os.makedirs(bench_root, exist_ok=True)
+
+    first_saved_path = None
+    for ds, vals in final_results.items():
+        ds_part = ds.lower().replace("-", "_")
+        per_ds_dir = os.path.join(bench_root, ds_part)
+        os.makedirs(per_ds_dir, exist_ok=True)
+        per_file = _results_filename(ds, args.mode, args.activation)
+        per_path = os.path.join(per_ds_dir, per_file)
+        with open(per_path, "w") as pf:
+            json.dump(_json_safe({ds: vals}), pf, indent=2)
+        if first_saved_path is None:
+            first_saved_path = per_path
+
+    print(f"\nSaved benchmark results under {bench_root}:")
+    for ds, vals in final_results.items():
         stats = " | ".join([f"{k}={_format_metric_value(ds, v)}" for k, v in vals.items()])
         print(f"  {ds}: {stats}")

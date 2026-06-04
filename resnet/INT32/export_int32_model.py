@@ -53,7 +53,7 @@ def _activation_label(base_name, activation):
     return f"{base_name}_{activation.lower()}"
 
 
-def process_conv(conv, bn, layer_name, scale_in):
+def process_conv(conv, bn, layer_name, scale_in, activation):
     w_folded, b_folded = fold_conv_bn_eval(conv, bn)
 
     scale_w, zp_w = get_quantization_params(w_folded, num_bits=WEIGHT_BITS)
@@ -85,17 +85,16 @@ def process_conv(conv, bn, layer_name, scale_in):
         "padding": conv.padding[0] if hasattr(conv, 'padding') else 0,
     }
 
-    # --- NEW: Generate and Embed the LUT ---
-    # Since GELU acts on the output of the downscaler, its input grid is 'conv_scale_out'
-    q_min, q_max, lut = generate_layer_gelu_lut(
-        in_scale=conv_scale_out, 
-        in_zp=conv_zp_out, 
-        out_scale=act_scale_out, 
-        out_zp=act_zp_out
-    )
-    export_dict["gelu_q_min"] = q_min
-    export_dict["gelu_q_max"] = q_max
-    export_dict["gelu_lut"] = lut.cpu()
+    if activation == "gelu":
+        q_min, q_max, lut = generate_layer_gelu_lut(
+            in_scale=conv_scale_out, 
+            in_zp=conv_zp_out, 
+            out_scale=act_scale_out, 
+            out_zp=act_zp_out
+        )
+        export_dict["gelu_q_min"] = q_min
+        export_dict["gelu_q_max"] = q_max
+        export_dict["gelu_lut"] = lut.cpu()
 
     return export_dict, act_scale_out
 
@@ -211,9 +210,10 @@ def main(model_path, activation="relu"):
                 block.bn1,
                 _activation_label(f"{prefix}_conv1", activation),
                 s_out,
+                activation
             )
             block_data["conv2"], s_out2 = process_conv(
-                block.conv2, block.bn2, f"{prefix}_conv2_out", s_out1
+                block.conv2, block.bn2, f"{prefix}_conv2_out", s_out1, activation
             )
 
             if not isinstance(block.shortcut, torch.nn.Identity):
@@ -222,18 +222,20 @@ def main(model_path, activation="relu"):
                     block.shortcut[1],
                     f"{prefix}_shortcut_out",
                     s_out,
+                    activation
                 )
 
             out_range = activation_ranges[
                 _activation_label(f"{prefix}_out", activation)
             ]
-            # 1. Generate the localized LUT for the addition block's output
-            add_q_min, add_q_max, add_lut = generate_layer_gelu_lut(
-                in_scale=out_range["in_scale"], 
-                in_zp=out_range["in_zero_point"], 
-                out_scale=out_range["out_scale"], 
-                out_zp=out_range["out_zero_point"]
-            )
+            if activation == "gelu":
+                # 1. Generate the localized LUT for the addition block's output
+                add_q_min, add_q_max, add_lut = generate_layer_gelu_lut(
+                    in_scale=out_range["in_scale"], 
+                    in_zp=out_range["in_zero_point"], 
+                    out_scale=out_range["out_scale"], 
+                    out_zp=out_range["out_zero_point"]
+                )
             
             # 2. Precompute addition requantization multipliers (offline, float-free at inference)
             add_scale_out = out_range["in_scale"]
@@ -251,14 +253,15 @@ def main(model_path, activation="relu"):
                 "conv_zp_out": out_range["in_zero_point"],
                 "act_scale_out": out_range["out_scale"],
                 "act_zp_out": out_range["out_zero_point"],
-                "gelu_q_min": add_q_min,
-                "gelu_q_max": add_q_max,
-                "gelu_lut": add_lut.cpu(),
                 "add_M0_1": add_M0_1.to(torch.int32),
                 "add_shift_1": add_shift_1.to(torch.int32),
                 "add_M0_2": add_M0_2.to(torch.int32),
                 "add_shift_2": add_shift_2.to(torch.int32),
             }
+            if activation == "gelu":
+                block_data["add"]["gelu_q_min"] = add_q_min
+                block_data["add"]["gelu_q_max"] = add_q_max
+                block_data["add"]["gelu_lut"] = add_lut.cpu()
             
             int32_state[prefix] = block_data
             s_out = out_range["out_scale"]

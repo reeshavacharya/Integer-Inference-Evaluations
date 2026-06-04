@@ -70,7 +70,7 @@ def _sample_loader_dataset(loader: torch.utils.data.DataLoader, max_samples: int
     )
 
 
-def _get_test_loader(cfg, batch_size: int = 1):
+def _get_train_loader(cfg, batch_size: int = 1):
     # Prevent stale globals in resnet18 from interfering
     import resnet18 as train_mod
 
@@ -86,15 +86,14 @@ def _get_test_loader(cfg, batch_size: int = 1):
         and hasattr(setup_result[0], "dataset")
     ):
         loader = _sample_loader_dataset(setup_result[0], max_samples=1000)
-        train_mod.validate_loader_preprocessing(loader, cfg["display"], stage="calibration")
         return loader
 
-    if train_mod.test_loader is not None:
-        sampled_loader = _sample_loader_dataset(train_mod.test_loader, max_samples=1000)
+    if train_mod.train_loader is not None:
+        sampled_loader = _sample_loader_dataset(train_mod.train_loader, max_samples=1000)
         train_mod.validate_loader_preprocessing(sampled_loader, cfg["display"], stage="calibration")
         return sampled_loader
 
-    raise RuntimeError(f"Could not resolve test loader for dataset: {cfg['display']}")
+    raise RuntimeError(f"Could not resolve train loader for dataset: {cfg['display']}")
 
 
 # -----------------------------------
@@ -177,7 +176,7 @@ def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None, activ
     display = cfg["display"]
 
     print(f"[calib] Dataset: {display} — building test loader (batch_size={batch_size})")
-    loader = _get_test_loader(cfg, batch_size=batch_size)
+    loader = _get_train_loader(cfg, batch_size=batch_size)
 
     # Build model and load weights (on CPU; calibration is offline)
     model = cfg["model"]
@@ -191,7 +190,7 @@ def main(dataset: str, batch_size: int = 1, out_dir: Optional[str] = None, activ
     aggregated = {}
 
     total = len(loader.dataset)
-    print(f"[calib] Running calibration forward passes over {total} test samples...")
+    print(f"[calib] Running calibration forward passes over {total} training samples...")
 
     with torch.no_grad():
         for idx, (img, label) in enumerate(loader, 1):

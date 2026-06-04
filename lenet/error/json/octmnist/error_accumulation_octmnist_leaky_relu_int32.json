@@ -1,0 +1,106 @@
+{
+  "dataset": "OCTMNIST",
+  "activation": "leaky_relu",
+  "mode": "int32",
+  "layer_metrics": {
+    "conv1_pre_act": {
+      "scale": 0.014036783517575731,
+      "zero_point": 0,
+      "cosine_similarity": 0.9998529359954162,
+      "sqnr_db": 35.24830707530136,
+      "mean_absolute_error": 0.0041365165415866885,
+      "median_absolute_error": 0.0037343587799399465,
+      "std_absolute_error": 0.0029913171997377943,
+      "max_absolute_error": 0.029780838536281218,
+      "q_pct_negative": 70.15923261642456
+    },
+    "conv1_leaky_relu": {
+      "scale": 0.014036783517575731,
+      "zero_point": 0,
+      "cosine_similarity": 0.9998529359954162,
+      "sqnr_db": 35.24830707530136,
+      "mean_absolute_error": 0.0041365165415866885,
+      "median_absolute_error": 0.0037343587799399465,
+      "std_absolute_error": 0.0029913171997377943,
+      "max_absolute_error": 0.029780838536281218,
+      "q_pct_negative": 70.15923261642456
+    },
+    "conv2_pre_act": {
+      "scale": 0.016002733567181755,
+      "zero_point": 0,
+      "cosine_similarity": 0.6753067704537019,
+      "sqnr_db": 1.302982559306989,
+      "mean_absolute_error": 0.34252536130725253,
+      "median_absolute_error": 0.23254329286077446,
+      "std_absolute_error": 0.3560692263172729,
+      "max_absolute_error": 3.913263045864946,
+      "q_pct_negative": 60.764312744140625
+    },
+    "conv2_leaky_relu": {
+      "scale": 0.016002733567181755,
+      "zero_point": 0,
+      "cosine_similarity": 0.6753067704537019,
+      "sqnr_db": 1.302982559306989,
+      "mean_absolute_error": 0.34252536130725253,
+      "median_absolute_error": 0.23254329286077446,
+      "std_absolute_error": 0.3560692263172729,
+      "max_absolute_error": 3.913263045864946,
+      "q_pct_negative": 60.764312744140625
+    },
+    "fc1_pre_act": {
+      "scale": 0.030937666051528034,
+      "zero_point": 0,
+      "cosine_similarity": 0.2679442766016662,
+      "sqnr_db": -0.6251873318475587,
+      "mean_absolute_error": 0.7353773510734323,
+      "median_absolute_error": 0.47804234720328276,
+      "std_absolute_error": 0.8055605452166031,
+      "max_absolute_error": 8.61438248017255,
+      "q_pct_negative": 49.45638030767441
+    },
+    "fc1_leaky_relu": {
+      "scale": 0.030937666051528034,
+      "zero_point": 0,
+      "cosine_similarity": 0.2679442766016662,
+      "sqnr_db": -0.6251873318475587,
+      "mean_absolute_error": 0.7353773510734323,
+      "median_absolute_error": 0.47804234720328276,
+      "std_absolute_error": 0.8055605452166031,
+      "max_absolute_error": 8.61438248017255,
+      "q_pct_negative": 49.45638030767441
+    },
+    "fc2_pre_act": {
+      "scale": 0.03268851859896791,
+      "zero_point": 0,
+      "cosine_similarity": 0.25545046651757963,
+      "sqnr_db": -0.9116444980661138,
+      "mean_absolute_error": 0.5758411203084708,
+      "median_absolute_error": 0.1478723558871185,
+      "std_absolute_error": 1.8070480152260762,
+      "max_absolute_error": 28.860825650832233,
+      "q_pct_negative": 48.53515625
+    },
+    "fc2_leaky_relu": {
+      "scale": 0.03268851859896791,
+      "zero_point": 0,
+      "cosine_similarity": 0.25545046651757963,
+      "sqnr_db": -0.9116444980661138,
+      "mean_absolute_error": 0.5758411203084708,
+      "median_absolute_error": 0.1478723558871185,
+      "std_absolute_error": 1.8070480152260762,
+      "max_absolute_error": 28.860825650832233,
+      "q_pct_negative": 48.53515625
+    },
+    "fc3": {
+      "scale": 0.013903524361404717,
+      "zero_point": 111,
+      "cosine_similarity": 0.125792670215414,
+      "sqnr_db": -0.8401750030454324,
+      "mean_absolute_error": 2.354709472376699,
+      "median_absolute_error": 1.7887504785230346,
+      "std_absolute_error": 1.9694668690735138,
+      "max_absolute_error": 11.564176690344716,
+      "q_pct_negative": 98.828125
+    }
+  }
+}
