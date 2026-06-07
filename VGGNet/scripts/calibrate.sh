@@ -58,7 +58,7 @@ if [ -n "$FILTER_ACTIVATION" ] && [ ${#ACTIVATIONS[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Change to lenet directory (assumes script is in lenet/scripts/)
+# Change to VGGNet directory (assumes script is in VGGNet/scripts/)
 cd "$(dirname "$0")/.."
 
 echo "[*] Calibration starting..."

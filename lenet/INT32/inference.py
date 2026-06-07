@@ -101,9 +101,9 @@ def _resolve_infer_config(infer_data: str, activation: str = "relu"):
             "eval_batch_size": 64,
         }
 
-    if name == "BRAIN-MRI" or name == "BRAIN_MRI":
+    if name == "BRAIN_MRI":
         return {
-            "display": "Brain-MRI",
+            "display": "Brain_MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
             "model": train_mod.MedicalLeNet(num_classes=4, in_channels=1, activation=activation),
             "model_path": f"best_lenet5_{activation}_brain_mri.pth",
@@ -576,7 +576,7 @@ if __name__ == "__main__":
         "--data",
         type=str,
         required=True,
-        help="Dataset key (MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST)",
+        help="Dataset key (MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST)",
     )
     parser.add_argument(
         "--skip-float",

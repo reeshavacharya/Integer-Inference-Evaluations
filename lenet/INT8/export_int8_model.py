@@ -41,8 +41,8 @@ def _normalize_dataset_key(name: str) -> str:
 		return "BloodMNIST"
 	if key == "ORGANAMNIST":
 		return "OrganAMNIST"
-	if key == "BRAIN-MRI":
-		return "Brain-MRI"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
 	if key == "NIH-CHEST":
 		return "NIH-CHEST"
 	if key == "MNIST":
@@ -59,7 +59,7 @@ def _infer_dataset_from_filename(model_path: str) -> str:
 	if "cifar10" in filename or "cifr10" in filename:
 		return "CIFAR10"
 	if "brain_mri" in filename or "brain-mri" in filename:
-		return "Brain-MRI"
+		return "Brain_MRI"
 	if "organ" in filename or "organamnist" in filename:
 		return "OrganAMNIST"
 	if "blood" in filename or "bloodmnist" in filename:
@@ -216,7 +216,7 @@ if __name__ == "__main__":
 		type=str,
 		required=True,
 		help=(
-			"Dataset key (MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, "
+			"Dataset key (MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, "
 			"BloodMNIST, OrganAMNIST) or a checkpoint path"
 		),
 	)

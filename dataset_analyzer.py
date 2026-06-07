@@ -22,7 +22,7 @@ from resnet import resnet18 as resnet_mod
 DATASET_SETUP_FNS = {
     "MNIST":       setup_MNIST,
     "CIFAR10":     setup_CIFAR10,
-    "Brain-MRI":   setup_Brain_MRI,
+    "Brain_MRI":   setup_Brain_MRI,
     # "NIH-CHEST":   setup_NIH_Chest,
     "OCTMNIST":    setup_OCTMNIST,
     "OrganAMNIST": setup_OrganAMNIST,
@@ -83,7 +83,7 @@ def gradient_centroid_deviation(grad_mag: np.ndarray) -> float:
     Interpretation
     --------------
     Low  → gradient energy is concentrated near the image centre
-           (well-centred, compact ROI — e.g. Brain-MRI, BloodMNIST).
+           (well-centred, compact ROI — e.g. Brain_MRI, BloodMNIST).
     High → energy is off-centre or spread towards the periphery
            (scattered / irregular ROI — e.g. NIH-CHEST, OCTMNIST).
     """
@@ -147,7 +147,7 @@ def canny_edge_density(gray: np.ndarray) -> float:
     Interpretation
     --------------
     Low  → few, clean boundaries — geometrically simple, compact shapes
-           (circles, smooth blobs).  Typical of Brain-MRI and BloodMNIST.
+           (circles, smooth blobs).  Typical of Brain_MRI and BloodMNIST.
     High → many edges — complex, fragmented, or textured boundaries.
            Typical of NIH-CHEST (overlapping anatomical structures) or
            OCTMNIST (horizontal retinal layer bands across full width).
@@ -286,7 +286,7 @@ def plot_cross_dataset_comparison(all_stats: dict, output_dir: str):
     (both are dimensionless proportions).  Spatial gradient entropy
     uses its own right axis (bits).
 
-    This is the key figure for the hypothesis: Brain-MRI and BloodMNIST
+    This is the key figure for the hypothesis: Brain_MRI and BloodMNIST
     should cluster at low centroid deviation AND low edge density,
     separate from the rest.
     """
@@ -369,7 +369,7 @@ def _resolve_test_loader(dataset_name: str, batch_size: int = 64):
 DATASETS = [
     "MNIST",
     "CIFAR10",
-    "Brain-MRI",
+    "Brain_MRI",
     # "NIH-CHEST",
     "OCTMNIST",
     "OrganAMNIST",

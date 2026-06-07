@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # Define available options
-ALL_DATASETS=("MNIST" "CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST" "NIH-CHEST")
+ALL_DATASETS=("MNIST" "CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 ALL_MODES=("int32")
 
@@ -92,19 +92,12 @@ for mode in "${MODES[@]}"; do
         for ds in "${DATASETS[@]}"; do
             slug=$(echo "$ds" | tr '[:upper:]' '[:lower:]' | sed 's/[ -]/_/g')
             
-            # Special case for NIH-CHEST due to its original filename
-            if [ "$ds" = "NIH-CHEST" ]; then
-                quant_file="best_vgg19_${act}_NIH_Chest_XRay.pth"
-            else
-                quant_file="best_vgg19_${act}_${slug}.pth"
-            fi
-            
             echo ""
             echo "[+] Exporting $mode model for $ds with activation=$act"
             if [ "$mode" = "int8" ]; then
-                python3 INT8/export_int8_model.py --quantize "$quant_file" --activation "$act"
+                python3 INT8/export_int8_model.py --quantize "$ds" --activation "$act"
             else
-                python3 INT32/export_int32_model.py --quantize "$quant_file" --activation "$act"
+                python3 INT32/export_int32_model.py --quantize "$ds" --activation "$act"
             fi
         done
     done

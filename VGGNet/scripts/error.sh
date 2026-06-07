@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Define available options
-ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST" "MNIST" "NIH-CHEST")
+ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "BloodMNIST" "OrganAMNIST" "PneumoniaMNIST" "MNIST")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 ALL_MODES=("int32")
 

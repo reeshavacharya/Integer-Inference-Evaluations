@@ -224,6 +224,6 @@ def integer_gelu_lut(q_tensor, lut, q_min_bound, q_max_bound):
     indices = q_clamped.to(torch.int64) - q_min_32.to(torch.int64)
     
     # 3. Vectorized Table Lookup (No math, just memory fetching!)
-    q_out = lut[indices]
-    
+    # Temporarily upcast lut to int64 for indexing since PyTorch lacks index_cpu for UInt32
+    q_out = lut.to(torch.int64)[indices]
     return q_out.to(torch.int32)

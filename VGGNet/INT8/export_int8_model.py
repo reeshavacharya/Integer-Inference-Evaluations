@@ -25,10 +25,8 @@ def _normalize_dataset_key(name: str) -> str:
     key = name.strip().upper().replace("_", "-").replace(" ", "-")
     if key == "CIFR10":
         return "CIFAR10"
-    if key == "BRAIN-MRI":
-        return "Brain-MRI"
-    if key == "NIH-CHEST":
-        return "NIH-CHEST"
+    if key == "BRAIN_MRI":
+        return "Brain_MRI"
     if key == "MNIST":
         return "MNIST"
     if key == "CIFAR10":
@@ -57,18 +55,13 @@ def _dataset_spec(dataset: str):
             "in_channels": 3,
             "num_classes": 10,
         },
-        "Brain-MRI": {
-            "dataset": "Brain-MRI",
+        "Brain_MRI": {
+            "dataset": "Brain_MRI",
             "model_path": os.path.join(VGG_DIR, "best_vgg19_brain_mri.pth"),
             "in_channels": 1,
             "num_classes": 4,
         },
-        "NIH-CHEST": {
-            "dataset": "NIH-CHEST",
-            "model_path": os.path.join(VGG_DIR, "best_vgg19_NIH_Chest_XRay.pth"),
-            "in_channels": 1,
-            "num_classes": 15,
-        },
+
         "OCTMNIST": {
             "dataset": "OCTMNIST",
             "model_path": os.path.join(VGG_DIR, "best_vgg19_octmnist.pth"),
@@ -104,9 +97,8 @@ def _infer_dataset_from_filename(model_path: str):
     if "cifar10" in filename or "cifr10" in filename:
         return "CIFAR10"
     if "brain_mri" in filename or "brain-mri" in filename:
-        return "Brain-MRI"
-    if "chest" in filename:
-        return "NIH-CHEST"
+        return "Brain_MRI"
+
     raise ValueError(
         "Could not infer dataset from checkpoint filename. "
         "Use a named checkpoint like best_vgg19_mnist.pth or pass a dataset key to --quantize."
@@ -274,7 +266,7 @@ if __name__ == "__main__":
         "--quantize",
         type=str,
         required=True,
-        help="Dataset key (MNIST, CIFAR10, Brain-MRI, NIH-CHEST) or path to a floating-point .pth checkpoint",
+        help="Dataset key (MNIST, CIFAR10, Brain_MRI) or path to a floating-point .pth checkpoint",
     )
     args = parser.parse_args()
     main(args.quantize)

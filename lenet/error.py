@@ -97,25 +97,22 @@ class LayerMetrics:
 
 
 def _normalize_dataset_name(dataset_name: str) -> str:
-    key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
-    if key == "CIFR10":
-        return "CIFAR10"
-    if key == "BRAIN-MRI":
-        return "Brain-MRI"
-    if key == "NIH-CHEST":
-        return "NIH-CHEST"
-    if key == "MNIST":
-        return "MNIST"
-    if key == "CIFAR10":
-        return "CIFAR10"
-    if key == "OCTMNIST":
-        return "OCTMNIST"
-    if key == "BLOODMNIST":
-        return "BloodMNIST"
-    if key == "ORGANAMNIST":
-        return "OrganAMNIST"
-
-    raise ValueError(f"Unknown dataset: {dataset_name}")
+	key = dataset_name.strip().upper().replace(" ", "-")
+	if key == "MNIST":
+		return "MNIST"
+	if key == "CIFR10":
+		return "CIFAR10"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
+	if key == "OCTMNIST":
+		return "OCTMNIST"
+	if key == "ORGANAMNIST":
+		return "OrganAMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
+	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 def _calibration_file_name(dataset_display: str):
@@ -384,7 +381,7 @@ if __name__ == "__main__":
         "--CIFAR10", dest="cifar10", action="store_true", help="Evaluate CIFAR10"
     )
     parser.add_argument(
-        "--Brain-MRI", dest="brain_mri", action="store_true", help="Evaluate Brain-MRI"
+        "--Brain_MRI", dest="brain_mri", action="store_true", help="Evaluate Brain_MRI"
     )
     parser.add_argument(
         "--NIH-CHEST", dest="nih_chest", action="store_true", help="Evaluate NIH-CHEST"
@@ -416,7 +413,7 @@ if __name__ == "__main__":
     for enabled, dataset_name in [
         (args.mnist, "MNIST"),
         (args.cifar10, "CIFAR10"),
-        (args.brain_mri, "Brain-MRI"),
+        (args.brain_mri, "Brain_MRI"),
         (args.nih_chest, "NIH-CHEST"),
         (args.octmnist, "OCTMNIST"),
         (args.bloodmnist, "BloodMNIST"),
@@ -431,7 +428,7 @@ if __name__ == "__main__":
         selected = [
             "MNIST",
             "CIFAR10",
-            "Brain-MRI",
+            "Brain_MRI",
             "NIH-CHEST",
             "OCTMNIST",
             "BloodMNIST",

@@ -48,8 +48,8 @@ def _normalize_dataset_key(name: str) -> str:
         return "OrganAMNIST"
     if key == "PNEUMONIAMNIST":
         return "PneumoniaMNIST"
-    if key == "BRAIN-MRI":
-        return "Brain-MRI"
+    if key == "BRAIN_MRI":
+        return "Brain_MRI"
     if key == "NIH-CHEST":
         return "NIH-CHEST"
     if key == "MNIST":
@@ -79,7 +79,7 @@ def _infer_dataset_from_filename(model_path: str) -> str:
     if "cifar10" in filename or "cifr10" in filename:
         return "CIFAR10"
     if "brain_mri" in filename or "brain-mri" in filename:
-        return "Brain-MRI"
+        return "Brain_MRI"
     if "chest" in filename or "nih" in filename:
         return "NIH-CHEST"
     raise ValueError(
@@ -267,10 +267,10 @@ def main(quantize_arg: str, activation: str):
 
     load_calibration_ranges(cfg["display"], activation)
 
-    int8_state = {"meta": {}}
+    int32_state = {"meta": {}}
     scale_in = activation_ranges["conv1"]["in_scale"]
-    int8_state["meta"]["in_scale"] = scale_in
-    int8_state["meta"]["in_zp"] = torch.tensor(activation_ranges["conv1"]["in_zero_point"], dtype=torch.int32)
+    int32_state["meta"]["in_scale"] = scale_in
+    int32_state["meta"]["in_zp"] = torch.tensor(activation_ranges["conv1"]["in_zero_point"], dtype=torch.int32)
 
     if isinstance(model, train_mod.MedicalLeNet):
         conv1, bn1 = model.features[0], model.features[1]
@@ -285,14 +285,14 @@ def main(quantize_arg: str, activation: str):
         fc2 = model.classifier[3]
         fc3 = model.classifier[5]
 
-    int8_state["conv1"], s_out = process_conv(conv1, bn1, _activation_label("conv1", activation), scale_in, activation)
-    int8_state["conv2"], s_out = process_conv(conv2, bn2, _activation_label("conv2", activation), s_out, activation)
-    int8_state["fc1"], s_out = process_fc(fc1, _activation_label("fc1", activation), s_out, activation)
-    int8_state["fc2"], s_out = process_fc(fc2, _activation_label("fc2", activation), s_out, activation)
-    int8_state["fc3"], _ = process_fc(fc3, "fc3", s_out, activation)
+    int32_state["conv1"], s_out = process_conv(conv1, bn1, _activation_label("conv1", activation), scale_in, activation)
+    int32_state["conv2"], s_out = process_conv(conv2, bn2, _activation_label("conv2", activation), s_out, activation)
+    int32_state["fc1"], s_out = process_fc(fc1, _activation_label("fc1", activation), s_out, activation)
+    int32_state["fc2"], s_out = process_fc(fc2, _activation_label("fc2", activation), s_out, activation)
+    int32_state["fc3"], _ = process_fc(fc3, "fc3", s_out, activation)
 
     out_path = os.path.join(LENET_DIR, os.path.basename(model_path).replace(".pth", "_int32.pth"))
-    torch.save(int8_state, out_path)
+    torch.save(int32_state, out_path)
     print(f"[+] Successfully exported integer-only LeNet model to: {out_path}")
 
 
@@ -303,7 +303,7 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help=(
-            "Dataset key (MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, "
+            "Dataset key (MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, "
             "BloodMNIST, OrganAMNIST, PneumoniaMNIST) or a checkpoint path"
         ),
     )

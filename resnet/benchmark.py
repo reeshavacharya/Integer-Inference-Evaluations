@@ -39,7 +39,7 @@ def _compute_auc_for_outputs(targets_np, outputs_np):
         return roc_auc_score(y_true, y_score)
 
     # Otherwise fall back to multiclass AUC
-    return roc_auc_score(targets_np, outputs_np, multi_class="ovr", average="macro")
+    return roc_auc_score(targets_np, outputs_np, multi_class="ovr", average="macro", labels=list(range(outputs_np.shape[1])))
 
 
 def _json_safe(value):

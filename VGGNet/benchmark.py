@@ -33,7 +33,7 @@ for path in (THIS_DIR,):
 
 
 def _is_medmnist(dataset_name: str) -> bool:
-    return dataset_name.upper() in ["OCTMNIST", "BLOODMNIST", "ORGANAMNIST"]
+    return dataset_name.upper() in ["OCTMNIST", "BLOODMNIST", "ORGANAMNIST", "PNEUMONIAMNIST"]
 
 
 def _load_module(module_name: str, file_path: str, prepend_dir: str):
@@ -88,8 +88,7 @@ fp32_inference = _load_module(
 BENCHMARK_DATASETS = [
     "MNIST",
     "CIFAR10",
-    "Brain-MRI",
-    "NIH-CHEST",
+    "Brain_MRI",
     "OCTMNIST",
     "BloodMNIST",
     "OrganAMNIST",
@@ -136,10 +135,9 @@ def _normalize_bench_name(name: str) -> str:
         return "MNIST"
     if name_upper == "CIFAR10":
         return "CIFAR10"
-    if name_upper == "BRAIN-MRI":
-        return "Brain-MRI"
-    if name_upper == "NIH-CHEST":
-        return "NIH-CHEST"
+    if name_upper == "BRAIN_MRI":
+        return "Brain_MRI"
+
     if name_upper == "OCTMNIST":
         return "OCTMNIST"
     if name_upper == "BLOODMNIST":
@@ -152,7 +150,7 @@ def _normalize_bench_name(name: str) -> str:
 
 
 def _is_multilabel(dataset_name: str) -> bool:
-    return dataset_name.upper() == "NIH-CHEST"
+    return bool(int32_inference._resolve_infer_config(dataset_name)["is_multilabel"])
 
 
 def _format_metric_value(dataset_name: str, value) -> str:
@@ -164,13 +162,9 @@ def _format_metric_value(dataset_name: str, value) -> str:
 
 
 def _ensure_checkpoint(dataset_name: str, activation: str) -> None:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    
-    if dataset_name == "NIH-CHEST":
-        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
-    else:
-        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
+    model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
 
     if os.path.exists(model_path):
         return
@@ -181,7 +175,7 @@ def _ensure_checkpoint(dataset_name: str, activation: str) -> None:
 
 
 def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> DataLoader:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     effective_batch_size = (
         batch_size if batch_size is not None else cfg["eval_batch_size"]
     )
@@ -210,15 +204,12 @@ def _get_test_loader(dataset_name: str, batch_size: Optional[int] = None) -> Dat
 
 
 def _build_model(dataset_name: str, activation: str) -> torch.nn.Module:
-    cfg = int8_inference._resolve_infer_config(dataset_name)
+    cfg = int32_inference._resolve_infer_config(dataset_name)
     model = cfg["model"]
     model.activation = activation
     
-    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    if dataset_name == "NIH-CHEST":
-        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"))
-    else:
-        model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
+    slug = dataset_name.lower().replace("-", "_").replace(" ", "_")
+    model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}.pth"))
 
     state = torch.load(model_path, map_location="cpu")
     if list(state.keys())[0].startswith("module."):
@@ -255,12 +246,9 @@ def _format_metric_value(dataset_name: str, value) -> str:
 
 
 def _load_int8_state(dataset_name: str, activation: str):
-    cfg = int8_inference._resolve_infer_config(dataset_name)
-    slug = dataset_name.lower().replace(" ", "_").replace("-", "_")
-    if dataset_name == "NIH-CHEST":
-        int8_model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay_int8.pth"))
-    else:
-        int8_model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}_int8.pth"))
+    cfg = int32_inference._resolve_infer_config(dataset_name)
+    slug = dataset_name.lower().replace("-", "_").replace(" ", "_")
+    int8_model_path = os.path.abspath(os.path.join(THIS_DIR, f"best_vgg19_{activation}_{slug}_int8.pth"))
 
     if not os.path.exists(int8_model_path):
         raise FileNotFoundError(
@@ -326,7 +314,10 @@ def _float_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        if outputs.shape[1] == 2:
+            auc = roc_auc_score(targets, outputs[:, 1])
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
 
@@ -434,7 +425,10 @@ def _int8_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        if outputs.shape[1] == 2:
+            auc = roc_auc_score(targets, outputs[:, 1])
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
 
@@ -503,7 +497,13 @@ def _int32_accuracy(
                 activation=activation,
             )
 
-        q_pooled = torch.nn.functional.adaptive_max_pool2d(q_x.to(torch.float32), (7, 7)).to(torch.int32)
+        if q_x.shape[2] == 1 and q_x.shape[3] == 1:
+            q_pooled = q_x.expand(-1, -1, 7, 7)
+        elif q_x.shape[2] == 7 and q_x.shape[3] == 7:
+            q_pooled = q_x
+        else:
+            raise ValueError(f"Unexpected spatial size before classifier: {q_x.shape}")
+            
         q_fc_in = torch.flatten(q_pooled, 1)
 
         fc_in_scale = int32_state["classifier_0"]["scale_in"]
@@ -557,7 +557,10 @@ def _int32_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        if outputs.shape[1] == 2:
+            auc = roc_auc_score(targets, outputs[:, 1])
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
 
@@ -624,7 +627,10 @@ def _fxp64_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        if outputs.shape[1] == 2:
+            auc = roc_auc_score(targets, outputs[:, 1])
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
 
@@ -691,7 +697,10 @@ def _fxp32_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        if outputs.shape[1] == 2:
+            auc = roc_auc_score(targets, outputs[:, 1])
+        else:
+            auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
 
@@ -761,17 +770,12 @@ def _results_filename(single_dataset_name: Optional[str], mode: Optional[str], a
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--NIH-CHEST",
-        dest="nih_chest",
-        action="store_true",
-        help="Benchmark only NIH-CHEST using the custom test split",
-    )
+
     parser.add_argument(
         "--bench",
         type=str,
         default=None,
-        help="Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST",
+        help="Benchmark a single dataset: MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST",
     )
     parser.add_argument(
         "--num_data",
@@ -795,10 +799,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.nih_chest:
-        targets = ["NIH-CHEST"]
-        single_name = "NIH-CHEST"
-    elif args.bench is None:
+
+    if args.bench is None:
         targets = None
         single_name = None
     else:

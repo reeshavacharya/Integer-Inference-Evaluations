@@ -327,7 +327,7 @@ Train the supported datasets:
 ```bash
 python lenet/lenet5.py --train_data MNIST
 python lenet/lenet5.py --train_data CIFAR10
-python lenet/lenet5.py --train_data Brain-MRI
+python lenet/lenet5.py --train_data Brain_MRI
 ```
 
 ### 2. Random Test-Sample Checks
@@ -337,24 +337,24 @@ The inference scripts draw a random sample from the deterministic 10% test split
 INT8 path:
 
 ```bash
-python lenet/INT8/inference.py --infer Brain-MRI
-python lenet/INT8/inference.py --infer Brain-MRI --int
-python lenet/INT8/inference.py --infer Brain-MRI --floating-point
+python lenet/INT8/inference.py --infer Brain_MRI
+python lenet/INT8/inference.py --infer Brain_MRI --int
+python lenet/INT8/inference.py --infer Brain_MRI --floating-point
 ```
 
 64-bit fixed-point path:
 
 ```bash
-python lenet/FixedPoint64/inference.py --infer Brain-MRI
-python lenet/FixedPoint64/inference.py --infer Brain-MRI --fixed-point
-python lenet/FixedPoint64/inference.py --infer Brain-MRI --floating-point
+python lenet/FixedPoint64/inference.py --infer Brain_MRI
+python lenet/FixedPoint64/inference.py --infer Brain_MRI --fixed-point
+python lenet/FixedPoint64/inference.py --infer Brain_MRI --floating-point
 ```
 
 Other valid `--infer` values are:
 
 - `MNIST`
 - `CIFAR10`
-- `Brain-MRI`
+- `Brain_MRI`
 
 ### 3. Benchmarks
 
@@ -369,21 +369,21 @@ python lenet/benchmark.py
 Benchmark one dataset only:
 
 ```bash
-python lenet/benchmark.py --bench Brain-MRI
+python lenet/benchmark.py --bench Brain_MRI
 ```
 
 Benchmark a limited number of test samples:
 
 ```bash
-python lenet/benchmark.py --bench Brain-MRI --num_data 100
+python lenet/benchmark.py --bench Brain_MRI --num_data 100
 ```
 
 Benchmark one execution mode only:
 
 ```bash
-python lenet/benchmark.py --bench Brain-MRI --mode int
-python lenet/benchmark.py --bench Brain-MRI --mode fixed-point
-python lenet/benchmark.py --bench Brain-MRI --mode floating-point
+python lenet/benchmark.py --bench Brain_MRI --mode int
+python lenet/benchmark.py --bench Brain_MRI --mode fixed-point
+python lenet/benchmark.py --bench Brain_MRI --mode floating-point
 ```
 
 ## Running U-Net Experiments
@@ -463,7 +463,7 @@ Train the supported datasets:
 ```bash
 python resnet/resnet18.py --train_data MNIST --in_channels 1
 python resnet/resnet18.py --train_data CIFAR10 --in_channels 3
-python resnet/resnet18.py --train_data Brain-MRI --in_channels 1
+python resnet/resnet18.py --train_data Brain_MRI --in_channels 1
 ```
 
 ### 2. Random Test-Sample Checks
@@ -471,24 +471,24 @@ python resnet/resnet18.py --train_data Brain-MRI --in_channels 1
 INT8 path:
 
 ```bash
-python resnet/INT8/inference.py --infer Brain-MRI
-python resnet/INT8/inference.py --infer Brain-MRI --int
-python resnet/INT8/inference.py --infer Brain-MRI --floating-point
+python resnet/INT8/inference.py --infer Brain_MRI
+python resnet/INT8/inference.py --infer Brain_MRI --int
+python resnet/INT8/inference.py --infer Brain_MRI --floating-point
 ```
 
 64-bit fixed-point path:
 
 ```bash
-python resnet/FixedPoint64/inference.py --infer Brain-MRI
-python resnet/FixedPoint64/inference.py --infer Brain-MRI --fixed-point
-python resnet/FixedPoint64/inference.py --infer Brain-MRI --floating-point
+python resnet/FixedPoint64/inference.py --infer Brain_MRI
+python resnet/FixedPoint64/inference.py --infer Brain_MRI --fixed-point
+python resnet/FixedPoint64/inference.py --infer Brain_MRI --floating-point
 ```
 
 Other valid `--infer` values are:
 
 - `MNIST`
 - `CIFAR10`
-- `Brain-MRI`
+- `Brain_MRI`
 
 ### 3. Benchmarks
 
@@ -503,21 +503,21 @@ python resnet/benchmark.py
 Benchmark one dataset:
 
 ```bash
-python resnet/benchmark.py --bench Brain-MRI
+python resnet/benchmark.py --bench Brain_MRI
 ```
 
 Benchmark a fixed number of test images:
 
 ```bash
-python resnet/benchmark.py --bench Brain-MRI --num_data 100
+python resnet/benchmark.py --bench Brain_MRI --num_data 100
 ```
 
 Benchmark a single execution mode:
 
 ```bash
-python resnet/benchmark.py --bench Brain-MRI --mode int
-python resnet/benchmark.py --bench Brain-MRI --mode fixed-point
-python resnet/benchmark.py --bench Brain-MRI --mode floating-point
+python resnet/benchmark.py --bench Brain_MRI --mode int
+python resnet/benchmark.py --bench Brain_MRI --mode fixed-point
+python resnet/benchmark.py --bench Brain_MRI --mode floating-point
 ```
 
 ## Notes

@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST" "MNIST" "NIH-CHEST")
+ALL_DATASETS=("CIFAR10" "Brain_MRI" "OCTMNIST" "OrganAMNIST" "BloodMNIST" "PneumoniaMNIST" "MNIST")
 ALL_MODES=("fp32" "int32")
 ALL_ACTIVATIONS=("relu" "gelu" "leaky_relu")
 
@@ -120,19 +120,19 @@ run_mode() {
 	local act="$3"
 	case "$mode" in
 		fp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fp32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fp32
 			;;
 		int8)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode int
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode int
 			;;
 		int32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode int32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode int32
 			;;
 		fxp32)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fxp32
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fxp32
 			;;
 		fxp64)
-			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} ${BATCH_SIZE_ARG} --mode fxp64
+			python3 benchmark.py --bench "$ds" --activation "$act" ${NUM_DATA_ARG} --mode fxp64
 			;;
 		*)
 			echo "Unknown mode: $mode" >&2

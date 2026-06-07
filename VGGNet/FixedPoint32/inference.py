@@ -37,10 +37,8 @@ def _resolve_infer_config(infer_data: str):
         return {"display": "MNIST", "setup_fn": train_mod.setup_MNIST, "model": VGG19(10, 1), "model_path": "best_vgg19_mnist.pth", "is_multilabel": False}
     if name in ("CIFR10", "CIFAR10"):
         return {"display": "CIFAR10", "setup_fn": train_mod.setup_CIFAR10, "model": VGG19(10, 3), "model_path": "best_vgg19_cifar10.pth", "is_multilabel": False}
-    if name == "BRAIN-MRI":
-        return {"display": "Brain-MRI", "setup_fn": train_mod.setup_Brain_MRI, "model": VGG19(4, 1), "model_path": "best_vgg19_brain_mri.pth", "is_multilabel": False}
-    if name == "NIH-CHEST":
-        return {"display": "NIH-CHEST", "setup_fn": train_mod.setup_NIH_Chest, "model": VGG19(15, 1), "model_path": "best_vgg19_NIH_Chest_XRay.pth", "is_multilabel": True}
+    if name == "BRAIN_MRI":
+        return {"display": "Brain_MRI", "setup_fn": train_mod.setup_Brain_MRI, "model": VGG19(4, 1), "model_path": "best_vgg19_brain_mri.pth", "is_multilabel": False}
     if name == "OCTMNIST":
         return {"display": "OCTMNIST", "setup_fn": train_mod.setup_OCTMNIST, "model": VGG19(4, 1), "model_path": "best_vgg19_octmnist.pth", "is_multilabel": False}
     if name == "BLOODMNIST":
@@ -152,8 +150,6 @@ def main(infer_data: str):
     # Grab a pseudo-random image for inference testing
     c = 3 if "CIFAR" in dataset_display or "BLOOD" in dataset_display else 1
     image_tensor = torch.randn(1, c, 32, 32)
-    if dataset_display == "NIH-CHEST":
-        image_tensor = torch.randn(1, 1, 224, 224)
 
     # Float baseline
     with torch.no_grad():

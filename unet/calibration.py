@@ -70,7 +70,7 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 		return "Skin-Lesion"
 	if key == "FLOOD":
 		return "Flood"
-	if key in {"BRAIN-MRI-SEG", "BRAIN-MRI", "BRAINMRISEG"}:
+	if key in {"BRAIN-MRI-SEG", "BRAIN_MRI", "BRAINMRISEG"}:
 		return "Brain-MRI-Seg"
 	if key == "BUSI":
 		return "BUSI"

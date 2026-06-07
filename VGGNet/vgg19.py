@@ -18,8 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
 DATA_MNIST_DIR = os.path.join(DATA_ROOT, "MNIST")
 DATA_CIFAR10_DIR = os.path.join(DATA_ROOT, "CIFAR10")
-DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain-MRI")
-DATA_NIH_CHEST_XRAY_DIR = os.path.join(DATA_ROOT, "NIH-CHEST")
+DATA_BRAIN_MRI_DIR = os.path.join(DATA_ROOT, "Brain_MRI")
 DATA_OCTMNIST_DIR = os.path.join(DATA_ROOT, "OCTMNIST")
 DATA_BLOODMNIST_DIR = os.path.join(DATA_ROOT, "BloodMNIST")
 DATA_ORGANAMNIST_DIR = os.path.join(DATA_ROOT, "OrganAMNIST")
@@ -102,13 +101,12 @@ optimizer = None
 scheduler = None
 
 
-# Note: MNIST and Brain-MRI resized to 32x32 to prevent spatial collapse 
+# Note: MNIST and Brain_MRI resized to 32x32 to prevent spatial collapse 
 # through the 5 MaxPool layers of VGG19.
 PREPROCESS_SPECS = {
     "MNIST": {"channels": 1, "height": 32, "width": 32},
     "CIFAR10": {"channels": 3, "height": 32, "width": 32},
-    "BRAIN-MRI": {"channels": 1, "height": 32, "width": 32},
-    "NIH-CHEST": {"channels": 1, "height": 224, "width": 224},
+    "BRAIN_MRI": {"channels": 1, "height": 32, "width": 32},
     "OCTMNIST": {"channels": 1, "height": 32, "width": 32},
     "BLOODMNIST": {"channels": 3, "height": 32, "width": 32},
     "ORGANAMNIST": {"channels": 1, "height": 32, "width": 32},
@@ -396,125 +394,11 @@ def setup_Brain_MRI(batch_size: int = 64):
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
 
-    validate_loader_preprocessing(train_loader, "Brain-MRI", stage="training")
-    validate_loader_preprocessing(test_loader, "Brain-MRI", stage="training")
+    validate_loader_preprocessing(train_loader, "Brain_MRI", stage="training")
+    validate_loader_preprocessing(test_loader, "Brain_MRI", stage="training")
 
     return train_dataset
 
-
-class NIHChestDataset(Dataset):
-    def __init__(self, image_list, data_dir, csv_file, transform=None):
-        self.image_list = image_list
-        self.data_dir = data_dir
-        self.transform = transform
-        self.labels = {}
-        with open(csv_file, "r") as f:
-            lines = f.readlines()[1:]
-            for line in lines:
-                parts = line.strip().split(",")
-                if len(parts) > 1:
-                    img_name = parts[0]
-                    finding_labels = parts[1]
-                    self.labels[img_name] = finding_labels
-
-        self.all_diseases = [
-            "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration", "Mass", "Nodule",
-            "Pneumonia", "Pneumothorax", "Consolidation", "Edema", "Emphysema", "Fibrosis",
-            "Pleural_Thickening", "Hernia", "No Finding"
-        ]
-        self.disease_to_idx = {disease: idx for idx, disease in enumerate(self.all_diseases)}
-
-    def __len__(self):
-        return len(self.image_list)
-
-    def __getitem__(self, idx):
-        img_name = self.image_list[idx]
-        preprocessed_dir = os.path.join(self.data_dir, "preprocessed_224x224")
-        if os.path.exists(preprocessed_dir):
-            preprocessed_path = os.path.join(preprocessed_dir, img_name)
-            if os.path.exists(preprocessed_path):
-                image = Image.open(preprocessed_path).convert("L")
-            else:
-                image_path = self._find_original_image(img_name)
-                image = Image.open(image_path).convert("L")
-                image = image.resize((224, 224), Image.Resampling.LANCZOS)
-        else:
-            image_path = self._find_original_image(img_name)
-            image = Image.open(image_path).convert("L")
-            image = image.resize((224, 224), Image.Resampling.LANCZOS)
-
-        finding_str = self.labels.get(img_name, "No Finding")
-        diseases = [d.strip() for d in finding_str.split("|")]
-
-        label = torch.zeros(len(self.all_diseases), dtype=torch.float32)
-        for disease in diseases:
-            if disease in self.disease_to_idx:
-                label[self.disease_to_idx[disease]] = 1.0
-
-        if self.transform:
-            image = self.transform(image)
-        else:
-            image = transforms.ToTensor()(image)
-
-        return image, label
-
-    def _find_original_image(self, img_name):
-        for i in range(1, 13):
-            potential_path = os.path.join(self.data_dir, f"images_{i:03d}", "images", img_name)
-            if os.path.exists(potential_path):
-                return potential_path
-        raise FileNotFoundError(f"Image {img_name} not found in any images_xxx/images directory")
-
-
-def setup_NIH_Chest(batch_size: int = 16):
-    global train_loader, val_loader, test_loader
-
-    train_val_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "train_val_list.txt")
-    test_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "test_list.txt")
-    csv_file = os.path.join(DATA_NIH_CHEST_XRAY_DIR, "Data_Entry_2017.csv")
-
-    with open(train_val_file, "r") as f:
-        train_val_images = [line.strip() for line in f.readlines()]
-    with open(test_file, "r") as f:
-        test_images = [line.strip() for line in f.readlines()]
-
-    num_train_val = len(train_val_images)
-    train_size = int(0.8 * num_train_val)
-
-    gen = torch.Generator().manual_seed(42)
-    perm = torch.randperm(num_train_val, generator=gen).tolist()
-
-    train_indices = perm[:train_size]
-    val_indices = perm[train_size:]
-
-    train_images = [train_val_images[i] for i in train_indices]
-    val_images = [train_val_images[i] for i in val_indices]
-
-    train_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomRotation(10),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485,), (0.229,)),
-    ])
-
-    eval_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485,), (0.229,)),
-    ])
-
-    train_dataset = NIHChestDataset(train_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=train_transform)
-    val_dataset = NIHChestDataset(val_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=eval_transform)
-    test_dataset = NIHChestDataset(test_images, DATA_NIH_CHEST_XRAY_DIR, csv_file, transform=eval_transform)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=torch.cuda.is_available())
-
-    validate_loader_preprocessing(train_loader, "NIH-CHEST", stage="training")
-    validate_loader_preprocessing(test_loader, "NIH-CHEST", stage="training")
 
 
 # -----------------------------
@@ -567,7 +451,10 @@ def evaluate(model, dataloader, criterion, is_multilabel=False, is_medmnist=Fals
     elif is_medmnist:
         all_targets = np.concatenate(all_targets)
         all_outputs = np.vstack(all_outputs)
-        auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
+        if all_outputs.shape[1] == 2:
+            auc = roc_auc_score(all_targets, all_outputs[:, 1])
+        else:
+            auc = roc_auc_score(all_targets, all_outputs, multi_class="ovr", average="macro")
         acc = 100.0 * correct / max(total, 1)
         metric_score = (auc, acc)
     else:
@@ -583,7 +470,7 @@ def main(args: argparse.Namespace):
     global model, criterion, optimizer, scheduler, train_loader, val_loader, test_loader
 
     best_val_metric = 0.0
-    num_epochs = 10
+    num_epochs = 1
 
     if args.data_dir == DATA_MNIST_DIR:
         best_model_path = f"best_vgg19_{args.activation}_mnist.pth"
@@ -662,17 +549,6 @@ def main(args: argparse.Namespace):
         scheduler = None
         is_multilabel = False
         is_medmnist = True
-
-    elif args.data_dir == DATA_NIH_CHEST_XRAY_DIR:
-        best_model_path = "best_vgg19_NIH_Chest_XRay.pth"
-        num_epochs = 30
-        setup_NIH_Chest(args.batch_size) 
-        model = VGG19(num_classes=15, in_channels=args.in_channels).to(device)
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-        scheduler = None
-        is_multilabel = True
-        is_medmnist = False
 
     else:
         print(f"Training using default data directory: {DATA_MNIST_DIR}")
@@ -780,20 +656,12 @@ def datasetDownloader(dataset_name: str):
             datasets.MNIST(root=DATA_ROOT, train=True, download=True)
             datasets.MNIST(root=DATA_ROOT, train=False, download=True)
 
-    if dataset_name == "Brain-MRI":
+    if dataset_name == "Brain_MRI":
         if not os.path.exists(DATA_BRAIN_MRI_DIR):
-            print("Downloading Brain-MRI dataset from Kaggle...")
+            print("Downloading Brain_MRI dataset from Kaggle...")
             kagglehub.dataset_download(
                 "masoudnickparvar/brain-tumor-mri-dataset",
                 output_dir=DATA_BRAIN_MRI_DIR,
-            )
-
-    if dataset_name == "NIH-CHEST":
-        if not os.path.exists(DATA_NIH_CHEST_XRAY_DIR):
-            print("Downloading NIH Chest X-Ray dataset from Kaggle...")
-            kagglehub.dataset_download(
-                "nih-chest-xrays/data",
-                output_dir=DATA_NIH_CHEST_XRAY_DIR,
             )
 
     if dataset_name == "CIFAR10":
@@ -850,7 +718,7 @@ if __name__ == "__main__":
         "--train_data",
         type=str,
         default="MNIST",
-        help="Training data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST",
+        help="Training data to use: MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST, PneumoniaMNIST",
     )
     parser.add_argument(
         "--activation",
@@ -873,15 +741,13 @@ if __name__ == "__main__":
     if train_data_key == "MNIST":
         args.data_dir = DATA_MNIST_DIR
         datasetDownloader("MNIST")
-    elif train_data_key == "BRAIN-MRI":
+    elif train_data_key == "BRAIN_MRI":
         args.data_dir = DATA_BRAIN_MRI_DIR
-        datasetDownloader("Brain-MRI")
+        datasetDownloader("Brain_MRI")
     elif train_data_key in ("CIFR10", "CIFAR10"):
         args.data_dir = DATA_CIFAR10_DIR
         datasetDownloader("CIFAR10")
-    elif train_data_key == "NIH-CHEST":
-        args.data_dir = DATA_NIH_CHEST_XRAY_DIR
-        datasetDownloader("NIH-CHEST")
+
     elif train_data_key == "OCTMNIST":
         args.data_dir = DATA_OCTMNIST_DIR
         datasetDownloader("OCTMNIST")
@@ -891,6 +757,9 @@ if __name__ == "__main__":
     elif train_data_key == "ORGANAMNIST":
         args.data_dir = DATA_ORGANAMNIST_DIR
         datasetDownloader("OrganAMNIST")
+    elif train_data_key == "PNEUMONIAMNIST":
+        args.data_dir = DATA_PNEUMONIAMNIST_DIR
+        datasetDownloader("PneumoniaMNIST")
     else:
         print(f"Invalid training data specified. Using default data directory: {DATA_MNIST_DIR}")
         args.data_dir = DATA_MNIST_DIR

@@ -53,7 +53,7 @@ int8_utils = _load_module("lenet_int8_utils", os.path.join(INT8_DIR, "utils.py")
 SUPPORTED_DATASETS = (
 	"MNIST",
 	"CIFAR10",
-	"Brain-MRI",
+	"Brain_MRI",
 	"NIH-CHEST",
 	"OCTMNIST",
 	"BloodMNIST",
@@ -63,25 +63,21 @@ SUPPORTED_DATASETS = (
 
 
 def _normalize_dataset_name(dataset_name: str) -> str:
-	key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
-	if key == "CIFR10":
-		return "CIFAR10"
-	if key == "OCTMNIST":
-		return "OCTMNIST"
-	if key == "BLOODMNIST":
-		return "BloodMNIST"
-	if key == "ORGANAMNIST":
-		return "OrganAMNIST"
-	if key == "PNEUMONIAMNIST":
-		return "PneumoniaMNIST"
-	if key == "BRAIN-MRI":
-		return "Brain-MRI"
-	if key == "NIH-CHEST":
-		return "NIH-CHEST"
+	key = dataset_name.strip().upper().replace(" ", "-")
 	if key == "MNIST":
 		return "MNIST"
-	if key == "CIFAR10":
+	if key == "CIFR10":
 		return "CIFAR10"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
+	if key == "OCTMNIST":
+		return "OCTMNIST"
+	if key == "ORGANAMNIST":
+		return "OrganAMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
 	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 def _activation_label(base_name: str, activation: str) -> str:
@@ -106,13 +102,13 @@ def _dataset_config(dataset_name: str):
 			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_cifar10.pth"),
 			"download_name": "CIFAR10",
 		}
-	if display == "Brain-MRI":
+	if display == "Brain_MRI":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_Brain_MRI,
 			"model": train_mod.MedicalLeNet(num_classes=4, in_channels=1),
 			"model_path": os.path.join(THIS_DIR, "best_lenet5_{activation}_brain_mri.pth"),
-			"download_name": "Brain-MRI",
+			"download_name": "Brain_MRI",
 		}
 	if display == "NIH-CHEST":
 		return {
@@ -347,7 +343,7 @@ def _selected_datasets_from_args(args: argparse.Namespace) -> Iterable[str]:
 	flag_map = [
 		(args.mnist, "MNIST"),
 		(args.cifar10, "CIFAR10"),
-		(args.brain_mri, "Brain-MRI"),
+		(args.brain_mri, "Brain_MRI"),
 		(args.nih_chest, "NIH-CHEST"),
 		(args.octmnist, "OCTMNIST"),
 		(args.bloodmnist, "BloodMNIST"),
@@ -374,15 +370,15 @@ if __name__ == "__main__":
 		"--dataset",
 		type=str,
 		default=None,
-		help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
+		help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
 	)
 	parser.add_argument("--MNIST", dest="mnist", action="store_true", help="Calibrate MNIST")
 	parser.add_argument("--CIFAR10", dest="cifar10", action="store_true", help="Calibrate CIFAR10")
 	parser.add_argument(
-		"--Brain-MRI",
+		"--Brain_MRI",
 		dest="brain_mri",
 		action="store_true",
-		help="Calibrate Brain-MRI",
+		help="Calibrate Brain_MRI",
 	)
 	parser.add_argument(
 		"--NIH-CHEST",

@@ -30,8 +30,7 @@ import vgg19 as train_mod
 SUPPORTED_DATASETS = (
 	"MNIST",
 	"CIFAR10",
-	"Brain-MRI",
-	"NIH-CHEST",
+	"Brain_MRI",
 	"OCTMNIST",
 	"BloodMNIST",
 	"OrganAMNIST",
@@ -66,23 +65,19 @@ def _activation_label(base_name: str, activation: str) -> str:
 
 
 def _normalize_dataset_name(dataset_name: str) -> str:
-	key = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
-	if key == "CIFR10":
-		return "CIFAR10"
-	if key == "BRAIN-MRI":
-		return "Brain-MRI"
-	if key == "NIH-CHEST":
-		return "NIH-CHEST"
+	key = dataset_name.strip().upper().replace(" ", "-")
 	if key == "MNIST":
 		return "MNIST"
-	if key == "CIFAR10":
+	if key == "CIFR10":
 		return "CIFAR10"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
 	if key == "OCTMNIST":
 		return "OCTMNIST"
-	if key == "BLOODMNIST":
-		return "BloodMNIST"
 	if key == "ORGANAMNIST":
 		return "OrganAMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
 	if key == "PNEUMONIAMNIST":
 		return "PneumoniaMNIST"
 	raise ValueError(f"Unknown dataset: {dataset_name}")
@@ -106,22 +101,15 @@ def _dataset_config(dataset_name: str, activation: str):
 			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_cifar10.pth"),
 			"download_name": "CIFAR10",
 		}
-	if display == "Brain-MRI":
+	if display == "Brain_MRI":
 		return {
 			"display": display,
 			"setup_fn": train_mod.setup_Brain_MRI,
 			"model": train_mod.VGG19(num_classes=4, in_channels=1, activation=activation),
 			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_brain_mri.pth"),
-			"download_name": "Brain-MRI",
+			"download_name": "Brain_MRI",
 		}
-	if display == "NIH-CHEST":
-		return {
-			"display": display,
-			"setup_fn": train_mod.setup_NIH_Chest,
-			"model": train_mod.VGG19(num_classes=15, in_channels=1, activation=activation),
-			"model_path": os.path.join(THIS_DIR, f"best_vgg19_{activation}_NIH_Chest_XRay.pth"),
-			"download_name": "NIH-CHEST",
-		}
+
 	if display == "OCTMNIST":
 		return {
 			"display": display,
@@ -222,7 +210,7 @@ def _register_hooks(model: nn.Module, activation: str):
             last_conv_name = f"features_{idx}"
             handles.append(module.register_forward_hook(hook_in(last_conv_name)))
         elif (isinstance(module, nn.ReLU) or isinstance(module, nn.GELU) or isinstance(module, nn.LeakyReLU)) and last_conv_name:
-            handles.append(module.register_forward_hook(hook_out(_activation_label(last_conv_name, activation))))
+            handles.append(module.register_forward_hook(hook_out(last_conv_name)))
             last_conv_name = None
 
     # 2. Hook Adaptive Avg Pool
@@ -254,7 +242,7 @@ def _register_hooks(model: nn.Module, activation: str):
                 handles.append(module.register_forward_hook(hook_out(last_fc_name)))
                 
         elif (isinstance(module, nn.ReLU) or isinstance(module, nn.GELU) or isinstance(module, nn.LeakyReLU)) and last_fc_name:
-            handles.append(module.register_forward_hook(hook_out(_activation_label(last_fc_name, activation))))
+            handles.append(module.register_forward_hook(hook_out(last_fc_name)))
             last_fc_name = None
 
     return handles
@@ -351,8 +339,8 @@ def _selected_datasets_from_args(args: argparse.Namespace) -> Iterable[str]:
 	flag_map = [
 		(args.mnist, "MNIST"),
 		(args.cifar10, "CIFAR10"),
-		(args.brain_mri, "Brain-MRI"),
-		(args.nih_chest, "NIH-CHEST"),
+		(args.brain_mri, "Brain_MRI"),
+
 		(args.octmnist, "OCTMNIST"),
 		(args.bloodmnist, "BloodMNIST"),
 		(args.organamnist, "OrganAMNIST"),
@@ -377,7 +365,7 @@ if __name__ == "__main__":
 		"--dataset",
 		type=str,
 		default=None,
-		help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
+		help="Dataset to calibrate (e.g. MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST). If omitted, calibrate all supported datasets.",
 	)
 	parser.add_argument(
 		"--MNIST",
@@ -392,16 +380,10 @@ if __name__ == "__main__":
 		help="Calibrate the CIFAR10 model",
 	)
 	parser.add_argument(
-		"--Brain-MRI",
+		"--Brain_MRI",
 		dest="brain_mri",
 		action="store_true",
-		help="Calibrate the Brain-MRI model",
-	)
-	parser.add_argument(
-		"--NIH-CHEST",
-		dest="nih_chest",
-		action="store_true",
-		help="Calibrate the NIH-CHEST model",
+		help="Calibrate the Brain_MRI model",
 	)
 	parser.add_argument(
 		"--OCTMNIST",

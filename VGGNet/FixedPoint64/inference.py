@@ -64,9 +64,9 @@ def _resolve_infer_config(infer_data: str):
             "eval_batch_size": 64,
         }
 
-    if name == "BRAIN-MRI":
+    if name == "BRAIN_MRI":
         return {
-            "display": "Brain-MRI",
+            "display": "Brain_MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
             "model": VGG19(num_classes=4, in_channels=1),
             "model_path": "best_vgg19_brain_mri.pth",
@@ -74,15 +74,7 @@ def _resolve_infer_config(infer_data: str):
             "eval_batch_size": 64,
         }
 
-    if name == "NIH-CHEST":
-        return {
-            "display": "NIH-CHEST",
-            "setup_fn": train_mod.setup_NIH_Chest,
-            "model": VGG19(num_classes=15, in_channels=1),
-            "model_path": "best_vgg19_NIH_Chest_XRay.pth",
-            "is_multilabel": True,
-            "eval_batch_size": 8,
-        }
+
 
     if name == "OCTMNIST":
         return {
@@ -468,7 +460,7 @@ if __name__ == "__main__":
         "--infer",
         type=str,
         default="CIFAR10",
-        help=("Inference data to use: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"),
+        help=("Inference data to use: MNIST, CIFAR10, Brain_MRI, OCTMNIST, BloodMNIST, OrganAMNIST"),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(

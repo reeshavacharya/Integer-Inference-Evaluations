@@ -93,7 +93,7 @@ fp32_inference = _load_module(
 BENCHMARK_DATASETS = {
     "MNIST",
     "CIFAR10",
-    "Brain-MRI",
+    "Brain_MRI",
     "NIH-CHEST",
     "OCTMNIST",
     "BloodMNIST",
@@ -132,8 +132,8 @@ def _normalize_bench_name(name: str) -> str:
     name_upper = name.upper()
     if name_upper == "CIFR10":
         return "CIFAR10"
-    if name_upper in ("BRAIN-MRI", "BRAIN_MRI"):
-        return "Brain-MRI"
+    if name_upper == "BRAIN_MRI":
+        return "Brain_MRI"
     if name_upper in ("NIH-CHEST", "NIH_CHEST"):
         return "NIH-CHEST"
     if name_upper == "ORGANAMNIST":
@@ -168,7 +168,7 @@ def _train_dataset_for_checkpoint(dataset_name: str) -> None:
 
     if train_data_flag == "MNIST":
         args.data_dir = train_mod.DATA_MNIST_DIR
-    elif train_data_flag == "Brain-MRI":
+    elif train_data_flag == "Brain_MRI":
         args.data_dir = train_mod.DATA_BRAIN_MRI_DIR
     elif train_data_flag == "NIH-CHEST":
         args.data_dir = train_mod.DATA_NIH_CHEST_XRAY_DIR
@@ -274,7 +274,7 @@ def _compute_auc_for_outputs(targets_np, outputs_np):
             y_true = targets_np.ravel()
         y_score = outputs_np[:, 1]
         return roc_auc_score(y_true, y_score)
-    return roc_auc_score(targets_np, outputs_np, multi_class="ovr", average="macro")
+    return roc_auc_score(targets_np, outputs_np, multi_class="ovr", average="macro", labels=list(range(outputs_np.shape[1])))
 
 
 def _format_metric_value(dataset_name: str, value) -> str:
@@ -743,7 +743,7 @@ def _fxp32_accuracy(
     elif is_medmnist:
         targets = torch.cat(all_targets, dim=0).numpy()
         outputs = torch.cat(all_outputs, dim=0).numpy()
-        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro")
+        auc = roc_auc_score(targets, outputs, multi_class="ovr", average="macro", labels=list(range(outputs.shape[1])))
         acc = 100.0 * correct / max(total, 1)
         return {"AUC": auc, "ACC": acc}
     else:
@@ -811,7 +811,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help=(
-            "Benchmark a single dataset: MNIST, CIFAR10, Brain-MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
+            "Benchmark a single dataset: MNIST, CIFAR10, Brain_MRI, NIH-CHEST, OCTMNIST, BloodMNIST, OrganAMNIST"
         ),
     )
     parser.add_argument(

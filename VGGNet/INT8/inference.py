@@ -20,15 +20,27 @@ from utils import (
 
 
 def _normalize_dataset_name(dataset_name: str) -> str:
-    name = dataset_name.strip().upper().replace("_", "-").replace(" ", "-")
-    if name == "CIFR10":
-        return "CIFAR10"
-    return name
+	key = dataset_name.strip().upper().replace(" ", "-")
+	if key == "MNIST":
+		return "MNIST"
+	if key == "CIFAR10":
+		return "CIFAR10"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
+	if key == "OCTMNIST":
+		return "OCTMNIST"
+	if key == "ORGANAMNIST":
+		return "OrganAMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
+	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 def _resolve_infer_config(infer_data: str):
     name = _normalize_dataset_name(infer_data)
-
+    name = name.upper()
     if name == "MNIST":
         return {
             "display": "MNIST",
@@ -49,24 +61,14 @@ def _resolve_infer_config(infer_data: str):
             "eval_batch_size": 64,
         }
 
-    if name == "BRAIN-MRI":
+    if name == "BRAIN_MRI":
         return {
-            "display": "Brain-MRI",
+            "display": "Brain_MRI",
             "setup_fn": train_mod.setup_Brain_MRI,
             "model": VGG19(num_classes=4, in_channels=1),
             "model_path": os.path.join(VGG_DIR, "best_vgg19_brain_mri.pth"),
             "is_multilabel": False,
             "eval_batch_size": 64,
-        }
-
-    if name == "NIH-CHEST":
-        return {
-            "display": "NIH-CHEST",
-            "setup_fn": train_mod.setup_NIH_Chest,
-            "model": VGG19(num_classes=15, in_channels=1),
-            "model_path": os.path.join(VGG_DIR, "best_vgg19_NIH_Chest_XRay.pth"),
-            "is_multilabel": True,
-            "eval_batch_size": 8,
         }
 
     if name == "OCTMNIST":
@@ -95,6 +97,16 @@ def _resolve_infer_config(infer_data: str):
             "setup_fn": train_mod.setup_OrganAMNIST,
             "model": VGG19(num_classes=11, in_channels=1),
             "model_path": os.path.join(VGG_DIR, "best_vgg19_organamnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    if name == "PNEUMONIAMNIST":
+        return {
+            "display": "PneumoniaMNIST",
+            "setup_fn": train_mod.setup_PneumoniaMNIST,
+            "model": VGG19(num_classes=2, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_pneumoniamnist.pth"),
             "is_multilabel": False,
             "eval_batch_size": 64,
         }
@@ -141,8 +153,7 @@ def main(infer_data: str):
     model_name_map = {
         "MNIST": "best_vgg19_mnist.pth",
         "CIFAR10": "best_vgg19_cifar10.pth",
-        "BRAIN-MRI": "best_vgg19_brain_mri.pth",
-        "NIH-CHEST": "best_vgg19_NIH_Chest_XRay.pth"
+        "BRAIN_MRI": "best_vgg19_brain_mri.pth"
     }
     float_path = os.path.join(VGG_DIR, model_name_map[dataset_key])
     int8_path = float_path.replace(".pth", "_int8.pth")
@@ -157,11 +168,8 @@ def main(infer_data: str):
     
     # Dummy Image (Replace with dataloader for benchmark)
     print(f"\n[1] Generating random {dataset_key} test tensor for inference test...")
-    if dataset_key == "NIH-CHEST":
-        image_tensor = torch.randn(1, 1, 224, 224)
-    else:
-        c = 3 if dataset_key == "CIFAR10" else 1
-        image_tensor = torch.randn(1, c, 32, 32)
+    c = 3 if dataset_key in ["CIFAR10", "BLOODMNIST"] else 1
+    image_tensor = torch.randn(1, c, 32, 32)
 
     integer_start = time.perf_counter()
     

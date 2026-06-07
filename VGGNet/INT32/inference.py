@@ -9,14 +9,102 @@ VGG_DIR = os.path.dirname(THIS_DIR)
 if THIS_DIR not in sys.path: sys.path.insert(0, THIS_DIR)
 if VGG_DIR not in sys.path: sys.path.insert(1, VGG_DIR)
 
-# Temporarily load config resolver from INT8
-sys.path.insert(0, os.path.join(VGG_DIR, "INT8"))
-from inference import _resolve_infer_config
-sys.path.pop(0)
+import vgg19 as train_mod
+from vgg19 import VGG19
+
+def _normalize_dataset_name(dataset_name: str) -> str:
+	key = dataset_name.strip().upper().replace(" ", "-")
+	if key == "MNIST":
+		return "MNIST"
+	if key == "CIFR10":
+		return "CIFAR10"
+	if key == "BRAIN_MRI":
+		return "Brain_MRI"
+	if key == "OCTMNIST":
+		return "OCTMNIST"
+	if key == "ORGANAMNIST":
+		return "OrganAMNIST"
+	if key == "BLOODMNIST":
+		return "BloodMNIST"
+	if key == "PNEUMONIAMNIST":
+		return "PneumoniaMNIST"
+	raise ValueError(f"Unknown dataset: {dataset_name}")
+
+def _resolve_infer_config(infer_data: str):
+    name = _normalize_dataset_name(infer_data)
+
+    if name == "MNIST":
+        return {
+            "display": "MNIST",
+            "setup_fn": train_mod.setup_MNIST,
+            "model": VGG19(num_classes=10, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_mnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "CIFAR10":
+        return {
+            "display": "CIFAR10",
+            "setup_fn": train_mod.setup_CIFAR10,
+            "model": VGG19(num_classes=10, in_channels=3),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_cifar10.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "BRAIN_MRI":
+        return {
+            "display": "Brain_MRI",
+            "setup_fn": train_mod.setup_Brain_MRI,
+            "model": VGG19(num_classes=4, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_brain_mri.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "OCTMNIST":
+        return {
+            "display": "OCTMNIST",
+            "setup_fn": train_mod.setup_OCTMNIST,
+            "model": VGG19(num_classes=4, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_octmnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "BLOODMNIST":
+        return {
+            "display": "BloodMNIST",
+            "setup_fn": train_mod.setup_BloodMNIST,
+            "model": VGG19(num_classes=8, in_channels=3),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_bloodmnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "ORGANAMNIST":
+        return {
+            "display": "OrganAMNIST",
+            "setup_fn": train_mod.setup_OrganAMNIST,
+            "model": VGG19(num_classes=11, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_organamnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+    if name == "PNEUMONIAMNIST":
+        return {
+            "display": "PneumoniaMNIST",
+            "setup_fn": train_mod.setup_PneumoniaMNIST,
+            "model": VGG19(num_classes=2, in_channels=1),
+            "model_path": os.path.join(VGG_DIR, "best_vgg19_pneumoniamnist.pth"),
+            "is_multilabel": False,
+            "eval_batch_size": 64,
+        }
+
+    raise ValueError(f"Unknown dataset config: {name}")
 
 from utils import (
-    quantize_tensor, integer_conv2d, integer_linear, add_bias,
-    downscale_and_cast, quantized_relu, integer_max_pool2d, integer_gelu_lut
+    quantize_tensor, add_bias,
+    downscale_and_cast, quantized_relu, integer_gelu_lut
+)
+from strict_int_ops import (
+    strict_integer_conv2d, strict_integer_linear, strict_integer_max_pool2d
 )
 import torch.nn.functional as F
 
@@ -29,9 +117,9 @@ def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=
     zp_out = layer_data["zp_out"]
 
     if layer_type == "conv":
-        int32_accum = integer_conv2d(q_input, q_w, zp_in, zp_w, stride=1, padding=1)
+        int32_accum = strict_integer_conv2d(q_input, q_w, zp_in, zp_w, stride=1, padding=1)
     else:
-        int32_accum = integer_linear(q_input, q_w, zp_in, zp_w)
+        int32_accum = strict_integer_linear(q_input, q_w, zp_in, zp_w)
 
     int32_accum = add_bias(int32_accum, q_bias)
     q_out = downscale_and_cast(int32_accum, q_M0, shift, zp_out)
@@ -45,7 +133,7 @@ def run_integer_layer(q_input, layer_data, zp_in, layer_type="conv", apply_relu=
             q_out = quantized_relu(q_out, zp_out)
         
     if apply_maxpool:
-        q_out = integer_max_pool2d(q_out, kernel_size=2, stride=2)
+        q_out = strict_integer_max_pool2d(q_out, kernel_size=2, stride=2)
 
     return q_out, layer_data["scale_out"], zp_out
 
@@ -64,11 +152,8 @@ def main(infer_data: str, activation: str):
 
     int32_state = torch.load(int32_path, map_location=device)
     
-    if dataset_key == "NIH-CHEST":
-        image_tensor = torch.randn(1, 1, 224, 224)
-    else:
-        c = 3 if dataset_key == "CIFAR10" else 1
-        image_tensor = torch.randn(1, c, 32, 32)
+    c = 3 if dataset_key in ["CIFAR10", "BLOODMNIST"] else 1
+    image_tensor = torch.randn(1, c, 32, 32)
 
     # 1. Quantize Input to 32-bit
     scale_in = int32_state["meta"]["in_scale"]
@@ -86,7 +171,7 @@ def main(infer_data: str, activation: str):
         
         # Inject LUT into layer_data if GELU
         layer_data = int32_state[layer_name]
-        if apply_relu and activation == "gelu":
+        if activation == "gelu":
             layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
         
         q_x, s_out, z_out = run_integer_layer(
@@ -95,7 +180,13 @@ def main(infer_data: str, activation: str):
         )
 
     # 3. Adaptive Max Pool Bridging
-    q_pooled = F.adaptive_max_pool2d(q_x.to(torch.float32), (7, 7)).to(torch.int32)
+    if q_x.shape[2] == 1 and q_x.shape[3] == 1:
+        q_pooled = q_x.expand(-1, -1, 7, 7)
+    elif q_x.shape[2] == 7 and q_x.shape[3] == 7:
+        q_pooled = q_x
+    else:
+        raise ValueError(f"Unexpected spatial size before classifier: {q_x.shape}")
+        
     q_fc_in = torch.flatten(q_pooled, 1)
 
     # Note: Since there's no arithmetic inside max pool, the output scale/zp remain identical to the input
@@ -111,7 +202,7 @@ def main(infer_data: str, activation: str):
         is_last = (i == len(fc_indices) - 1)
         
         layer_data = int32_state[layer_name]
-        if apply_relu and activation == "gelu":
+        if not is_last and activation == "gelu":
             layer_data["gelu_lut"] = int32_state[f"{layer_name}_gelu_lut"]
             
         q_fc_in, s_out, z_out = run_integer_layer(
