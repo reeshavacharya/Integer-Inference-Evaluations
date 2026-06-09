@@ -1,0 +1,125 @@
+\documentclass{article}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[margin=0.5in]{geometry}
+\begin{document}
+
+\begin{table}[ht]
+\centering
+\caption{Lenet Benchmark Results}
+\begin{tabular}{|l|l|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{Datasets} & \multirow{2}{*}{Metric} & \multicolumn{3}{c|}{ReLU} & \multicolumn{3}{c|}{GELU} \\
+\cline{3-8}
+& & FP32 & INT32 & $\Delta$ & FP32 & INT32 & $\Delta$ \\
+\hline
+MINST & Accuracy\% & 98.928571 & 98.600000 & -0.33\% & 98.928571 & 98.600000 & -0.33\% \\
+\hline
+CIFAR10 & Accuracy\% & 66.283333 & 44.783333 & -32.44\% & 66.283333 & 41.350000 & -37.62\% \\
+\hline
+BRAIN-MRI & Accuracy\% & 94.166667 & 28.194444 & -70.06\% & 94.166667 & 63.750000 & -32.30\% \\
+\hline
+OCTMNIST & AUC & 0.914999 & 0.826979 & -9.62\% & 0.914999 & 0.818021 & -10.60\% \\
+ & Accuracy\% & 67.700000 & 52.400000 & -22.60\% & 67.700000 & 41.800000 & -38.26\% \\
+\hline
+ORGANAMNIST & AUC & 0.974307 & 0.923437 & -5.22\% & 0.974307 & 0.951940 & -2.30\% \\
+ & Accuracy\% & 78.940263 & 55.546181 & -29.64\% & 78.940263 & 70.424120 & -10.79\% \\
+\hline
+BLOODMNIST & AUC & 0.990338 & 0.966821 & -2.37\% & 0.990338 & 0.975535 & -1.49\% \\
+ & Accuracy\% & 89.798305 & 72.405729 & -19.37\% & 89.798305 & 79.859690 & -11.07\% \\
+\hline
+PNEUMONIAMNIST & AUC & 0.960185 & 0.918414 & -4.35\% & 0.960185 & 0.923115 & -3.86\% \\
+ & Accuracy\% & 84.935897 & 88.621795 & +4.34\% & 84.935897 & 73.878205 & -13.02\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Resnet Benchmark Results}
+\begin{tabular}{|l|l|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{Datasets} & \multirow{2}{*}{Metric} & \multicolumn{3}{c|}{ReLU} & \multicolumn{3}{c|}{GELU} \\
+\cline{3-8}
+& & FP32 & INT32 & $\Delta$ & FP32 & INT32 & $\Delta$ \\
+\hline
+MINST & Accuracy\% & 99.042857 & 98.942857 & -0.10\% & 99.242857 & 99.085714 & -0.16\% \\
+\hline
+CIFAR10 & Accuracy\% & 91.800000 & 90.783333 & -1.11\% & 92.700000 & 91.633333 & -1.15\% \\
+\hline
+BRAIN-MRI & Accuracy\% & 95.000000 & 95.000000 & 0.00\% & 94.583333 & 94.027778 & -0.59\% \\
+\hline
+OCTMNIST & AUC & 0.945855 & 0.945214 & -0.07\% & 0.954343 & 0.941204 & -1.38\% \\
+ & Accuracy\% & 72.500000 & 68.100000 & -6.07\% & 73.800000 & 70.800000 & -4.07\% \\
+\hline
+ORGANAMNIST & AUC & 0.996621 & 0.995996 & -0.06\% & 0.995561 & 0.993573 & -0.20\% \\
+ & Accuracy\% & 92.721341 & 91.376983 & -1.45\% & 92.771965 & 87.788278 & -5.37\% \\
+\hline
+BLOODMNIST & AUC & 0.996821 & 0.996354 & -0.05\% & 0.996226 & 0.996239 & +0.00\% \\
+ & Accuracy\% & 94.972230 & 94.679918 & -0.31\% & 94.767612 & 94.679918 & -0.09\% \\
+\hline
+PNEUMONIAMNIST & AUC & 0.947502 & 0.960750 & +1.40\% & 0.939409 & 0.927537 & -1.26\% \\
+ & Accuracy\% & 87.980769 & 88.461538 & +0.55\% & 85.576923 & 85.737179 & +0.19\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Vggnet Benchmark Results}
+\begin{tabular}{|l|l|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{Datasets} & \multirow{2}{*}{Metric} & \multicolumn{3}{c|}{ReLU} & \multicolumn{3}{c|}{GELU} \\
+\cline{3-8}
+& & FP32 & INT32 & $\Delta$ & FP32 & INT32 & $\Delta$ \\
+\hline
+MINST & Accuracy\% & 99.342857 & 99.057143 & -0.29\% & 98.742857 & 95.485714 & -3.30\% \\
+\hline
+CIFAR10 & Accuracy\% & 89.633333 & 87.266667 & -2.64\% & 73.883333 & 28.066667 & -62.01\% \\
+\hline
+BRAIN-MRI & Accuracy\% & 97.222222 & 97.083333 & -0.14\% & 91.388889 & 95.416667 & +4.41\% \\
+\hline
+OCTMNIST & AUC & 0.954594 & 0.547000 & -42.70\% & 0.893204 & 0.813781 & -8.89\% \\
+ & Accuracy\% & 77.000000 & 25.000000 & -67.53\% & 48.000000 & 25.000000 & -47.92\% \\
+\hline
+ORGANAMNIST & AUC & 0.994075 & 0.992945 & -0.11\% & 0.971114 & 0.767683 & -20.95\% \\
+ & Accuracy\% & 92.057599 & 91.973225 & -0.09\% & 70.401620 & 32.658342 & -53.61\% \\
+\hline
+BLOODMNIST & AUC & 0.996463 & 0.996231 & -0.02\% & 0.973329 & 0.995351 & +2.26\% \\
+ & Accuracy\% & 94.446068 & 94.358375 & -0.09\% & 75.562701 & 86.612102 & +14.62\% \\
+\hline
+PNEUMONIAMNIST & AUC & 0.938275 & 0.945661 & +0.79\% & 0.907829 & 0.957051 & +5.42\% \\
+ & Accuracy\% & 84.134615 & 85.096154 & +1.14\% & 87.019231 & 84.935897 & -2.39\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{UNet Benchmark Results}
+\begin{tabular}{|l|l|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{Datasets} & \multirow{2}{*}{Metric} & \multicolumn{3}{c|}{ReLU} & \multicolumn{3}{c|}{GELU} \\
+\cline{3-8}
+& & FP32 & INT32 & $\Delta$ & FP32 & INT32 & $\Delta$ \\
+\hline
+FLOOD & Dice & 0.888351 & 0.885682 & -0.30\% & 0.871386 & 0.565542 & -35.10\% \\
+ & IOU & 0.799129 & 0.794820 & -0.54\% & 0.772086 & 0.394254 & -48.94\% \\
+ & Acc & 91.256188 & 91.113965 & -0.16\% & 90.063792 & 39.425449 & -56.22\% \\
+\hline
+BRAIN-MRI & Dice & 0.625513 & 0.021012 & -96.64\% & 0.753792 & 0.012768 & -98.31\% \\
+ & IOU & 0.455088 & 0.010617 & -97.67\% & 0.604868 & 0.006425 & -98.94\% \\
+ & Acc & 98.990646 & 97.688019 & -1.32\% & 99.422788 & 98.808395 & -0.62\% \\
+\hline
+BUSI & Dice & 0.697593 & 0.609553 & -12.62\% & 0.514866 & 0.014210 & -97.24\% \\
+ & IOU & 0.535618 & 0.438387 & -18.15\% & 0.346679 & 0.007156 & -97.94\% \\
+ & Acc & 95.295830 & 92.469807 & -2.97\% & 90.307693 & 15.227356 & -83.14\% \\
+\hline
+SKIN-LESION & Dice & 0.853432 & 0.038016 & -95.55\% & 0.961943 & 0.147849 & -84.63\% \\
+ & IOU & 0.744336 & 0.019377 & -97.40\% & 0.926676 & 0.079826 & -91.39\% \\
+ & Acc & 89.685059 & 60.376825 & -32.68\% & 97.999866 & 75.687698 & -22.77\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\end{document}
