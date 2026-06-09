@@ -79,17 +79,17 @@ def _normalize_bench_name(name: str) -> str:
     if key == "BUSI": return "BUSI"
     raise ValueError(f"Unknown benchmark dataset: {name}")
 
-def _model_path_for_dataset(dataset_name: str) -> str:
-    if dataset_name == "Skin-Lesion": return "best_unet5_skin_lesion.pth"
-    if dataset_name == "Flood": return "best_unet5_flood.pth"
-    if dataset_name == "Brain-MRI-Seg": return "best_unet5_brain_mri_seg.pth"
-    if dataset_name == "BUSI": return "best_unet5_busi.pth"
+def _model_path_for_dataset(dataset_name: str, activation: str = "relu") -> str:
+    if dataset_name == "Skin-Lesion": return f"best_unet5_{activation}_skin_lesion.pth"
+    if dataset_name == "Flood": return f"best_unet5_{activation}_flood.pth"
+    if dataset_name == "Brain-MRI-Seg": return f"best_unet5_{activation}_brain_mri_seg.pth"
+    if dataset_name == "BUSI": return f"best_unet5_{activation}_busi.pth"
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
-def _ensure_checkpoint(dataset_name: str):
-    model_path = _model_path_for_dataset(dataset_name)
+def _ensure_checkpoint(dataset_name: str, activation: str = "relu"):
+    model_path = _model_path_for_dataset(dataset_name, activation)
     if not os.path.exists(model_path):
-        raise RuntimeError(f"Checkpoint missing for {dataset_name}: {model_path}")
+        raise RuntimeError(f"Checkpoint missing for {dataset_name} ({activation}): {model_path}")
 
 def _get_test_loader(dataset_name: str, batch_size: int = 64):
     _, _, test_loader = train_mod.setup_data(
@@ -97,9 +97,9 @@ def _get_test_loader(dataset_name: str, batch_size: int = 64):
     )
     return test_loader
 
-def _build_model(dataset_name: str) -> torch.nn.Module:
-    model = train_mod.UNet(n_class=1)
-    model_path = _model_path_for_dataset(dataset_name)
+def _build_model(dataset_name: str, activation: str = "relu") -> torch.nn.Module:
+    model = train_mod.UNet(n_class=1, activation=activation) if hasattr(train_mod, 'UNet') and 'activation' in train_mod.UNet.__init__.__code__.co_varnames else train_mod.UNet(n_class=1)
+    model_path = _model_path_for_dataset(dataset_name, activation)
     state = torch.load(model_path, map_location="cpu")
     if len(state) > 0 and list(state.keys())[0].startswith('module.'):
         state = {k[7:]: v for k, v in state.items()}
@@ -153,7 +153,7 @@ def _float_metrics(model: torch.nn.Module, loader, dataset_name: str, num_data: 
 
     return _confusion_to_metrics(tp, tn, fp, fn)
 
-def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int], mode: str):
+def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int], mode: str, activation: str = "relu"):
     """Unified offline runner for both int8 and int32 precision models."""
     total_samples = len(loader.dataset)
     target_samples = total_samples if num_data is None else min(num_data, total_samples)
@@ -171,7 +171,7 @@ def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int],
         return None
 
     # Load State
-    model_name = _model_path_for_dataset(dataset_name)
+    model_name = _model_path_for_dataset(dataset_name, activation)
     state_path = os.path.join(base_dir, model_name.replace(".pth", state_suffix))
     if not os.path.exists(state_path):
         print(f"[-] Missing offline checkpoint: {state_path}. Please run export_{mode}_model.py first.")
@@ -179,7 +179,7 @@ def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int],
     int_state = torch.load(state_path, map_location="cpu")
 
     # Load Calibration
-    calib_filename = f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+    calib_filename = f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
     calib_path = os.path.join(THIS_DIR, "calibration", calib_filename)
     if not os.path.exists(calib_path):
         print(f"[-] Missing calibration: {calib_path}")
@@ -214,69 +214,86 @@ def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int],
             q_x = mod_utils.quantize_tensor(images, scale_in, zp_in, dtype=dtype)
 
         with torch.no_grad():
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e11"], zp_in, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e12"], z, apply_relu=True)
+            act_kwargs = {"apply_activation": True, "activation": activation} if mode == "int32" else {"apply_relu": True}
+            no_act_kwargs = {"apply_activation": False, "activation": "none"} if mode == "int32" else {"apply_relu": False}
+
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e11"], zp_in, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e12"], z, **act_kwargs)
             q_e12, s_e12, z_e12 = q_x, s, z
             B, C, H, W = q_x.shape
-            # Safely upcast to int64 for the max pooling operation, then cast back to uint8/uint32
-            q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
+            if mode == "int32":
+                q_x = q_x.to(torch.int32).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5))
+            else:
+                q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
 
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e21"], z, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e22"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e21"], z, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e22"], z, **act_kwargs)
             q_e22, s_e22, z_e22 = q_x, s, z
             B, C, H, W = q_x.shape
-            q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
+            if mode == "int32":
+                q_x = q_x.to(torch.int32).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5))
+            else:
+                q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
 
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e31"], z, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e32"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e31"], z, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e32"], z, **act_kwargs)
             q_e32, s_e32, z_e32 = q_x, s, z
             B, C, H, W = q_x.shape
-            q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
+            if mode == "int32":
+                q_x = q_x.to(torch.int32).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5))
+            else:
+                q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
 
-
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e41"], z, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e42"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e41"], z, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e42"], z, **act_kwargs)
             q_e42, s_e42, z_e42 = q_x, s, z
             B, C, H, W = q_x.shape
-            q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
+            if mode == "int32":
+                q_x = q_x.to(torch.int32).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5))
+            else:
+                q_x = q_x.to(torch.int64).view(B, C, H // 2, 2, W // 2, 2).amax(dim=(3, 5)).to(dtype)
 
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e51"], z, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e52"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e51"], z, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["e52"], z, **act_kwargs)
 
-            q_x, s_up1, z_up1 = mod_inf.run_integer_layer(q_x, int_state["upconv1"], z, apply_relu=False)
+            q_x, s_up1, z_up1 = mod_inf.run_integer_layer(q_x, int_state["upconv1"], z, **no_act_kwargs)
             s_cat1 = activation_ranges["d11"]["in_scale"]; z_cat1 = activation_ranges["d11"]["in_zero_point"]
             q_x_aligned = _requantize(q_x, z_up1, z_cat1, s_up1, s_cat1)
             q_skip_aligned = _requantize(q_e42, z_e42, z_cat1, s_e42, s_cat1)
-            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d11"], z_cat1, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d12"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d11"], z_cat1, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d12"], z, **act_kwargs)
 
-            q_x, s_up2, z_up2 = mod_inf.run_integer_layer(q_x, int_state["upconv2"], z, apply_relu=False)
+            q_x, s_up2, z_up2 = mod_inf.run_integer_layer(q_x, int_state["upconv2"], z, **no_act_kwargs)
             s_cat2 = activation_ranges["d21"]["in_scale"]; z_cat2 = activation_ranges["d21"]["in_zero_point"]
             q_x_aligned = _requantize(q_x, z_up2, z_cat2, s_up2, s_cat2)
             q_skip_aligned = _requantize(q_e32, z_e32, z_cat2, s_e32, s_cat2)
-            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d21"], z_cat2, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d22"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d21"], z_cat2, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d22"], z, **act_kwargs)
 
-            q_x, s_up3, z_up3 = mod_inf.run_integer_layer(q_x, int_state["upconv3"], z, apply_relu=False)
+            q_x, s_up3, z_up3 = mod_inf.run_integer_layer(q_x, int_state["upconv3"], z, **no_act_kwargs)
             s_cat3 = activation_ranges["d31"]["in_scale"]; z_cat3 = activation_ranges["d31"]["in_zero_point"]
             q_x_aligned = _requantize(q_x, z_up3, z_cat3, s_up3, s_cat3)
             q_skip_aligned = _requantize(q_e22, z_e22, z_cat3, s_e22, s_cat3)
-            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d31"], z_cat3, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d32"], z, apply_relu=True)
+            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d31"], z_cat3, **act_kwargs)
+            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d32"], z, **act_kwargs)
 
-            q_x, s_up4, z_up4 = mod_inf.run_integer_layer(q_x, int_state["upconv4"], z, apply_relu=False)
+            q_x, s_up4, z_up4 = mod_inf.run_integer_layer(q_x, int_state["upconv4"], z, **no_act_kwargs)
             s_cat4 = activation_ranges["d41"]["in_scale"]; z_cat4 = activation_ranges["d41"]["in_zero_point"]
             q_x_aligned = _requantize(q_x, z_up4, z_cat4, s_up4, s_cat4)
             q_skip_aligned = _requantize(q_e12, z_e12, z_cat4, s_e12, s_cat4)
-            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d41"], z_cat4, apply_relu=True)
-            q_x, s, z = mod_inf.run_integer_layer(q_x, int_state["d42"], z, apply_relu=True)
-
-            q_out, final_s, final_z = mod_inf.run_integer_layer(q_x, int_state["outconv"], z, apply_relu=False)
+            q_x, s, z = mod_inf.run_integer_layer(torch.cat([q_x_aligned, q_skip_aligned], dim=1), int_state["d41"], z_cat4, **act_kwargs)
+        if mode == "fp32":
+            logits = model(images)
+            print(f"DEBUG FP32: logits min={logits.min().item():.2f}, max={logits.max().item():.2f}, mean={logits.mean().item():.2f}")
+            b_tp, b_tn, b_fp, b_fn = _accumulate_confusion(logits, masks)
+        else:
+            q_out, final_s, final_z = mod_inf.run_integer_layer(q_x, int_state["outconv"], z, **no_act_kwargs)
 
             q_out_float = q_out.to(torch.float32)
             logits = final_s * (q_out_float - final_z)
 
-        b_tp, b_tn, b_fp, b_fn = _accumulate_confusion(logits, masks)
+            print(f"DEBUG INT32: logits min={logits.min().item():.2f}, max={logits.max().item():.2f}, mean={logits.mean().item():.2f}, z={final_z}")
+            b_tp, b_tn, b_fp, b_fn = _accumulate_confusion(logits, masks)
         tp += b_tp; tn += b_tn; fp += b_fp; fn += b_fn
         seen += images.size(0)
 
@@ -284,64 +301,72 @@ def _run_offline_int_metrics(loader, dataset_name: str, num_data: Optional[int],
 
     return _confusion_to_metrics(tp, tn, fp, fn)
 
-def benchmark(dataset_names=None, num_data: Optional[int] = None, mode: Optional[str] = None):
-    targets = dataset_names or BENCHMARK_DATASETS
-    selected_modes = [mode] if mode is not None else ["fp32", "int8", "int32", "fxp32", "fxp64"]
-    results = {}
-
-    for name in targets:
-        print(f"\n[bench] Dataset: {name}")
-        _ensure_checkpoint(name)
-
-        loader = _get_test_loader(name)
-        model = _build_model(name)
-
-        per_dataset = {}
-        if "fp32" in selected_modes:
-            m = _float_metrics(model, loader, name, num_data)
-            if m: per_dataset["fp32"] = m
-        if "int8" in selected_modes:
-            m = _run_offline_int_metrics(loader, name, num_data, "int8")
-            if m: per_dataset["int8"] = m
-        if "int32" in selected_modes:
-            m = _run_offline_int_metrics(loader, name, num_data, "int32")
-            if m: per_dataset["int32"] = m
-
-        results[name] = per_dataset
-        summary = []
-        for m, vals in per_dataset.items():
-            summary.append(f"{m}(dice={vals['dice']:.4f}, iou={vals['iou']:.4f}, acc={vals['acc']:.4f})")
-        print(f"[bench] {name}: " + " | ".join(summary))
-
-    return results
-
 def _mode_suffix(mode: Optional[str]) -> str:
     return "all_modes" if mode is None else mode.replace("-", "_")
 
-def _results_filename(single_dataset_name: Optional[str], mode: Optional[str]) -> str:
-    mode_part = _mode_suffix(mode)
-    if single_dataset_name is None: return f"benchmark_results_{mode_part}.json"
-    ds_part = single_dataset_name.lower().replace("-", "_")
-    return f"benchmark_results_{ds_part}_{mode_part}.json"
+def benchmark_single(dataset_name: str, num_data: Optional[int], mode: Optional[str], activation: str, batch_size: int = 64):
+    print(f"\n[bench] Dataset: {dataset_name} | Activation: {activation}")
+    try:
+        _ensure_checkpoint(dataset_name, activation)
+    except RuntimeError as e:
+        print(f"[-] {e}")
+        return None
+
+    loader = _get_test_loader(dataset_name, batch_size)
+    model = _build_model(dataset_name, activation)
+    selected_modes = [mode] if mode is not None else ["fp32", "int8", "int32", "fxp32", "fxp64"]
+    
+    per_dataset = {}
+    if "fp32" in selected_modes:
+        m = _float_metrics(model, loader, dataset_name, num_data)
+        if m: per_dataset["fp32"] = m
+    if "int8" in selected_modes:
+        m = _run_offline_int_metrics(loader, dataset_name, num_data, "int8", activation)
+        if m: per_dataset["int8"] = m
+    if "int32" in selected_modes:
+        m = _run_offline_int_metrics(loader, dataset_name, num_data, "int32", activation)
+        if m: per_dataset["int32"] = m
+
+    summary = []
+    for m, vals in per_dataset.items():
+        summary.append(f"{m}(dice={vals['dice']:.4f}, iou={vals['iou']:.4f}, acc={vals['acc']:.4f})")
+    print(f"[bench] {dataset_name} ({activation}): " + " | ".join(summary))
+
+    return per_dataset
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bench", type=str, default=None, help="Benchmark a single dataset")
     parser.add_argument("--num_data", type=int, default=None, help="Number of test samples")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for benchmark test loader")
     parser.add_argument("--mode", type=str, choices=["fp32", "int8", "int32", "fxp32", "fxp64"], default=None)
+    parser.add_argument("--activation", type=str, default=None, choices=["relu", "gelu", "leaky_relu"])
     args = parser.parse_args()
 
     single_name = _normalize_bench_name(args.bench) if args.bench else None
-    targets = [single_name] if single_name else None
+    targets = [single_name] if single_name else BENCHMARK_DATASETS
+    target_activations = [args.activation] if args.activation else ["relu", "gelu", "leaky_relu"]
 
-    metrics = benchmark(dataset_names=targets, num_data=args.num_data, mode=args.mode)
-    results_file = _results_filename(single_name, args.mode)
-    with open(results_file, "w") as f:
-        json.dump(metrics, f, indent=2)
+    results_base_dir = os.path.join(THIS_DIR, "benchmark-results")
+    os.makedirs(results_base_dir, exist_ok=True)
 
-    print(f"\nSaved {results_file} with:")
-    for ds, vals in metrics.items():
-        summary = []
-        for m, m_dict in vals.items():
-            summary.append(f"{m}(dice={m_dict['dice']:.4f}, iou={m_dict['iou']:.4f}, acc={m_dict['acc']:.4f})")
-        print(f"  {ds}: " + " | ".join(summary))
+    mode_part = _mode_suffix(args.mode)
+
+    for dataset_name in targets:
+        ds_part = dataset_name.lower().replace(" ", "-")
+        ds_dir = os.path.join(results_base_dir, ds_part)
+        os.makedirs(ds_dir, exist_ok=True)
+
+        for activation in target_activations:
+            metrics = benchmark_single(dataset_name, args.num_data, args.mode, activation, args.batch_size)
+            
+            if metrics:
+                results_file = os.path.join(ds_dir, f"benchmark_results_{activation}_{mode_part}.json")
+                with open(results_file, "w") as f:
+                    json.dump(metrics, f, indent=2)
+                
+                print(f"\nSaved {results_file} with:")
+                summary = []
+                for m, m_dict in metrics.items():
+                    summary.append(f"{m}(dice={m_dict['dice']:.4f}, iou={m_dict['iou']:.4f}, acc={m_dict['acc']:.4f})")
+                print(f"  {dataset_name} ({activation}): " + " | ".join(summary))

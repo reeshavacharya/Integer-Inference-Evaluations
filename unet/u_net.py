@@ -2,7 +2,8 @@ import argparse
 import os
 import cv2
 import random
-from torch import nn, relu
+from torch import nn
+import torch.nn.functional as F
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
 from PIL import Image, ImageChops
@@ -25,8 +26,9 @@ print(f"Using device: {device}")
 
 
 class UNet(nn.Module):
-    def __init__(self, n_class):
+    def __init__(self, n_class, activation="relu"):
         super().__init__()
+        self.activation = activation
 
         # Encoder
         # In the encoder, convolutional layers with the Conv2d function are used to extract features from the input image.
@@ -76,47 +78,57 @@ class UNet(nn.Module):
         # Output layer
         self.outconv = nn.Conv2d(64, n_class, kernel_size=1)
 
+    def act(self, x):
+        if self.activation == "relu":
+            return F.relu(x)
+        elif self.activation == "gelu":
+            return F.gelu(x)
+        elif self.activation == "leaky_relu":
+            return F.leaky_relu(x, negative_slope=1.0)
+        else:
+            raise ValueError(f"Unsupported activation: {self.activation}")
+
     def forward(self, x):
         # Encoder
-        xe11 = relu(self.e11(x))
-        xe12 = relu(self.e12(xe11))
+        xe11 = self.act(self.e11(x))
+        xe12 = self.act(self.e12(xe11))
         xp1 = self.pool1(xe12)
 
-        xe21 = relu(self.e21(xp1))
-        xe22 = relu(self.e22(xe21))
+        xe21 = self.act(self.e21(xp1))
+        xe22 = self.act(self.e22(xe21))
         xp2 = self.pool2(xe22)
 
-        xe31 = relu(self.e31(xp2))
-        xe32 = relu(self.e32(xe31))
+        xe31 = self.act(self.e31(xp2))
+        xe32 = self.act(self.e32(xe31))
         xp3 = self.pool3(xe32)
 
-        xe41 = relu(self.e41(xp3))
-        xe42 = relu(self.e42(xe41))
+        xe41 = self.act(self.e41(xp3))
+        xe42 = self.act(self.e42(xe41))
         xp4 = self.pool4(xe42)
 
-        xe51 = relu(self.e51(xp4))
-        xe52 = relu(self.e52(xe51))
+        xe51 = self.act(self.e51(xp4))
+        xe52 = self.act(self.e52(xe51))
 
         # Decoder
         xu1 = self.upconv1(xe52)
         xu11 = torch.cat([xu1, xe42], dim=1)
-        xd11 = relu(self.d11(xu11))
-        xd12 = relu(self.d12(xd11))
+        xd11 = self.act(self.d11(xu11))
+        xd12 = self.act(self.d12(xd11))
 
         xu2 = self.upconv2(xd12)
         xu22 = torch.cat([xu2, xe32], dim=1)
-        xd21 = relu(self.d21(xu22))
-        xd22 = relu(self.d22(xd21))
+        xd21 = self.act(self.d21(xu22))
+        xd22 = self.act(self.d22(xd21))
 
         xu3 = self.upconv3(xd22)
         xu33 = torch.cat([xu3, xe22], dim=1)
-        xd31 = relu(self.d31(xu33))
-        xd32 = relu(self.d32(xd31))
+        xd31 = self.act(self.d31(xu33))
+        xd32 = self.act(self.d32(xd31))
 
         xu4 = self.upconv4(xd32)
         xu44 = torch.cat([xu4, xe12], dim=1)
-        xd41 = relu(self.d41(xu44))
-        xd42 = relu(self.d42(xd41))
+        xd41 = self.act(self.d41(xu44))
+        xd42 = self.act(self.d42(xd41))
 
         # Output layer
         out = self.outconv(xd42)
@@ -503,6 +515,8 @@ def evaluate(model, dataloader, criterion, threshold: float = 0.5):
 def main(args: argparse.Namespace):
     global model, criterion, optimizer, scheduler
 
+    print(f"\n--- Starting UNet Training | Dataset: {args.train_data} | Activation: {args.activation} ---\n")
+
     def compute_positive_class_weight(seg_dataset: SegmentationDataset):
         total_pos = 0.0
         total_pix = 0.0
@@ -524,26 +538,26 @@ def main(args: argparse.Namespace):
     is_busi = False
 
     if args.data_dir == DATA_SKIN_LESION_DIR:
-        best_model_path = "best_unet5_skin_lesion.pth"
+        best_model_path = f"best_unet5_{args.activation}_skin_lesion.pth"
         setup_data(
             train_data="Skin-Lesion",
             batch_size=args.batch_size,
             image_size=args.image_size,
         )
-        model = UNet(n_class=1).to(device)
+        model = UNet(n_class=1, activation=args.activation).to(device)
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=min(args.learning_rate, 1e-4))
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="max", factor=0.5, patience=5
         )
     elif args.data_dir == DATA_FLOOD_DIR:
-        best_model_path = "best_unet5_flood.pth"
+        best_model_path = f"best_unet5_{args.activation}_flood.pth"
         setup_data(
             train_data="Flood",
             batch_size=args.batch_size,
             image_size=args.image_size,
         )
-        model = UNet(n_class=1).to(device)
+        model = UNet(n_class=1, activation=args.activation).to(device)
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -552,13 +566,13 @@ def main(args: argparse.Namespace):
 
     elif args.data_dir == DATA_BRAIN_MRI_SEG_DIR:
         is_brain_mri_seg = True
-        best_model_path = "best_unet5_brain_mri_seg.pth"
+        best_model_path = f"best_unet5_{args.activation}_brain_mri_seg.pth"
         setup_data(
             train_data="Brain-MRI-Seg",
             batch_size=args.batch_size,
             image_size=args.image_size,
         )
-        model = UNet(n_class=1).to(device)
+        model = UNet(n_class=1, activation=args.activation).to(device)
 
         raw_brain_pos_weight = compute_positive_class_weight(train_loader.dataset).item()
         capped_brain_pos_weight = max(1.0, min(raw_brain_pos_weight, 20.0))
@@ -588,13 +602,13 @@ def main(args: argparse.Namespace):
         )
     elif args.data_dir == DATA_BUSI_DIR:
         is_busi = True
-        best_model_path = "best_unet5_busi.pth"
+        best_model_path = f"best_unet5_{args.activation}_busi.pth"
         setup_data(
             train_data="BUSI",
             batch_size=args.batch_size,
             image_size=args.image_size,
         )
-        model = UNet(n_class=1).to(device)
+        model = UNet(n_class=1, activation=args.activation).to(device)
         raw_busi_pos_weight = compute_positive_class_weight(train_loader.dataset).item()
         capped_busi_pos_weight = max(1.0, min(raw_busi_pos_weight, 6.0))
         busi_pos_weight = torch.tensor(capped_busi_pos_weight, device=device)
@@ -756,6 +770,13 @@ if __name__ == "__main__":
         default="Skin-Lesion",
         help="Training data to use",
     )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="all",
+        choices=["all", "relu", "gelu", "leaky_relu"],
+        help="Activation function to use (or 'all' to run sequentially)",
+    )
 
     args = parser.parse_args()
 
@@ -774,4 +795,9 @@ if __name__ == "__main__":
     else:
         print(f"Invalid training data specified. Using default data directory: {DATA_SKIN_LESION_DIR}")
         args.data_dir = DATA_SKIN_LESION_DIR
-    main(args)
+        
+    activations_to_run = ["relu", "gelu", "leaky_relu"] if args.activation == "all" else [args.activation]
+
+    for act in activations_to_run:
+        args.activation = act
+        main(args)

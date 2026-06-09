@@ -77,13 +77,13 @@ def _normalize_dataset_name(dataset_name: str) -> str:
 	raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
-def _dataset_config(dataset_name: str):
+def _dataset_config(dataset_name: str, activation: str):
 	display = _normalize_dataset_name(dataset_name)
 	model_path_map = {
-		"Skin-Lesion": "best_unet5_skin_lesion.pth",
-		"Flood": "best_unet5_flood.pth",
-		"Brain-MRI-Seg": "best_unet5_brain_mri_seg.pth",
-		"BUSI": "best_unet5_busi.pth",
+		"Skin-Lesion": f"best_unet5_{activation}_skin_lesion.pth",
+		"Flood": f"best_unet5_{activation}_flood.pth",
+		"Brain-MRI-Seg": f"best_unet5_{activation}_brain_mri_seg.pth",
+		"BUSI": f"best_unet5_{activation}_busi.pth",
 	}
 
 	if display not in model_path_map:
@@ -92,13 +92,30 @@ def _dataset_config(dataset_name: str):
 	return {
 		"display": display,
 		"setup_fn": train_mod.setup_data,
-		"model": train_mod.UNet(n_class=1),
+		"model": train_mod.UNet(n_class=1, activation=activation),
 		"model_path": os.path.join(THIS_DIR, model_path_map[display]),
 		"download_name": display,
 	}
 
 
-def _resolve_test_loader(cfg, batch_size: int, image_size: int):
+def _sample_loader_dataset(loader: torch.utils.data.DataLoader, max_samples: int = 1000, seed: int = 42):
+	dataset = loader.dataset
+	sample_count = min(max_samples, len(dataset))
+	if sample_count == len(dataset):
+		return loader
+
+	generator = torch.Generator().manual_seed(seed)
+	indices = torch.randperm(len(dataset), generator=generator)[:sample_count].tolist()
+	sampled_dataset = torch.utils.data.Subset(dataset, indices)
+	return torch.utils.data.DataLoader(
+		sampled_dataset,
+		batch_size=loader.batch_size,
+		shuffle=False,
+		num_workers=getattr(loader, "num_workers", 0),
+		pin_memory=getattr(loader, "pin_memory", False),
+	)
+
+def _get_train_loader(cfg, batch_size: int, image_size: int):
 	train_mod.train_loader = None
 	train_mod.val_loader = None
 	train_mod.test_loader = None
@@ -113,23 +130,20 @@ def _resolve_test_loader(cfg, batch_size: int, image_size: int):
 	if (
 		isinstance(setup_result, tuple)
 		and len(setup_result) >= 3
-		and hasattr(setup_result[2], "dataset")
+		and hasattr(setup_result[0], "dataset")
 	):
-		loader = setup_result[2]
-		if len(loader.dataset) == 0:
-			raise RuntimeError(f"Test split is empty for dataset: {cfg['display']}")
+		loader = _sample_loader_dataset(setup_result[0], max_samples=1000)
 		return loader
 
-	if train_mod.test_loader is not None:
-		if len(train_mod.test_loader.dataset) == 0:
-			raise RuntimeError(f"Test split is empty for dataset: {cfg['display']}")
-		return train_mod.test_loader
+	if train_mod.train_loader is not None:
+		sampled_loader = _sample_loader_dataset(train_mod.train_loader, max_samples=1000)
+		return sampled_loader
 
-	raise RuntimeError(f"Could not resolve test loader for dataset: {cfg['display']}")
+	raise RuntimeError(f"Could not resolve train loader for dataset: {cfg['display']}")
 
 
-def _output_file_name(dataset_name: str) -> str:
-	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_calibration.json"
+def _output_file_name(dataset_name: str, activation: str) -> str:
+	return f"{dataset_name.lower().replace(' ', '_').replace('-', '_')}_{activation}_calibration.json"
 
 
 # -----------------------------------
@@ -171,13 +185,16 @@ def _register_and_collect(model: torch.nn.Module):
     return register_hooks(model)
 
 
-def main(dataset_name: str, batch_size: int = 1, image_size: int = 256, out_dir: Optional[str] = None):
-	cfg = _dataset_config(dataset_name)
+def main(dataset_name: str, batch_size: int = 1, image_size: int = 256, out_dir: Optional[str] = None, activation: str = "relu"):
+	cfg = _dataset_config(dataset_name, activation)
 	display = cfg["display"]
+	
+	if not os.path.exists(cfg["model_path"]):
+		raise FileNotFoundError(f"Model weights not found for {display} with activation '{activation}'. Please train the model first. Expected: {cfg['model_path']}")
 
-	print(f"[calib] Dataset: {display} - preparing test split (batch_size={batch_size}, image_size={image_size})")
+	print(f"[calib] Dataset: {display} | Activation: {activation} - preparing train split (batch_size={batch_size}, image_size={image_size})")
 	train_mod.dataset_downloader(cfg["download_name"])
-	loader = _resolve_test_loader(cfg, batch_size=batch_size, image_size=image_size)
+	loader = _get_train_loader(cfg, batch_size=batch_size, image_size=image_size)
 
 	model = cfg["model"]
 	state = torch.load(cfg["model_path"], map_location="cpu")
@@ -236,12 +253,13 @@ def main(dataset_name: str, batch_size: int = 1, image_size: int = 256, out_dir:
 
 	out_dir = out_dir or os.path.join(THIS_DIR, "calibration")
 	os.makedirs(out_dir, exist_ok=True)
-	out_path = os.path.join(out_dir, _output_file_name(display))
+	out_path = os.path.join(out_dir, _output_file_name(display, activation))
 	with open(out_path, "w") as f:
 		json.dump(
 			{
 				"dataset": display,
-				"split": "test",
+				"split": "train_sampled",
+				"activation": activation,
 				"layers": calib,
 			},
 			f,
@@ -278,11 +296,20 @@ if __name__ == "__main__":
 		help="Optional output directory for the calibration JSON",
 	)
 
+	parser.add_argument(
+		"--activation",
+		type=str,
+		default=None,
+		choices=["relu", "gelu", "leaky_relu"],
+		help="Activation function the model was trained with"
+	)
+
 	args = parser.parse_args()
 
-	if args.train_data is None:
-		for dataset_name in SUPPORTED_DATASETS:
-			print(f"\n[calib] === Calibrating dataset: {dataset_name} ===")
-			main(dataset_name, batch_size=args.batch_size, image_size=args.image_size, out_dir=args.out_dir)
-	else:
-		main(args.train_data, batch_size=args.batch_size, image_size=args.image_size, out_dir=args.out_dir)
+	targets = [args.train_data] if args.train_data else SUPPORTED_DATASETS
+	activations = [args.activation] if args.activation else ["relu", "gelu", "leaky_relu"]
+	
+	for dataset_name in targets:
+		for activation in activations:
+			print(f"\n[calib] === Calibrating dataset: {dataset_name} | Activation: {activation} ===")
+			main(dataset_name, batch_size=args.batch_size, image_size=args.image_size, out_dir=args.out_dir, activation=activation)
